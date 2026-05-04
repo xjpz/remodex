@@ -64,7 +64,7 @@ extension CodexService {
         }
     }
 
-    // Decodes thread/read(includeTurns=true) payload into chronological message timeline.
+    // Decodes app-server turn arrays into a chronological message timeline.
     func decodeMessagesFromThreadRead(threadId: String, threadObject: [String: JSONValue]) -> [CodexMessage] {
         let baseDate = decodeHistoryBaseDate(from: threadObject)
         let turns = threadObject["turns"]?.arrayValue ?? []
@@ -76,7 +76,7 @@ extension CodexService {
             guard let turnObject = turnValue.objectValue else { continue }
             let turnID = turnObject["id"]?.stringValue
             let turnTimestamp = decodeHistoryTimestamp(from: turnObject)
-            let turnCompleted = isCompletedHistoryTurn(turnObject)
+            let turnCompleted = historyTurnTerminalState(turnObject) == .completed
             let items = turnObject["items"]?.arrayValue ?? []
 
             for itemValue in items {
@@ -110,6 +110,7 @@ extension CodexService {
                         to: &result,
                         role: .assistant,
                         kind: .chat,
+                        assistantPhase: normalizedAssistantPhase(itemObject["phase"]?.stringValue),
                         text: decodedText,
                         threadId: threadId,
                         turnId: turnID,
@@ -126,12 +127,30 @@ extension CodexService {
                         to: &result,
                         role: mappedRole,
                         kind: .chat,
+                        assistantPhase: mappedRole == .assistant
+                            ? normalizedAssistantPhase(itemObject["phase"]?.stringValue)
+                            : nil,
                         text: decodedText,
                         threadId: threadId,
                         turnId: turnID,
                         itemId: itemID,
                         createdAt: timestamp,
                         attachments: imageAttachments
+                    )
+
+                case "imagegeneration", "imagegenerationcall", "imagegenerationend", "imageview":
+                    guard let generatedImageText = decodeGeneratedImageMarkdown(from: itemObject) else {
+                        continue
+                    }
+                    appendHistoryMessage(
+                        to: &result,
+                        role: .assistant,
+                        kind: .chat,
+                        text: generatedImageText,
+                        threadId: threadId,
+                        turnId: turnID,
+                        itemId: itemID,
+                        createdAt: timestamp
                     )
 
                 case "reasoning":
@@ -222,6 +241,7 @@ extension CodexService {
                         to: &result,
                         role: .assistant,
                         kind: .chat,
+                        assistantPhase: normalizedAssistantPhase(itemObject["phase"]?.stringValue),
                         text: reviewText,
                         threadId: threadId,
                         turnId: turnID,
@@ -284,6 +304,24 @@ extension CodexService {
                     continue
                 }
             }
+        }
+
+        return Self.historyMessagesMergingGeneratedImageArtifacts(result)
+    }
+
+    // Extracts persisted turn outcomes from canonical history so render grouping survives app relaunch.
+    func decodeTurnTerminalStatesFromThreadRead(_ threadObject: [String: JSONValue]) -> [String: CodexTurnTerminalState] {
+        let turns = threadObject["turns"]?.arrayValue ?? []
+        var result: [String: CodexTurnTerminalState] = [:]
+
+        for turnValue in turns {
+            guard let turnObject = turnValue.objectValue,
+                  let turnID = turnObject["id"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !turnID.isEmpty,
+                  let terminalState = historyTurnTerminalState(turnObject) else {
+                continue
+            }
+            result[turnID] = terminalState
         }
 
         return result
@@ -381,6 +419,45 @@ extension CodexService {
         return ""
     }
 
+    func decodeGeneratedImageMarkdown(from itemObject: [String: JSONValue]) -> String? {
+        let imagePath = firstNonEmptyString([
+            itemObject["saved_path"]?.stringValue,
+            itemObject["savedPath"]?.stringValue,
+            itemObject["path"]?.stringValue,
+            itemObject["file_path"]?.stringValue
+        ])?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let imagePath, Self.isGeneratedImagePath(imagePath) else {
+            return nil
+        }
+
+        return "![Generated image](\(Self.markdownImagePath(imagePath)))"
+    }
+
+    nonisolated static func isGeneratedImagePath(_ path: String) -> Bool {
+        let lowercased = path.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return lowercased.hasSuffix(".png")
+            || lowercased.hasSuffix(".jpg")
+            || lowercased.hasSuffix(".jpeg")
+            || lowercased.hasSuffix(".gif")
+            || lowercased.hasSuffix(".webp")
+            || lowercased.hasSuffix(".heic")
+            || lowercased.hasSuffix(".heif")
+    }
+
+    nonisolated static func markdownImagePath(_ path: String) -> String {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.contains(")") || trimmed.contains(" ") || trimmed.contains("%") {
+            let escaped = trimmed
+                .replacingOccurrences(of: "%", with: "%25")
+                .replacingOccurrences(of: ">", with: "%3E")
+                .replacingOccurrences(of: ")", with: "%29")
+            return "<\(escaped)>"
+        }
+        return trimmed
+    }
+
     // Extracts user images from history payload and converts them into renderable thumbnail attachments.
     func decodeImageAttachments(from itemObject: [String: JSONValue]) -> [CodexImageAttachment] {
         let contentItems = itemObject["content"]?.arrayValue ?? []
@@ -447,7 +524,7 @@ extension CodexService {
             for index in sorted.indices {
                 sorted[index].orderIndex = CodexMessageOrderCounter.next()
             }
-            return sorted
+            return historyMessagesMergingGeneratedImageArtifacts(sorted)
         }
 
         var merged = existing
@@ -693,7 +770,7 @@ extension CodexService {
         }
 
         merged.sort(by: { $0.orderIndex < $1.orderIndex })
-        return merged
+        return historyMessagesMergingGeneratedImageArtifacts(merged)
     }
 
     // Keeps running-thread reopen bounded to the recent transcript tail so A/B switching
@@ -1137,7 +1214,8 @@ extension CodexService {
 
     nonisolated static func userMessageMetadataLooksCompatible(
         localMessage: CodexMessage,
-        serverMessage: CodexMessage
+        serverMessage: CodexMessage,
+        allowAttachmentCountFallback: Bool = false
     ) -> Bool {
         let localFileMentions = fileMentionsSignature(for: localMessage.fileMentions)
         let serverFileMentions = fileMentionsSignature(for: serverMessage.fileMentions)
@@ -1152,7 +1230,10 @@ extension CodexService {
         if !localAttachments.isEmpty,
            !serverAttachments.isEmpty,
            localAttachments != serverAttachments {
-            return false
+            // Pending image sends can return with a different server attachment identity
+            // even though the user row is the same prompt/image count.
+            return allowAttachmentCountFallback
+                && localMessage.attachments.count == serverMessage.attachments.count
         }
 
         return true
@@ -1165,12 +1246,20 @@ extension CodexService {
     ) -> Bool {
         guard candidate.role == .user,
               candidate.deliveryState != .failed,
-              normalizedMessageText(candidate.text) == normalizedMessageText(message.text),
-              userMessageMetadataLooksCompatible(localMessage: candidate, serverMessage: message) else {
+              normalizedMessageText(candidate.text) == normalizedMessageText(message.text) else {
             return false
         }
 
         let candidateTurnId = normalizedHistoryIdentifier(candidate.turnId)
+        let allowsAttachmentCountFallback = candidate.deliveryState == .pending
+            || candidateTurnId == turnId
+        guard userMessageMetadataLooksCompatible(
+            localMessage: candidate,
+            serverMessage: message,
+            allowAttachmentCountFallback: allowsAttachmentCountFallback
+        ) else {
+            return false
+        }
         return candidateTurnId == nil || candidateTurnId == turnId
     }
 
@@ -1181,7 +1270,11 @@ extension CodexService {
         guard candidate.role == .user,
               candidate.deliveryState == .pending,
               normalizedMessageText(candidate.text) == normalizedMessageText(message.text),
-              userMessageMetadataLooksCompatible(localMessage: candidate, serverMessage: message) else {
+              userMessageMetadataLooksCompatible(
+                localMessage: candidate,
+                serverMessage: message,
+                allowAttachmentCountFallback: true
+              ) else {
             return false
         }
 
@@ -1226,6 +1319,17 @@ extension CodexService {
             .replacingOccurrences(of: "_", with: "")
             .replacingOccurrences(of: "-", with: "")
             .lowercased()
+    }
+
+    func normalizedAssistantPhase(_ rawPhase: String?) -> String? {
+        guard let rawPhase else {
+            return nil
+        }
+        let normalized = rawPhase
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "-", with: "_")
+            .lowercased()
+        return normalized.isEmpty ? nil : normalized
     }
 
     nonisolated static func normalizedCommandExecutionPreviewKey(from text: String) -> String? {
@@ -1275,6 +1379,7 @@ extension CodexService {
         to result: inout [CodexMessage],
         role: CodexMessageRole,
         kind: CodexMessageKind = .chat,
+        assistantPhase: String? = nil,
         text: String,
         threadId: String,
         turnId: String?,
@@ -1297,6 +1402,7 @@ extension CodexService {
                 threadId: threadId,
                 role: role,
                 kind: kind,
+                assistantPhase: role == .assistant ? normalizedAssistantPhase(assistantPhase) : nil,
                 text: text,
                 createdAt: createdAt,
                 turnId: turnId,
@@ -1310,6 +1416,76 @@ extension CodexService {
                 subagentAction: subagentAction
             )
         )
+    }
+
+    // Canonical history may store generated-image artifacts as separate items; the
+    // timeline presents them inside the final assistant answer for that turn.
+    nonisolated static func historyMessagesMergingGeneratedImageArtifacts(_ messages: [CodexMessage]) -> [CodexMessage] {
+        var result = messages
+        let turnIds = Array(Set(result.compactMap(\.turnId)))
+        for turnId in turnIds {
+            let assistantIndices = result.indices.filter { index in
+                result[index].role == .assistant && result[index].turnId == turnId
+            }
+            let imageOnlyIndices = assistantIndices.filter { index in
+                Self.isHistoryGeneratedImageArtifactOnly(result[index].text)
+            }
+            guard !imageOnlyIndices.isEmpty,
+                  let targetIndex = assistantIndices.last(where: { index in
+                      !imageOnlyIndices.contains(index)
+                          && result[index].assistantPhase == "final_answer"
+                  }) else {
+                continue
+            }
+
+            let existingText = result[targetIndex].text
+            let existingImagePaths = Set(AssistantMarkdownImageReferenceParser.references(in: existingText).map(\.path))
+            let imageText = imageOnlyIndices
+                .filter { index in
+                    AssistantMarkdownImageReferenceParser.references(in: result[index].text).contains { reference in
+                        !existingImagePaths.contains(reference.path)
+                    }
+                }
+                .map { result[$0].text.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n\n")
+            guard !imageText.isEmpty else {
+                continue
+            }
+            result[targetIndex].text = [existingText, imageText]
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n\n")
+        }
+
+        let removedIds = Set(result.indices.filter { index in
+            if let turnId = result[index].turnId,
+               Self.isHistoryGeneratedImageArtifactOnly(result[index].text) {
+                return result.contains { candidate in
+                    candidate.id != result[index].id
+                        && candidate.role == .assistant
+                        && candidate.turnId == turnId
+                        && !Self.isHistoryGeneratedImageArtifactOnly(candidate.text)
+                        && AssistantMarkdownImageReferenceParser.references(in: candidate.text).contains { reference in
+                            result[index].text.contains(reference.path)
+                        }
+                }
+            }
+            return false
+        }.map { result[$0].id })
+        return result.filter { !removedIds.contains($0.id) }
+    }
+
+    nonisolated static func isHistoryGeneratedImageArtifactOnly(_ text: String) -> Bool {
+        let imageReferences = AssistantMarkdownImageReferenceParser.references(in: text)
+        guard !imageReferences.isEmpty,
+              imageReferences.allSatisfy(\.isCodexGeneratedImage) else {
+            return false
+        }
+        return AssistantMarkdownImageReferenceParser
+            .visibleTextRemovingImageSyntax(from: text)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty
     }
 
     // Parses `data:image/...;base64,...` payloads into raw image bytes.
@@ -1426,6 +1602,10 @@ extension CodexService {
     }
 
     func isCompletedHistoryTurn(_ turnObject: [String: JSONValue]) -> Bool {
+        historyTurnTerminalState(turnObject) == .completed
+    }
+
+    func historyTurnTerminalState(_ turnObject: [String: JSONValue]) -> CodexTurnTerminalState? {
         let statusObject = turnObject["status"]?.objectValue
         let rawStatus = firstNonEmptyString([
             turnObject["status"]?.stringValue,
@@ -1435,11 +1615,7 @@ extension CodexService {
             turnObject["result"]?.stringValue,
         ]) ?? ""
 
-        guard let terminalState = threadTerminalState(from: normalizeThreadStatusType(rawStatus)) else {
-            return false
-        }
-
-        return terminalState == .completed
+        return threadTerminalState(from: normalizeThreadStatusType(rawStatus))
     }
 
     // Parses collabAgentToolCall payloads into a stable summary row the timeline can render.

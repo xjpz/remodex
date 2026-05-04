@@ -6,9 +6,17 @@
 
 import Foundation
 
+private enum ThreadTurnStateSnapshotPolicy {
+    static let recentTurnLimit = 8
+    static let requestTimeoutNanoseconds: UInt64 = 30_000_000_000
+}
+
+private enum ThreadListHydrationPolicy {
+    static let requestTimeoutNanoseconds: UInt64 = 12_000_000_000
+}
+
 extension CodexService {
-    // Keeps sidebar/project loading focused on recent live conversations while
-    // retaining a smaller archived slice for restart/recovery flows.
+    // Polling keeps recent metadata fresh; full list loads are reserved for bootstrap/explicit refresh.
     var recentActiveThreadListLimit: Int { 70 }
     var recentArchivedThreadListLimit: Int { 10 }
 
@@ -53,15 +61,17 @@ extension CodexService {
         isLoadingThreads = true
         defer { isLoadingThreads = false }
 
-        let activeLimit = limit ?? recentActiveThreadListLimit
-        let archivedLimit = limit ?? recentArchivedThreadListLimit
-        let activeThreads = try await fetchServerThreads(limit: activeLimit)
+        // Sidebar metadata must be complete: capping thread/list hides older project chats.
+        async let activeThreadsFetch = fetchServerThreads(limit: limit)
+        async let archivedThreadsFetch = fetchServerThreads(limit: limit, archived: true)
 
-        var archivedThreads: [CodexThread] = []
+        let activeThreads = try await activeThreadsFetch
+        let archivedThreads: [CodexThread]
         do {
-            archivedThreads = try await fetchServerThreads(limit: archivedLimit, archived: true)
+            archivedThreads = try await archivedThreadsFetch
         } catch {
             debugSyncLog("thread/list archived fetch failed (non-fatal): \(error.localizedDescription)")
+            archivedThreads = []
         }
 
         reconcileLocalThreadsWithServer(activeThreads, serverArchivedThreads: archivedThreads)
@@ -105,7 +115,7 @@ extension CodexService {
         let normalizedPreferredProjectPath = CodexThreadStartProjectBinding.normalizedProjectPath(preferredProjectPath)
         // Brand-new chats start from app defaults; per-chat overrides are inherited only on continuation.
         let explicitServiceTier = runtimeOverride?.overridesServiceTier == true
-            ? runtimeOverride?.serviceTierRawValue
+            ? normalizedServiceTierForSelectedModel(runtimeOverride?.serviceTier)?.rawValue
             : runtimeServiceTierForTurn()
         var includesServiceTier = explicitServiceTier != nil
 
@@ -140,6 +150,8 @@ extension CodexService {
                 // render can skip the transient loading state while the empty composer
                 // is already the right answer.
                 resumedThreadIDs.insert(thread.id)
+                hydratedThreadIDs.insert(thread.id)
+                initialTurnsLoadedByThreadID.insert(thread.id)
                 upsertThread(thread, treatAsServerState: true)
                 if let normalizedProjectPath = thread.normalizedProjectPath,
                    CodexThread.projectIconSystemName(for: normalizedProjectPath) == "arrow.triangle.branch" {
@@ -183,9 +195,14 @@ extension CodexService {
         }
 
         let initialThreadId = try await resolveThreadID(threadId)
+        let effectiveCollaborationMode = collaborationModeForOutgoingTurn(
+            threadId: initialThreadId,
+            requestedMode: collaborationMode,
+            preserveExisting: preservePlanSessionState
+        )
         preparePlanSessionForStart(
             threadId: initialThreadId,
-            collaborationMode: collaborationMode,
+            collaborationMode: effectiveCollaborationMode,
             preserveExisting: preservePlanSessionState
         )
 
@@ -206,7 +223,7 @@ extension CodexService {
                     fileMentions: fileMentions,
                     to: continuationThread.id,
                     shouldAppendUserMessage: shouldAppendUserMessage,
-                    collaborationMode: collaborationMode
+                    collaborationMode: effectiveCollaborationMode
                 )
                 activeThreadId = continuationThread.id
                 lastErrorMessage = nil
@@ -223,7 +240,7 @@ extension CodexService {
                 fileMentions: fileMentions,
                 to: initialThreadId,
                 shouldAppendUserMessage: shouldAppendUserMessage,
-                collaborationMode: collaborationMode
+                collaborationMode: effectiveCollaborationMode
             )
         } catch {
             if shouldTreatAsThreadNotFound(error) {
@@ -248,7 +265,7 @@ extension CodexService {
                     fileMentions: fileMentions,
                     to: continuationThread.id,
                     shouldAppendUserMessage: shouldAppendUserMessage,
-                    collaborationMode: collaborationMode
+                    collaborationMode: effectiveCollaborationMode
                 )
                 activeThreadId = continuationThread.id
                 lastErrorMessage = nil
@@ -745,7 +762,12 @@ extension CodexService {
                 params["archived"] = .bool(true)
             }
 
-            let response = try await sendRequest(method: "thread/list", params: .object(params))
+            let response = try await sendRequest(
+                method: "thread/list",
+                params: .object(params),
+                timeoutNanoseconds: ThreadListHydrationPolicy.requestTimeoutNanoseconds,
+                timeoutMessage: "thread/list timed out while syncing chats."
+            )
 
             guard let resultObject = response.result?.objectValue else {
                 throw CodexServiceError.invalidResponse("thread/list response missing payload")
@@ -880,7 +902,22 @@ extension CodexService {
             if let modelIdentifier = requestedSignature.modelIdentifier {
                 params["model"] = .string(modelIdentifier)
             }
-            let response = try await sendRequestWithSandboxFallback(method: "thread/resume", baseParams: params)
+            if supportsTurnPagination {
+                params["excludeTurns"] = .bool(true)
+            }
+            var didRequestExcludedTurns = params["excludeTurns"] != nil
+            let response: RPCMessage
+            do {
+                response = try await sendRequestWithSandboxFallback(method: "thread/resume", baseParams: params)
+            } catch {
+                guard didRequestExcludedTurns, consumeUnsupportedTurnPagination(error) else {
+                    throw error
+                }
+
+                params.removeValue(forKey: "excludeTurns")
+                didRequestExcludedTurns = false
+                response = try await sendRequestWithSandboxFallback(method: "thread/resume", baseParams: params)
+            }
             guard !Task.isCancelled,
                   isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration) else {
                 throw CancellationError()
@@ -892,6 +929,7 @@ extension CodexService {
             }
 
             var resumedThread: CodexThread?
+            var didReceiveEmbeddedHistory = false
             if let threadValue = resultObject["thread"],
                var decodedThread = decodeModel(CodexThread.self, from: threadValue) {
                 decodedThread.syncState = .live
@@ -899,9 +937,20 @@ extension CodexService {
                 resumedThread = decodedThread
 
                 if let threadObject = threadValue.objectValue {
+                    if didRequestExcludedTurns,
+                       threadObject["turns"]?.arrayValue?.isEmpty == false {
+                        markTurnPaginationUnsupportedForCurrentRuntime()
+                        didRequestExcludedTurns = false
+                    }
                     let historyMessages = decodeMessagesFromThreadRead(threadId: threadId, threadObject: threadObject)
                     registerSubagentThreads(from: historyMessages, parentThreadId: threadId)
                     if !historyMessages.isEmpty {
+                        didReceiveEmbeddedHistory = true
+                        initialTurnsLoadedByThreadID.insert(threadId)
+                        updateThreadTimelineProjectionForEmbeddedHistory(
+                            threadId: threadId,
+                            decodedMessageCount: historyMessages.count
+                        )
                         let existingMessages = messagesByThread[threadId] ?? []
                         let activeThreadIDs = Set(activeTurnIdByThread.keys)
                         let runningIDs = runningThreadIDs
@@ -910,6 +959,9 @@ extension CodexService {
                                 existingCount: existingMessages.count,
                                 historyCount: historyMessages.count
                             )
+                        if !usedRecentWindow {
+                            markThreadLocalHistoryStartAuthoritative(threadId, clearRemoteCursor: true)
+                        }
                         if usedRecentWindow {
                             markThreadNeedingCanonicalHistoryReconcile(threadId)
                         }
@@ -949,7 +1001,12 @@ extension CodexService {
                   isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration) else {
                 throw CancellationError()
             }
-            hydratedThreadIDs.insert(threadId)
+            if !didRequestExcludedTurns || didReceiveEmbeddedHistory {
+                hydratedThreadIDs.insert(threadId)
+                if !supportsTurnPagination {
+                    initialTurnsLoadedByThreadID.insert(threadId)
+                }
+            }
             resumedThreadIDs.insert(threadId)
             return resumedThread
         }
@@ -1066,6 +1123,10 @@ extension CodexService {
         activeThreadId = threadId
         markThreadAsRunning(threadId)
         setProtectedRunningFallback(true, for: threadId)
+        let messageStartCheckpointTask = scheduleMessageStartWorkspaceCheckpointIfPossible(
+            threadId: threadId,
+            messageId: pendingMessageId
+        )
 
         var includeStructuredSkillItems = supportsStructuredSkillInput && !skillMentions.isEmpty
         var includeStructuredMentionItems = supportsStructuredMentionInput && !mentionMentions.isEmpty
@@ -1094,15 +1155,26 @@ extension CodexService {
                     collaborationMode: effectiveCollaborationMode,
                     includeServiceTier: includesServiceTier
                 )
+                // The pre-turn snapshot must settle before the runtime can mutate files.
+                if let messageStartCheckpointTask {
+                    await messageStartCheckpointTask.value
+                }
                 let response = try await sendRequestWithSandboxFallback(
                     method: "turn/start",
                     baseParams: requestParams
                 )
-                handleSuccessfulTurnStartResponse(
+                let resolvedTurnID = handleSuccessfulTurnStartResponse(
                     response,
                     pendingMessageId: pendingMessageId,
                     threadId: threadId
                 )
+                if let resolvedTurnID {
+                    scheduleMessageStartWorkspaceCheckpointCopyIfPossible(
+                        threadId: threadId,
+                        messageId: pendingMessageId,
+                        turnId: resolvedTurnID
+                    )
+                }
                 scheduleAutomaticThreadTitleGenerationIfNeeded(
                     seed: automaticTitleSeed,
                     threadId: threadId,
@@ -1162,6 +1234,27 @@ extension CodexService {
                 )
                 return
             }
+        }
+    }
+
+    // Starts the app-server's manual context compaction turn for the selected thread.
+    func compactThread(_ threadId: String) async throws {
+        activeThreadId = threadId
+        markThreadAsRunning(threadId)
+        setProtectedRunningFallback(true, for: threadId)
+
+        do {
+            _ = try await sendRequest(
+                method: "thread/compact/start",
+                params: .object(["threadId": .string(threadId)])
+            )
+            lastErrorMessage = nil
+        } catch {
+            clearRunningState(for: threadId)
+            let errorMessage = userFacingTurnErrorMessage(from: error)
+            lastErrorMessage = errorMessage
+            appendSystemMessage(threadId: threadId, text: "Compact error: \(errorMessage)")
+            throw error
         }
     }
 
@@ -1283,9 +1376,13 @@ extension CodexService {
         collaborationMode: CodexCollaborationModeKind? = nil
     ) async throws {
         let normalizedThreadID = normalizedInterruptIdentifier(threadId) ?? threadId
+        let effectiveRequestedCollaborationMode = collaborationModeForOutgoingTurn(
+            threadId: normalizedThreadID,
+            requestedMode: collaborationMode
+        )
         preparePlanSessionForSteer(
             threadId: normalizedThreadID,
-            collaborationMode: collaborationMode
+            collaborationMode: effectiveRequestedCollaborationMode
         )
         let pendingMessageId = shouldAppendUserMessage
             ? appendUserMessage(
@@ -1314,13 +1411,13 @@ extension CodexService {
         var includeStructuredSkillItems = supportsStructuredSkillInput && !skillMentions.isEmpty
         var includeStructuredMentionItems = supportsStructuredMentionInput && !mentionMentions.isEmpty
         var imageURLKey = "url"
-        var effectiveCollaborationMode = supportsTurnCollaborationMode ? collaborationMode : nil
+        var effectiveCollaborationMode = supportsTurnCollaborationMode ? effectiveRequestedCollaborationMode : nil
         var currentExpectedTurnID = initialTurnID
         var didRetryWithRefreshedTurnID = false
 
-        if collaborationMode != nil, effectiveCollaborationMode == nil {
+        if effectiveRequestedCollaborationMode != nil, effectiveCollaborationMode == nil {
             debugRuntimeLog(
-                "turn/steer dropping collaborationMode requested=\(collaborationMode?.rawValue ?? "") thread=\(normalizedThreadID) supportsTurnCollaborationMode=\(supportsTurnCollaborationMode)"
+                "turn/steer dropping collaborationMode requested=\(effectiveRequestedCollaborationMode?.rawValue ?? "") thread=\(normalizedThreadID) supportsTurnCollaborationMode=\(supportsTurnCollaborationMode)"
             )
         }
 
@@ -1738,6 +1835,26 @@ extension CodexService {
         currentPlanSessionSource(for: threadId) == .compatibilityFallback
     }
 
+    // App-server keeps collaboration mode sticky when the field is omitted, so
+    // a normal send from an active plan thread must explicitly restore default.
+    private func collaborationModeForOutgoingTurn(
+        threadId: String,
+        requestedMode: CodexCollaborationModeKind?,
+        preserveExisting: Bool = false
+    ) -> CodexCollaborationModeKind? {
+        if let requestedMode {
+            return requestedMode
+        }
+
+        guard !preserveExisting,
+              supportsTurnCollaborationMode,
+              currentPlanSessionSource(for: threadId) != nil else {
+            return nil
+        }
+
+        return .default
+    }
+
     func developerInstructions(for mode: CodexCollaborationModeKind) -> String? {
         switch mode {
         case .plan:
@@ -1831,11 +1948,12 @@ extension CodexService {
     }
 
     // Handles successful turn/start bookkeeping for both primary and fallback payload schemas.
+    @discardableResult
     func handleSuccessfulTurnStartResponse(
         _ response: RPCMessage,
         pendingMessageId: String,
         threadId: String
-    ) {
+    ) -> String? {
         let turnID = extractTurnID(from: response.result)
         let resolvedTurnID = turnID ?? activeTurnIdByThread[threadId]
         let deliveryState: CodexMessageDeliveryState = (resolvedTurnID == nil) ? .pending : .confirmed
@@ -1859,6 +1977,8 @@ extension CodexService {
             threads[index].syncState = .live
             threads = sortThreads(threads)
         }
+
+        return resolvedTurnID
     }
 
     // Applies steer failure bookkeeping for optimistic user rows without adding an extra system error card.
@@ -2081,7 +2201,7 @@ extension CodexService {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    // Resolves the currently interruptible turn id from thread/read when local state becomes stale.
+    // Resolves the currently interruptible turn id from the latest turn page when local state is stale.
     // If the runtime reports "running" without an id yet, surface that instead of falling
     // back to the latest completed turn and interrupting the wrong run.
     func resolveInFlightTurnID(threadId: String) async throws -> String? {
@@ -2105,7 +2225,7 @@ extension CodexService {
         return nil
     }
 
-    // Parses turn status values from thread/read turn objects.
+    // Parses turn status values from app-server turn objects.
     func normalizedInterruptTurnStatus(from turnObject: [String: JSONValue]) -> String? {
         let status = turnObject["status"]?.stringValue
             ?? turnObject["turnStatus"]?.stringValue
@@ -2163,12 +2283,42 @@ extension CodexService {
         return hints.contains { message.contains($0) }
     }
 
-    // Reads thread/read(includeTurns=true) and extracts both running and latest turn metadata.
+    // Reads only the latest turn page when supported, then falls back for older runtimes.
     func readThreadTurnStateSnapshot(threadId: String) async throws -> (
         interruptibleTurnID: String?,
         hasInterruptibleTurnWithoutID: Bool,
         latestTurnID: String?
     ) {
+        if supportsTurnPagination {
+            do {
+                let response = try await sendRequest(
+                    method: "thread/turns/list",
+                    params: .object([
+                        "threadId": .string(threadId),
+                        "limit": .integer(ThreadTurnStateSnapshotPolicy.recentTurnLimit),
+                        "sortDirection": .string("desc"),
+                    ]),
+                    timeoutNanoseconds: ThreadTurnStateSnapshotPolicy.requestTimeoutNanoseconds
+                )
+
+                guard let resultObject = response.result?.objectValue else {
+                    return (nil, false, nil)
+                }
+
+                let turnObjects = (
+                    resultObject["data"]?.arrayValue
+                        ?? resultObject["items"]?.arrayValue
+                        ?? resultObject["turns"]?.arrayValue
+                        ?? []
+                ).compactMap { $0.objectValue }
+                return turnStateSnapshot(from: turnObjects, newestFirst: true)
+            } catch {
+                guard consumeUnsupportedTurnPagination(error, attemptedMethod: "thread/turns/list") else {
+                    throw error
+                }
+            }
+        }
+
         let response: RPCMessage
         do {
             response = try await sendRequest(
@@ -2176,7 +2326,8 @@ extension CodexService {
                 params: .object([
                     "threadId": .string(threadId),
                     "includeTurns": .bool(true),
-                ])
+                ]),
+                timeoutNanoseconds: ThreadTurnStateSnapshotPolicy.requestTimeoutNanoseconds
             )
         } catch {
             guard shouldRetryThreadReadTurnSnapshotWithSnakeCase(error) else {
@@ -2188,20 +2339,31 @@ extension CodexService {
                 params: .object([
                     "thread_id": .string(threadId),
                     "include_turns": .bool(true),
-                ])
+                ]),
+                timeoutNanoseconds: ThreadTurnStateSnapshotPolicy.requestTimeoutNanoseconds
             )
         }
 
-        guard let threadObject = response.result?.objectValue?["thread"]?.objectValue else {
-            return (nil, false, nil)
-        }
+        let turnObjects = response.result?.objectValue?["thread"]?.objectValue?["turns"]?.arrayValue?
+            .compactMap { $0.objectValue } ?? []
+        return turnStateSnapshot(from: turnObjects, newestFirst: false)
+    }
 
-        let turnObjects = threadObject["turns"]?.arrayValue?.compactMap { $0.objectValue } ?? []
+    // Parses latest/running turn metadata from either descending pages or chronological legacy arrays.
+    func turnStateSnapshot(
+        from turnObjects: [RPCObject],
+        newestFirst: Bool
+    ) -> (
+        interruptibleTurnID: String?,
+        hasInterruptibleTurnWithoutID: Bool,
+        latestTurnID: String?
+    ) {
         guard !turnObjects.isEmpty else {
             return (nil, false, nil)
         }
 
-        let latestTurnID = turnObjects.reversed().compactMap { turnObject in
+        let newestTurnObjects = newestFirst ? turnObjects : Array(turnObjects.reversed())
+        let latestTurnID = newestTurnObjects.compactMap { turnObject in
             normalizedInterruptIdentifier(
                 turnObject["id"]?.stringValue
                     ?? turnObject["turnId"]?.stringValue
@@ -2209,11 +2371,9 @@ extension CodexService {
             )
         }.first
 
-        // Some thread/read payloads can include a newer completed turn after the currently
-        // running one, so scan backwards for the most recent interruptible turn instead of
-        // assuming the array tail is always the active run.
+        // Newest-first scanning avoids interrupting an older completed turn when recovery is stale.
         var hasInterruptibleTurnWithoutID = false
-        for turnObject in turnObjects.reversed() {
+        for turnObject in newestTurnObjects {
             let turnStatus = normalizedInterruptTurnStatus(from: turnObject)
             guard isInterruptibleTurnStatus(turnStatus) else {
                 continue

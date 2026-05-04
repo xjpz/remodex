@@ -199,6 +199,42 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
         XCTAssertEqual(history[0].turnId, turnID)
     }
 
+    func testHistoryRestoresGeneratedImageEndAndImageViewItems() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let history = service.decodeMessagesFromThreadRead(
+            threadId: threadID,
+            threadObject: [
+                "createdAt": .string("2026-03-12T10:00:00Z"),
+                "turns": .array([
+                    .object([
+                        "id": .string(turnID),
+                        "items": .array([
+                            .object([
+                                "id": .string("image-end"),
+                                "type": .string("image_generation_end"),
+                                "saved_path": .string("/Users/example/generated end.png"),
+                            ]),
+                            .object([
+                                "id": .string("image-view"),
+                                "type": .string("imageView"),
+                                "path": .string("/Users/example/viewed image.png"),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+            ]
+        )
+
+        XCTAssertEqual(history.count, 2)
+        XCTAssertEqual(history.map(\.itemId), ["image-end", "image-view"])
+        XCTAssertEqual(history.map(\.text), [
+            "![Generated image](</Users/example/generated end.png>)",
+            "![Generated image](</Users/example/viewed image.png>)",
+        ])
+    }
+
     func testHistoryDecodesNumericStringMicrosecondTimestamps() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
@@ -534,6 +570,140 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
         XCTAssertEqual(fileRows.count, 1)
         XCTAssertEqual(fileRows[0].turnId, turnID)
         XCTAssertEqual(fileRows[0].itemId, "file-snapshot")
+    }
+
+    func testTurnDiffUpdatedDoesNotCreateVisibleFileChangeRow() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let diff = """
+        diff --git a/README.md b/README.md
+        index 1111111..2222222 100644
+        --- a/README.md
+        +++ b/README.md
+        @@ -1,1 +1,1 @@
+        -old
+        +new
+        """
+
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: nil,
+            text: "Checked the repo."
+        )
+        service.handleNotification(
+            method: "turn/diff/updated",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "diff": .string(diff),
+            ])
+        )
+
+        let visibleFileRows = service.messages(for: threadID).filter {
+            $0.role == .system && $0.kind == .fileChange
+        }
+        XCTAssertTrue(visibleFileRows.isEmpty)
+
+        service.recordTurnTerminalState(threadId: threadID, turnId: turnID, state: .completed)
+        service.noteTurnFinished(turnId: turnID)
+        let assistantMessage = try? XCTUnwrap(service.messages(for: threadID).last(where: { $0.role == .assistant }))
+        XCTAssertNil(assistantMessage.flatMap { service.readyChangeSet(forAssistantMessage: $0) })
+    }
+
+    func testTurnDiffUpdatedCanRecordUndoAfterRealFileChangeEvidence() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let diff = """
+        diff --git a/README.md b/README.md
+        index 1111111..2222222 100644
+        --- a/README.md
+        +++ b/README.md
+        @@ -1,1 +1,1 @@
+        -old
+        +new
+        """
+
+        service.appendSystemMessage(
+            threadId: threadID,
+            text: """
+            Status: completed
+
+            Path: README.md
+            Kind: update
+            Totals: +1 -1
+            """,
+            turnId: turnID,
+            kind: .fileChange
+        )
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: nil,
+            text: "Updated README."
+        )
+        service.handleNotification(
+            method: "turn/diff/updated",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "diff": .string(diff),
+            ])
+        )
+        service.recordTurnTerminalState(threadId: threadID, turnId: turnID, state: .completed)
+        service.noteTurnFinished(turnId: turnID)
+
+        let assistantMessage = try? XCTUnwrap(service.messages(for: threadID).last(where: { $0.role == .assistant }))
+        let changeSet = assistantMessage.flatMap { service.readyChangeSet(forAssistantMessage: $0) }
+        XCTAssertEqual(changeSet?.fileChanges.map(\.path), ["README.md"])
+    }
+
+    func testTurnDiffUpdatedIgnoresTurnlessFileChangeEvidence() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let diff = """
+        diff --git a/README.md b/README.md
+        index 1111111..2222222 100644
+        --- a/README.md
+        +++ b/README.md
+        @@ -1,1 +1,1 @@
+        -old
+        +new
+        """
+
+        service.appendSystemMessage(
+            threadId: threadID,
+            text: """
+            Status: completed
+
+            Path: README.md
+            Kind: update
+            Totals: +1 -1
+            """,
+            kind: .fileChange
+        )
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: nil,
+            text: "Checked README."
+        )
+        service.handleNotification(
+            method: "turn/diff/updated",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "diff": .string(diff),
+            ])
+        )
+        service.recordTurnTerminalState(threadId: threadID, turnId: turnID, state: .completed)
+        service.noteTurnFinished(turnId: turnID)
+
+        let assistantMessage = try? XCTUnwrap(service.messages(for: threadID).last(where: { $0.role == .assistant }))
+        XCTAssertNil(assistantMessage.flatMap { service.readyChangeSet(forAssistantMessage: $0) })
     }
 
     func testLegacyToolActivityAfterAssistantCreatesNewLaterRow() {
@@ -1658,6 +1828,368 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
         XCTAssertEqual(history[0].kind, .commandExecution)
         XCTAssertEqual(history[0].text, "Context compacted")
         XCTAssertEqual(history[0].turnId, turnID)
+    }
+
+    func testLegacyNamedImageGenerationEndAppendsGeneratedImagePreview() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "image-\(UUID().uuidString)"
+        let imagePath = "/Users/example/generated image.png"
+
+        service.handleNotification(
+            method: "codex/event/image_generation_end",
+            params: .object([
+                "conversationId": .string(threadID),
+                "id": .string(turnID),
+                "msg": .object([
+                    "type": .string("image_generation_end"),
+                    "call_id": .string(itemID),
+                    "turn_id": .string(turnID),
+                    "saved_path": .string(imagePath),
+                ]),
+            ])
+        )
+
+        let imageRows = service.messages(for: threadID).filter {
+            $0.role == .assistant && $0.itemId == itemID
+        }
+        XCTAssertEqual(imageRows.count, 1)
+        XCTAssertEqual(imageRows[0].turnId, turnID)
+        XCTAssertEqual(imageRows[0].text, "![Generated image](</Users/example/generated image.png>)")
+    }
+
+    func testCompletedImageGenerationItemAppendsGeneratedImagePreview() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "image-\(UUID().uuidString)"
+        let imagePath = "/Users/example/generated image.png"
+
+        service.handleNotification(
+            method: "item/completed",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "item": .object([
+                    "id": .string(itemID),
+                    "type": .string("image_generation_call"),
+                    "saved_path": .string(imagePath),
+                ]),
+            ])
+        )
+
+        let imageRows = service.messages(for: threadID).filter {
+            $0.role == .assistant && $0.itemId == itemID
+        }
+        XCTAssertEqual(imageRows.count, 1)
+        XCTAssertEqual(imageRows[0].turnId, turnID)
+        XCTAssertEqual(imageRows[0].text, "![Generated image](</Users/example/generated image.png>)")
+    }
+
+    func testLateGeneratedImageMergesIntoAssistantAnswerForSameTurn() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "image-\(UUID().uuidString)"
+        let imagePath = "/Users/example/generated image.png"
+
+        service.appendMessage(
+            CodexMessage(
+                id: "assistant-final",
+                threadId: threadID,
+                role: .assistant,
+                text: "Done: generated the image.",
+                turnId: turnID,
+                isStreaming: false
+            )
+        )
+
+        service.handleNotification(
+            method: "item/completed",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "item": .object([
+                    "id": .string(itemID),
+                    "type": .string("image_generation_call"),
+                    "saved_path": .string(imagePath),
+                ]),
+            ])
+        )
+
+        let assistantMessages = service.messages(for: threadID).filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.count, 1)
+        XCTAssertEqual(assistantMessages[0].id, "assistant-final")
+        XCTAssertEqual(
+            assistantMessages[0].text,
+            "Done: generated the image.\n\n![Generated image](</Users/example/generated image.png>)"
+        )
+        XCTAssertNil(assistantMessages[0].itemId)
+    }
+
+    func testLateGeneratedImageDoesNotFinishStreamingAssistantAnswer() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "image-\(UUID().uuidString)"
+        let imagePath = "/Users/example/generated image.png"
+
+        service.appendMessage(
+            CodexMessage(
+                id: "assistant-streaming",
+                threadId: threadID,
+                role: .assistant,
+                text: "Generating",
+                turnId: turnID,
+                isStreaming: true
+            )
+        )
+
+        service.handleNotification(
+            method: "item/completed",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "item": .object([
+                    "id": .string(itemID),
+                    "type": .string("image_generation_call"),
+                    "saved_path": .string(imagePath),
+                ]),
+            ])
+        )
+
+        let assistantMessages = service.messages(for: threadID).filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.count, 2)
+        XCTAssertEqual(assistantMessages[0].id, "assistant-streaming")
+        XCTAssertTrue(assistantMessages[0].isStreaming)
+        XCTAssertEqual(assistantMessages[0].text, "Generating")
+        XCTAssertEqual(assistantMessages[1].itemId, itemID)
+        XCTAssertEqual(assistantMessages[1].text, "![Generated image](</Users/example/generated image.png>)")
+    }
+
+    func testLateGeneratedImageDoesNotReplaceAssistantAnswerItemIdentity() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let answerItemID = "answer-\(UUID().uuidString)"
+        let imageItemID = "image-\(UUID().uuidString)"
+        let imagePath = "/Users/example/generated image.png"
+
+        service.appendMessage(
+            CodexMessage(
+                id: "assistant-final",
+                threadId: threadID,
+                role: .assistant,
+                text: "Done: generated the image.",
+                turnId: turnID,
+                itemId: answerItemID,
+                isStreaming: false
+            )
+        )
+
+        service.handleNotification(
+            method: "item/completed",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "item": .object([
+                    "id": .string(imageItemID),
+                    "type": .string("image_generation_call"),
+                    "saved_path": .string(imagePath),
+                ]),
+            ])
+        )
+
+        let assistantMessages = service.messages(for: threadID).filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.count, 1)
+        XCTAssertEqual(assistantMessages[0].id, "assistant-final")
+        XCTAssertEqual(assistantMessages[0].itemId, answerItemID)
+        XCTAssertEqual(
+            assistantMessages[0].text,
+            "Done: generated the image.\n\n![Generated image](</Users/example/generated image.png>)"
+        )
+    }
+
+    func testDuplicateLateGeneratedImageDoesNotAdoptImageItemIdentity() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let imageItemID = "image-\(UUID().uuidString)"
+        let imagePath = "/Users/example/generated image.png"
+
+        service.appendMessage(
+            CodexMessage(
+                id: "assistant-final",
+                threadId: threadID,
+                role: .assistant,
+                text: "Done: generated the image.",
+                turnId: turnID,
+                isStreaming: false
+            )
+        )
+
+        let params: JSONValue = .object([
+            "threadId": .string(threadID),
+            "turnId": .string(turnID),
+            "item": .object([
+                "id": .string(imageItemID),
+                "type": .string("image_generation_call"),
+                "saved_path": .string(imagePath),
+            ]),
+        ])
+
+        service.handleNotification(method: "item/completed", params: params)
+        service.handleNotification(method: "item/completed", params: params)
+
+        let assistantMessages = service.messages(for: threadID).filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.count, 1)
+        XCTAssertEqual(assistantMessages[0].id, "assistant-final")
+        XCTAssertNil(assistantMessages[0].itemId)
+        XCTAssertEqual(
+            assistantMessages[0].text,
+            "Done: generated the image.\n\n![Generated image](</Users/example/generated image.png>)"
+        )
+    }
+
+    func testCompletedImageViewItemAppendsGeneratedImagePreview() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "image-\(UUID().uuidString)"
+        let imagePath = "/Users/example/generated image.png"
+
+        service.handleNotification(
+            method: "item/completed",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "item": .object([
+                    "id": .string(itemID),
+                    "type": .string("imageView"),
+                    "path": .string(imagePath),
+                ]),
+            ])
+        )
+
+        let imageRows = service.messages(for: threadID).filter {
+            $0.role == .assistant && $0.itemId == itemID
+        }
+        XCTAssertEqual(imageRows.count, 1)
+        XCTAssertEqual(imageRows[0].turnId, turnID)
+        XCTAssertEqual(imageRows[0].text, "![Generated image](</Users/example/generated image.png>)")
+    }
+
+    func testDirectCompletedImageViewItemAppendsGeneratedImagePreview() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "image-\(UUID().uuidString)"
+        let imagePath = "/Users/example/generated image.png"
+
+        service.handleNotification(
+            method: "item/completed",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "id": .string(itemID),
+                "type": .string("imageView"),
+                "path": .string(imagePath),
+            ])
+        )
+
+        let imageRows = service.messages(for: threadID).filter {
+            $0.role == .assistant && $0.itemId == itemID
+        }
+        XCTAssertEqual(imageRows.count, 1)
+        XCTAssertEqual(imageRows[0].turnId, turnID)
+        XCTAssertEqual(imageRows[0].text, "![Generated image](</Users/example/generated image.png>)")
+    }
+
+    func testCompletedImageGenerationItemTypeAppendsGeneratedImagePreview() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "image-\(UUID().uuidString)"
+        let imagePath = "/Users/example/generated image.png"
+
+        service.handleNotification(
+            method: "item/completed",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "item": .object([
+                    "id": .string(itemID),
+                    "type": .string("image_generation"),
+                    "path": .string(imagePath),
+                    "result": .string("iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"),
+                ]),
+            ])
+        )
+
+        let imageRows = service.messages(for: threadID).filter {
+            $0.role == .assistant && $0.itemId == itemID
+        }
+        XCTAssertEqual(imageRows.count, 1)
+        XCTAssertEqual(imageRows[0].turnId, turnID)
+        XCTAssertEqual(imageRows[0].text, "![Generated image](</Users/example/generated image.png>)")
+    }
+
+    func testTurnTerminalStatePersistsCompletedGroupingAfterRelaunch() {
+        let suiteName = "CodexServiceIncomingCommandExecutionTests.persist.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let messages = [
+            CodexMessage(
+                id: "user",
+                threadId: threadID,
+                role: .user,
+                text: "make an icon",
+                turnId: turnID
+            ),
+            CodexMessage(
+                id: "preamble",
+                threadId: threadID,
+                role: .assistant,
+                text: "Using imagegen...",
+                turnId: turnID,
+                itemId: "status"
+            ),
+            CodexMessage(
+                id: "final",
+                threadId: threadID,
+                role: .assistant,
+                text: "Done.",
+                turnId: turnID,
+                itemId: "final"
+            ),
+        ]
+
+        let firstService = CodexService(defaults: defaults)
+        firstService.messagesByThread[threadID] = messages
+        firstService.recordTurnTerminalState(threadId: threadID, turnId: turnID, state: .completed)
+
+        let reloadedService = CodexService(defaults: defaults)
+        reloadedService.messagesByThread[threadID] = messages
+        reloadedService.refreshThreadTimelineState(for: threadID)
+        Self.retainedServices.append(firstService)
+        Self.retainedServices.append(reloadedService)
+
+        let snapshot = reloadedService.timelineState(for: threadID).renderSnapshot
+        let renderItems = TurnTimelineRenderProjection.project(
+            messages: snapshot.messages,
+            completedTurnIDs: snapshot.completedTurnIDs
+        )
+
+        XCTAssertEqual(reloadedService.turnTerminalState(for: turnID), .completed)
+        XCTAssertTrue(snapshot.completedTurnIDs.contains(turnID))
+        XCTAssertTrue(renderItems.contains {
+            if case .previousMessages = $0 { return true }
+            return false
+        })
     }
 
     private func makeService() -> CodexService {

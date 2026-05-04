@@ -13,6 +13,7 @@ struct AssistantBlockAccessoryState: Equatable {
     let blockDiffText: String?
     let blockDiffEntries: [TurnFileChangeSummaryEntry]?
     let blockRevertPresentation: AssistantRevertPresentation?
+    let blockRevertMessage: CodexMessage?
 
     func replacingCopyText(_ copyText: String?) -> AssistantBlockAccessoryState {
         AssistantBlockAccessoryState(
@@ -20,7 +21,8 @@ struct AssistantBlockAccessoryState: Equatable {
             showsRunningIndicator: showsRunningIndicator,
             blockDiffText: blockDiffText,
             blockDiffEntries: blockDiffEntries,
-            blockRevertPresentation: blockRevertPresentation
+            blockRevertPresentation: blockRevertPresentation,
+            blockRevertMessage: blockRevertMessage
         )
     }
 }
@@ -192,7 +194,7 @@ private struct TurnTimelinePreviousMessagesView: View {
             } label: {
                 HStack(spacing: 8) {
                     Text(title)
-                        .font(AppFont.title3(weight: .regular))
+                        .font(AppFont.body(weight: .regular))
                         .foregroundStyle(.secondary)
                     Image(systemName: "chevron.right")
                         .font(AppFont.system(size: 14, weight: .semibold))
@@ -240,6 +242,8 @@ private struct TurnTimelinePreviousMessagesView: View {
 private struct TurnTimelineRowsSection: View {
     let shouldWarmRecentTailProgressively: Bool
     let hasEarlierMessages: Bool
+    let isLoadingEarlierMessages: Bool
+    let earlierMessagesErrorMessage: String?
     let renderItems: [TurnTimelineRenderItem]
     let isRetryAvailable: Bool
     let cachedBlockInfoByMessageID: [String: AssistantBlockAccessoryState]
@@ -257,84 +261,100 @@ private struct TurnTimelineRowsSection: View {
     let onLoadEarlierMessages: () -> Void
 
     var body: some View {
-        if shouldWarmRecentTailProgressively {
-            HStack(spacing: 8) {
-                ProgressView()
-                    .controlSize(.small)
-                Text("Loading recent messages...")
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 20) {
+            if shouldWarmRecentTailProgressively {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Loading recent messages...")
+                        .font(AppFont.caption())
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
 
-        if hasEarlierMessages {
-            Button(action: onLoadEarlierMessages) {
-                Text("Load earlier messages")
-                    .font(AppFont.subheadline())
+            if hasEarlierMessages {
+                Button(action: onLoadEarlierMessages) {
+                    HStack(spacing: 8) {
+                        if isLoadingEarlierMessages {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Text(earlierMessagesButtonTitle)
+                    }
+                    .font(AppFont.body(weight: .regular))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
+                    .frame(minHeight: 48)
+                }
+                .buttonStyle(.plain)
+                .disabled(isLoadingEarlierMessages)
             }
-            .buttonStyle(.plain)
-        }
 
-        ForEach(renderItems) { item in
-            switch item {
-            case .message(let message):
-                TurnTimelineMessageRow(
-                    message: message,
-                    isRetryAvailable: isRetryAvailable,
-                    cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
-                    planSessionSource: planSessionSource,
-                    allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
-                    completedTurnIDs: completedTurnIDs,
-                    threadMessagesForPlanMatching: threadMessagesForPlanMatching,
-                    currentWorkingDirectory: currentWorkingDirectory,
-                    planMatchingFingerprint: planMatchingFingerprint,
-                    newestStreamingMessageID: newestStreamingMessageID,
-                    autoScrollMode: autoScrollMode,
-                    onRetryUserMessage: onRetryUserMessage,
-                    onTapAssistantRevert: onTapAssistantRevert,
-                    onTapSubagent: onTapSubagent
-                )
-            case .toolBurst(let group):
-                TurnTimelineToolBurstView(
-                    group: group,
-                    isRetryAvailable: isRetryAvailable,
-                    cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
-                    planSessionSource: planSessionSource,
-                    allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
-                    completedTurnIDs: completedTurnIDs,
-                    threadMessagesForPlanMatching: threadMessagesForPlanMatching,
-                    currentWorkingDirectory: currentWorkingDirectory,
-                    planMatchingFingerprint: planMatchingFingerprint,
-                    newestStreamingMessageID: newestStreamingMessageID,
-                    autoScrollMode: autoScrollMode,
-                    onRetryUserMessage: onRetryUserMessage,
-                    onTapAssistantRevert: onTapAssistantRevert,
-                    onTapSubagent: onTapSubagent
-                )
-            case .previousMessages(let group):
-                TurnTimelinePreviousMessagesView(
-                    group: group,
-                    isRetryAvailable: isRetryAvailable,
-                    cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
-                    planSessionSource: planSessionSource,
-                    allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
-                    completedTurnIDs: completedTurnIDs,
-                    threadMessagesForPlanMatching: threadMessagesForPlanMatching,
-                    currentWorkingDirectory: currentWorkingDirectory,
-                    planMatchingFingerprint: planMatchingFingerprint,
-                    newestStreamingMessageID: newestStreamingMessageID,
-                    autoScrollMode: autoScrollMode,
-                    onRetryUserMessage: onRetryUserMessage,
-                    onTapAssistantRevert: onTapAssistantRevert,
-                    onTapSubagent: onTapSubagent
-                )
+            ForEach(renderItems) { item in
+                switch item {
+                case .message(let message):
+                    TurnTimelineMessageRow(
+                        message: message,
+                        isRetryAvailable: isRetryAvailable,
+                        cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
+                        planSessionSource: planSessionSource,
+                        allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
+                        completedTurnIDs: completedTurnIDs,
+                        threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+                        currentWorkingDirectory: currentWorkingDirectory,
+                        planMatchingFingerprint: planMatchingFingerprint,
+                        newestStreamingMessageID: newestStreamingMessageID,
+                        autoScrollMode: autoScrollMode,
+                        onRetryUserMessage: onRetryUserMessage,
+                        onTapAssistantRevert: onTapAssistantRevert,
+                        onTapSubagent: onTapSubagent
+                    )
+                case .toolBurst(let group):
+                    TurnTimelineToolBurstView(
+                        group: group,
+                        isRetryAvailable: isRetryAvailable,
+                        cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
+                        planSessionSource: planSessionSource,
+                        allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
+                        completedTurnIDs: completedTurnIDs,
+                        threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+                        currentWorkingDirectory: currentWorkingDirectory,
+                        planMatchingFingerprint: planMatchingFingerprint,
+                        newestStreamingMessageID: newestStreamingMessageID,
+                        autoScrollMode: autoScrollMode,
+                        onRetryUserMessage: onRetryUserMessage,
+                        onTapAssistantRevert: onTapAssistantRevert,
+                        onTapSubagent: onTapSubagent
+                    )
+                case .previousMessages(let group):
+                    TurnTimelinePreviousMessagesView(
+                        group: group,
+                        isRetryAvailable: isRetryAvailable,
+                        cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
+                        planSessionSource: planSessionSource,
+                        allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
+                        completedTurnIDs: completedTurnIDs,
+                        threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+                        currentWorkingDirectory: currentWorkingDirectory,
+                        planMatchingFingerprint: planMatchingFingerprint,
+                        newestStreamingMessageID: newestStreamingMessageID,
+                        autoScrollMode: autoScrollMode,
+                        onRetryUserMessage: onRetryUserMessage,
+                        onTapAssistantRevert: onTapAssistantRevert,
+                        onTapSubagent: onTapSubagent
+                    )
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var earlierMessagesButtonTitle: String {
+        if isLoadingEarlierMessages {
+            return "Loading earlier messages..."
+        }
+        return earlierMessagesErrorMessage ?? "Load earlier messages"
     }
 }
 
@@ -404,6 +424,12 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     let isRetryAvailable: Bool
     let errorMessage: String?
     let hidesErrorMessage: Bool
+    let hasRemoteEarlierMessages: Bool
+    let hasLocallyProjectedEarlierMessages: Bool
+    let usesPaginatedHistory: Bool
+    let initialTurnsLoaded: Bool
+    let isLoadingRemoteEarlierMessages: Bool
+    let olderHistoryLoadErrorMessage: String?
 
     @Binding var shouldAnchorToAssistantResponse: Bool
     @Binding var isScrolledToBottom: Bool
@@ -413,6 +439,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     let onRetryUserMessage: (String) -> Void
     let onTapAssistantRevert: (CodexMessage) -> Void
     let onTapSubagent: (CodexSubagentThreadPresentation) -> Void
+    let onRevealEarlierMessages: (Int) -> Void
+    let onLoadRemoteEarlierMessages: () -> Void
+    let onRetryEarlierMessages: (@escaping () -> Void) -> Void
     let onTapOutsideComposer: () -> Void
     @ViewBuilder let emptyState: () -> EmptyState
     @ViewBuilder let composer: () -> Composer
@@ -421,17 +450,18 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     /// Number of messages to show per page.  Only the tail slice is rendered;
     /// scrolling to the top reveals a "Load earlier messages" button.
     private static var pageSize: Int { 40 }
+    private static var initialVisibleTailCount: Int { 80 }
     /// Heavy-chat staged warmup is temporarily disabled until geometry settles reliably.
     private static var initialWarmTailCount: Int { 0 }
     private static var scrollToLatestButtonLift: CGFloat { 44 + 18 }
 
-    @State private var visibleTailCount: Int = pageSize
+    @State private var visibleTailCount: Int = initialVisibleTailCount
     @State private var viewportHeight: CGFloat = 0
     // Cached per-render artifacts to avoid O(n) recomputation inside the body.
     @State private var cachedBlockInfoByMessageID: [String: AssistantBlockAccessoryState] = [:]
     @State private var cachedNewestStreamingMessageID: String? = nil
     @State private var cachedRenderItems: [TurnTimelineRenderItem] = []
-    @State private var cachedRenderItemsInputKey: Int = 0
+    @State private var cachedRenderItemsSignature: TurnTimelineRenderItemsCacheSignature?
     @State private var blockInfoInputKey: Int = 0
     @State private var scrollSessionThreadID: String?
     @State private var autoScrollMode: TurnAutoScrollMode = .followBottom
@@ -442,18 +472,25 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     @State private var isProgressivelyRevealingRecentTail = false
     @State private var isUserDraggingScroll = false
     @State private var userScrollCooldownUntil: Date?
+    @State private var pendingRemoteEarlierLoadMessageCount: Int?
+    @State private var isLocalEarlierRevealPending = false
+    @State private var isRetryingEarlierHistoryLoad = false
+    @State private var localEarlierRevealTask: Task<Void, Never>?
     @State private var scrollGeometryCoalescer = ScrollGeometryCoalescer()
-    @State private var lastTimelineGeometryLogBucket: Int?
 
-    /// The tail slice of messages currently rendered in the timeline.
+    /// The service supplies paginated render windows; legacy full-history threads still slice locally.
     private var visibleMessages: ArraySlice<CodexMessage> {
+        if usesPaginatedHistory {
+            return messages[...]
+        }
+
         let startIndex = max(messages.count - visibleTailCount, 0)
         return messages[startIndex...]
     }
 
     private var visibleRenderItems: [TurnTimelineRenderItem] {
-        let key = renderItemsInputKey(for: visibleMessages)
-        if key == cachedRenderItemsInputKey, !cachedRenderItems.isEmpty {
+        let signature = renderItemsCacheSignature(for: visibleMessages)
+        if signature == cachedRenderItemsSignature {
             return cachedRenderItems
         }
         return TurnTimelineRenderProjection.project(
@@ -463,7 +500,41 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     }
 
     private var hasEarlierMessages: Bool {
-        visibleTailCount < messages.count
+        if isInitialEarlierPageLoading {
+            return true
+        }
+
+        if usesPaginatedHistory {
+            return hasRemoteEarlierMessages
+                || hasLocallyProjectedEarlierMessages
+                || isRemoteEarlierLoadPending
+                || isLoadingRemoteEarlierMessages
+                || isLocalEarlierRevealPending
+                || olderHistoryLoadErrorMessage != nil
+        }
+
+        return visibleTailCount < messages.count
+            || hasLocallyProjectedEarlierMessages
+            || hasRemoteEarlierMessages
+            || isRemoteEarlierLoadPending
+            || isLocalEarlierRevealPending
+            || olderHistoryLoadErrorMessage != nil
+    }
+
+    private var isRemoteEarlierLoadPending: Bool {
+        pendingRemoteEarlierLoadMessageCount != nil
+    }
+
+    private var isInitialEarlierPageLoading: Bool {
+        !initialTurnsLoaded && !messages.isEmpty && !isThreadRunning
+    }
+
+    private var isEarlierHistoryInteractionActive: Bool {
+            isInitialEarlierPageLoading
+            || isRemoteEarlierLoadPending
+            || isLoadingRemoteEarlierMessages
+            || isLocalEarlierRevealPending
+            || isRetryingEarlierHistoryLoad
     }
 
     private var shouldWarmRecentTailProgressively: Bool {
@@ -473,7 +544,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     private var isRecentTailWarmupActive: Bool {
         shouldStageHeavyThreadOpen
-            && visibleTailCount < min(messages.count, Self.pageSize)
+            && visibleTailCount < min(messages.count, Self.initialVisibleTailCount)
     }
 
     private var shouldShowFullTimelineLoader: Bool {
@@ -502,38 +573,22 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         return hasher.finalize()
     }
 
-    private func renderItemsInputKey(for messages: ArraySlice<CodexMessage>) -> Int {
+    private func renderItemsCacheSignature(for messages: ArraySlice<CodexMessage>) -> TurnTimelineRenderItemsCacheSignature {
         var hasher = Hasher()
-        hasher.combine(messages.count)
         hasher.combine(completedTurnIDs)
-        for message in messages {
-            hasher.combine(message.id)
-            hasher.combine(message.role)
-            hasher.combine(message.kind)
-            hasher.combine(message.turnId)
-            hasher.combine(message.itemId)
-            hasher.combine(message.isStreaming)
-            hasher.combine(message.deliveryState)
-            hasher.combine(message.orderIndex)
-            hasher.combine(message.attachments)
-            hasher.combine(message.planState)
-            hasher.combine(message.planPresentation)
-            hasher.combine(message.proposedPlan)
-            hasher.combine(message.subagentAction)
-            hasher.combine(message.structuredUserInputRequest)
-            // Streaming prose only appends during live output; length is enough to
-            // invalidate the projected row without rehashing the full transcript text.
-            if message.isStreaming {
-                hasher.combine(message.text.count)
-            } else {
-                hasher.combine(message.text)
-            }
-        }
-        return hasher.finalize()
+        return TurnTimelineRenderItemsCacheSignature(
+            threadID: threadID,
+            timelineChangeToken: timelineChangeToken,
+            visibleTailCount: visibleTailCount,
+            messageCount: messages.count,
+            firstMessageID: messages.first?.id,
+            lastMessageID: messages.last?.id,
+            completedTurnIDsHash: hasher.finalize()
+        )
     }
 
     var body: some View {
-        if messages.isEmpty {
+        if messages.isEmpty && !hasEarlierMessages && olderHistoryLoadErrorMessage == nil && !isLoadingRemoteEarlierMessages {
             // Keep new/empty chats static to avoid scroll indicators and inert scrolling.
             emptyTimelineState
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -557,27 +612,31 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                 GeometryReader { viewport in
                     let contentWidth = timelineContentWidth(for: viewport.size.width)
                     ScrollView(.vertical) {
-                        VStack(spacing: 20) {
-                            TurnTimelineRowsSection(
-                                shouldWarmRecentTailProgressively: shouldWarmRecentTailProgressively,
-                                hasEarlierMessages: hasEarlierMessages,
-                                renderItems: visibleRenderItems,
-                                isRetryAvailable: isRetryAvailable,
-                                cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
-                                planSessionSource: planSessionSource,
-                                allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
-                                completedTurnIDs: completedTurnIDs,
-                                threadMessagesForPlanMatching: threadMessagesForPlanMatching,
-                                currentWorkingDirectory: currentWorkingDirectory,
-                                planMatchingFingerprint: planMatchingFingerprint,
-                                newestStreamingMessageID: cachedNewestStreamingMessageID,
-                                autoScrollMode: autoScrollMode,
-                                onRetryUserMessage: onRetryUserMessage,
-                                onTapAssistantRevert: onTapAssistantRevert,
-                                onTapSubagent: onTapSubagent,
-                                onLoadEarlierMessages: handleLoadEarlierMessages
-                            )
-                        }
+                        TurnTimelineRowsSection(
+                            shouldWarmRecentTailProgressively: shouldWarmRecentTailProgressively,
+                            hasEarlierMessages: hasEarlierMessages,
+                            isLoadingEarlierMessages: isInitialEarlierPageLoading
+                                || isLoadingRemoteEarlierMessages
+                                || isRemoteEarlierLoadPending
+                                || isLocalEarlierRevealPending
+                                || isRetryingEarlierHistoryLoad,
+                            earlierMessagesErrorMessage: olderHistoryLoadErrorMessage,
+                            renderItems: visibleRenderItems,
+                            isRetryAvailable: isRetryAvailable,
+                            cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
+                            planSessionSource: planSessionSource,
+                            allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
+                            completedTurnIDs: completedTurnIDs,
+                            threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+                            currentWorkingDirectory: currentWorkingDirectory,
+                            planMatchingFingerprint: planMatchingFingerprint,
+                            newestStreamingMessageID: cachedNewestStreamingMessageID,
+                            autoScrollMode: autoScrollMode,
+                            onRetryUserMessage: onRetryUserMessage,
+                            onTapAssistantRevert: onTapAssistantRevert,
+                            onTapSubagent: onTapSubagent,
+                            onLoadEarlierMessages: handleLoadEarlierMessages
+                        )
                         // SwiftUI can otherwise let a streaming text row report an
                         // over-wide ideal size, which makes the vertical timeline pan sideways.
                         .frame(width: contentWidth, alignment: .leading)
@@ -606,9 +665,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                         }
                     }
                     .frame(width: viewport.size.width)
-                    .clipped()
                     .defaultScrollAnchor(.bottom, for: .initialOffset)
-                    .defaultScrollAnchor(.bottom, for: .sizeChanges)
+                    .defaultScrollAnchor(.top, for: .sizeChanges)
                     .scrollDismissesKeyboard(.interactively)
                     .simultaneousGesture(
                         TapGesture().onEnded {
@@ -637,7 +695,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                             contentHeight: geometry.contentSize.height
                         )
                     } action: { old, new in
-                        logTimelineGeometryChangeIfNeeded(old: old, new: new)
+                        guard !isEarlierHistoryInteractionActive else { return }
                         // Coalesce into a single commit per runloop turn so SwiftUI
                         // sees at most one @State mutation instead of several per frame.
                         scrollGeometryCoalescer.pending = (old, new)
@@ -648,6 +706,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                             scrollGeometryCoalescer.isScheduled = false
                             guard let pending = scrollGeometryCoalescer.pending else { return }
                             scrollGeometryCoalescer.pending = nil
+                            guard !isEarlierHistoryInteractionActive else { return }
                             applyScrollGeometryUpdate(
                                 old: pending.old,
                                 new: pending.new,
@@ -666,6 +725,22 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                         recomputeBlockInfoIfNeeded()
                         scheduleProgressiveTailRevealIfNeeded()
                         handleTimelineMutation(using: proxy)
+                    }
+                    .onChange(of: messages.count) { oldCount, newCount in
+                        handleMessageCountChange(oldCount: oldCount, newCount: newCount)
+                    }
+                    .onChange(of: isLoadingRemoteEarlierMessages) { _, newValue in
+                        handleRemoteEarlierLoadingChange(isLoading: newValue)
+                    }
+                    .onChange(of: hasRemoteEarlierMessages) { _, newValue in
+                        if !newValue {
+                            pendingRemoteEarlierLoadMessageCount = nil
+                        }
+                    }
+                    .onChange(of: olderHistoryLoadErrorMessage) { _, newValue in
+                        if newValue != nil {
+                            pendingRemoteEarlierLoadMessageCount = nil
+                        }
                     }
                     .onChange(of: isThreadRunning) { _, _ in
                         debugTimelineLog("isThreadRunning changed value=\(isThreadRunning)")
@@ -740,9 +815,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     }
 
     private func recomputeRenderItemsIfNeeded() {
-        let key = renderItemsInputKey(for: visibleMessages)
-        guard key != cachedRenderItemsInputKey || cachedRenderItems.isEmpty else { return }
-        cachedRenderItemsInputKey = key
+        let signature = renderItemsCacheSignature(for: visibleMessages)
+        guard signature != cachedRenderItemsSignature else { return }
+        cachedRenderItemsSignature = signature
         cachedRenderItems = TurnTimelineRenderProjection.project(
             messages: Array(visibleMessages),
             completedTurnIDs: completedTurnIDs
@@ -764,21 +839,17 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             revertStatesByMessageID: assistantRevertStatesByMessageID
         )
 
-        var updated = [String: AssistantBlockAccessoryState](
+        let initialBlockInfoByMessageID = [String: AssistantBlockAccessoryState](
             uniqueKeysWithValues: zip(visible, cachedBlockInfo).compactMap { message, blockText in
                 guard let blockText else { return nil }
                 return (message.id, blockText)
             }
         )
-        let collapsedFinalMessageIDs = TurnTimelineRenderProjection.collapsedFinalMessageIDs(
-            in: visible,
+        let updated = Self.rehomeCollapsedFinalAccessoryStates(
+            initialBlockInfoByMessageID,
+            messages: visible,
             completedTurnIDs: completedTurnIDs
         )
-        for message in visible where collapsedFinalMessageIDs.contains(message.id) {
-            guard let state = updated[message.id] else { continue }
-            let finalCopyText = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            updated[message.id] = state.replacingCopyText(finalCopyText.isEmpty ? nil : finalCopyText)
-        }
         if updated != cachedBlockInfoByMessageID {
             cachedBlockInfoByMessageID = updated
         }
@@ -870,11 +941,61 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     }
 
     private func handleLoadEarlierMessages() {
+        guard !isEarlierHistoryInteractionActive else {
+            return
+        }
+
         progressiveTailRevealTask?.cancel()
         progressiveTailRevealTask = nil
         isProgressivelyRevealingRecentTail = false
-        withAnimation(.easeOut(duration: 0.15)) {
-            visibleTailCount = min(visibleTailCount + Self.pageSize, messages.count)
+
+        let hasLegacyLocalRowsToReveal = !usesPaginatedHistory && visibleTailCount < messages.count
+        // Reveal already-cached rows first; only hit the remote cursor once local history is exhausted.
+        if hasLegacyLocalRowsToReveal || hasLocallyProjectedEarlierMessages {
+            localEarlierRevealTask?.cancel()
+            isLocalEarlierRevealPending = true
+            onRevealEarlierMessages(Self.pageSize)
+            if !usesPaginatedHistory {
+                withAnimation(.easeOut(duration: 0.15)) {
+                    visibleTailCount = min(visibleTailCount + Self.pageSize, messages.count + Self.pageSize)
+                }
+            }
+            scheduleLocalEarlierRevealCompletion()
+            return
+        }
+
+        if hasRemoteEarlierMessages {
+            guard !isLoadingRemoteEarlierMessages else {
+                return
+            }
+            pendingRemoteEarlierLoadMessageCount = messages.count
+            onLoadRemoteEarlierMessages()
+            return
+        }
+
+        if olderHistoryLoadErrorMessage != nil {
+            let expectedThreadID = threadID
+            isRetryingEarlierHistoryLoad = true
+            onRetryEarlierMessages {
+                guard scrollSessionThreadID == expectedThreadID else {
+                    return
+                }
+                isRetryingEarlierHistoryLoad = false
+            }
+        }
+    }
+
+    // Debounces the top button so a single tap cannot consume many local pages before SwiftUI lays out.
+    private func scheduleLocalEarlierRevealCompletion() {
+        let expectedThreadID = threadID
+        localEarlierRevealTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 220_000_000)
+            guard !Task.isCancelled,
+                  scrollSessionThreadID == expectedThreadID else {
+                return
+            }
+            isLocalEarlierRevealPending = false
+            localEarlierRevealTask = nil
         }
     }
 
@@ -897,10 +1018,15 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         scrollSessionThreadID = threadID
         visibleTailCount = shouldStageHeavyThreadOpen
             ? Self.initialWarmTailCount
-            : min(messages.count, Self.pageSize)
+            : min(messages.count, Self.initialVisibleTailCount)
         isScrolledToBottom = true
         isUserDraggingScroll = false
         userScrollCooldownUntil = nil
+        pendingRemoteEarlierLoadMessageCount = nil
+        isLocalEarlierRevealPending = false
+        isRetryingEarlierHistoryLoad = false
+        localEarlierRevealTask?.cancel()
+        localEarlierRevealTask = nil
         autoScrollMode = shouldAnchorToAssistantResponse ? .anchorAssistantResponse : .followBottom
         initialRecoverySnapPendingThreadID = threadID
         isProgressivelyRevealingRecentTail = shouldStageHeavyThreadOpen
@@ -915,6 +1041,30 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         progressiveTailRevealTask?.cancel()
         progressiveTailRevealTask = nil
         isProgressivelyRevealingRecentTail = false
+        pendingRemoteEarlierLoadMessageCount = nil
+        isLocalEarlierRevealPending = false
+        isRetryingEarlierHistoryLoad = false
+        localEarlierRevealTask?.cancel()
+        localEarlierRevealTask = nil
+    }
+
+    // Keeps the remote "Load earlier" affordance visible while a page is in flight.
+    private func handleMessageCountChange(oldCount: Int, newCount: Int) {
+        guard let pendingCount = pendingRemoteEarlierLoadMessageCount else {
+            return
+        }
+        if newCount > pendingCount || newCount > oldCount {
+            pendingRemoteEarlierLoadMessageCount = nil
+        }
+    }
+
+    // If the service finishes without adding rows, let the normal cursor/error flags decide visibility.
+    private func handleRemoteEarlierLoadingChange(isLoading: Bool) {
+        guard !isLoading,
+              pendingRemoteEarlierLoadMessageCount != nil else {
+            return
+        }
+        pendingRemoteEarlierLoadMessageCount = nil
     }
 
     private var timelineLoadingOverlay: some View {
@@ -938,7 +1088,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     // Stages the recent tail for heavy chats so thread switches avoid building dozens
     // of rich markdown rows in one main-thread burst. The last 3 opened chats stay warm.
     private func scheduleProgressiveTailRevealIfNeeded() {
-        let targetTailCount = min(messages.count, Self.pageSize)
+        let targetTailCount = min(messages.count, Self.initialVisibleTailCount)
 
         guard targetTailCount > 0 else {
             return
@@ -948,7 +1098,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             if visibleTailCount < targetTailCount {
                 visibleTailCount = targetTailCount
             }
-            if messages.count > Self.pageSize {
+            if messages.count > Self.initialVisibleTailCount {
                 TurnTimelineWarmThreadCache.remember(threadID)
             }
             isProgressivelyRevealingRecentTail = false
@@ -1001,7 +1151,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                 return
             }
 
-            let liveTargetTailCount = min(messages.count, Self.pageSize)
+            let liveTargetTailCount = min(messages.count, Self.initialVisibleTailCount)
             if visibleTailCount < liveTargetTailCount {
                 visibleTailCount = liveTargetTailCount
             }
@@ -1028,6 +1178,17 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             return
         }
 
+        // Content growth can briefly report "not bottom" before the queued
+        // follow snap lands; only user scroll phases should make that visible.
+        if !nextValue,
+           TurnScrollStateTracker.shouldIgnoreTransientNotBottomGeometry(
+            currentMode: autoScrollMode,
+            hasPendingFollowBottomScroll: followBottomScrollTask != nil,
+            isAutomaticScrollingPaused: shouldPauseAutomaticScrolling
+           ) {
+            return
+        }
+
         if nextValue {
             isScrolledToBottom = true
             if autoScrollMode != .anchorAssistantResponse {
@@ -1036,9 +1197,11 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             scheduleProgressiveTailRevealIfNeeded()
         } else {
             isScrolledToBottom = false
-            // Only disengage follow-bottom from user scroll gestures, not from
-            // transient geometry changes caused by content growth. The scroll phase
-            // handler already sets .manual when the user actively drags.
+            autoScrollMode = TurnScrollStateTracker.modeAfterAcceptedNotBottomGeometry(
+                currentMode: autoScrollMode
+            )
+            // Cancel queued app snaps once geometry confirms the viewport is away
+            // from bottom; transient content-growth frames are filtered above.
             if autoScrollMode == .manual || autoScrollMode == .anchorAssistantResponse {
                 followBottomScrollTask?.cancel()
                 followBottomScrollTask = nil
@@ -1149,7 +1312,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             proxy.scrollTo(assistantMessageID, anchor: .top)
         }
         shouldAnchorToAssistantResponse = false
-        autoScrollMode = .manual
+        autoScrollMode = .followBottom
         initialRecoverySnapPendingThreadID = nil
         return true
     }
@@ -1194,21 +1357,21 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     // Keeps the footer/timeline geometry transition stable while waiting for the first
     // assistant row to exist, so sending a message cannot leave a temporarily blank viewport.
     private var shouldPinTimelineToBottomDuringGeometryChange: Bool {
-        guard !shouldPauseAutomaticScrolling, isScrolledToBottom else {
-            return false
-        }
-
-        switch autoScrollMode {
-        case .followBottom:
-            return true
-        case .anchorAssistantResponse:
-            return TurnTimelineReducer.assistantResponseAnchorMessageID(
+        let assistantAnchorTargetExists: Bool
+        if autoScrollMode == .anchorAssistantResponse {
+            assistantAnchorTargetExists = TurnTimelineReducer.assistantResponseAnchorMessageID(
                 in: Array(visibleMessages),
                 activeTurnID: activeTurnID
-            ) == nil
-        case .manual:
-            return false
+            ) != nil
+        } else {
+            assistantAnchorTargetExists = false
         }
+        return TurnScrollStateTracker.shouldPinDuringGeometryChange(
+            currentMode: autoScrollMode,
+            isScrolledToBottom: isScrolledToBottom,
+            isAutomaticScrollingPaused: shouldPauseAutomaticScrolling,
+            assistantAnchorTargetExists: assistantAnchorTargetExists
+        )
     }
 
     /// For each message index, returns the aggregated assistant block text if the message
@@ -1274,10 +1437,13 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             let blockDiffText = blockDiffPresentation?.bodyText
             let blockDiffEntries = blockDiffPresentation?.entries
 
-            // Use the last assistant revert presentation in this block.
+            // Keep the source assistant row with its presentation so visible system rows can invoke the right change set.
             let blockRevert = messages[blockStart...blockEnd]
                 .reversed()
-                .compactMap { revertStatesByMessageID[$0.id] }
+                .compactMap { message -> (presentation: AssistantRevertPresentation, message: CodexMessage)? in
+                    guard let presentation = revertStatesByMessageID[message.id] else { return nil }
+                    return (presentation, message)
+                }
                 .first
 
             if copyText != nil || showsRunningIndicator || blockDiffEntries != nil || blockRevert != nil {
@@ -1286,12 +1452,86 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                     showsRunningIndicator: showsRunningIndicator,
                     blockDiffText: blockDiffText,
                     blockDiffEntries: blockDiffEntries,
-                    blockRevertPresentation: blockRevert
+                    blockRevertPresentation: blockRevert?.presentation,
+                    blockRevertMessage: blockRevert?.message
                 )
             }
             i = blockStart - 1
         }
         return result
+    }
+
+    static func rehomeCollapsedFinalAccessoryStates(
+        _ statesByMessageID: [String: AssistantBlockAccessoryState],
+        messages: [CodexMessage],
+        completedTurnIDs: Set<String>
+    ) -> [String: AssistantBlockAccessoryState] {
+        let collapsedFinalMessageIDs = TurnTimelineRenderProjection.collapsedFinalMessageIDs(
+            in: messages,
+            completedTurnIDs: completedTurnIDs
+        )
+        guard !collapsedFinalMessageIDs.isEmpty else {
+            return statesByMessageID
+        }
+        let hiddenMessageIDs = TurnTimelineRenderProjection.collapsedPreviousMessageIDs(
+            in: messages,
+            completedTurnIDs: completedTurnIDs
+        )
+
+        var updated = statesByMessageID
+        for finalIndex in messages.indices where collapsedFinalMessageIDs.contains(messages[finalIndex].id) {
+            let finalMessage = messages[finalIndex]
+            let sourceState = updated[finalMessage.id] ?? collapsedBlockAccessoryState(
+                forFinalIndex: finalIndex,
+                messages: messages,
+                hiddenMessageIDs: hiddenMessageIDs,
+                statesByMessageID: updated
+            )
+            guard let sourceState else { continue }
+
+            let finalCopyText = finalMessage.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            updated[finalMessage.id] = sourceState.replacingCopyText(finalCopyText.isEmpty ? nil : finalCopyText)
+        }
+        return updated
+    }
+
+    // When late tool rows are collapsed after the final answer, their block action
+    // state still belongs on the visible final row.
+    private static func collapsedBlockAccessoryState(
+        forFinalIndex finalIndex: Int,
+        messages: [CodexMessage],
+        hiddenMessageIDs: Set<String>,
+        statesByMessageID: [String: AssistantBlockAccessoryState]
+    ) -> AssistantBlockAccessoryState? {
+        let finalMessage = messages[finalIndex]
+        let finalTurnID = normalizedTurnID(finalMessage.turnId)
+        var blockStart = finalIndex
+        while blockStart > messages.startIndex && messages[blockStart - 1].role != .user {
+            blockStart -= 1
+        }
+
+        var blockEnd = finalIndex
+        while blockEnd < messages.index(before: messages.endIndex) && messages[blockEnd + 1].role != .user {
+            blockEnd += 1
+        }
+
+        for index in stride(from: blockEnd, through: blockStart, by: -1) {
+            let candidate = messages[index]
+            guard candidate.id != finalMessage.id else { continue }
+            guard hiddenMessageIDs.contains(candidate.id) else { continue }
+            if let finalTurnID, normalizedTurnID(candidate.turnId) != finalTurnID {
+                continue
+            }
+            if let state = statesByMessageID[candidate.id] {
+                return state
+            }
+        }
+        return nil
+    }
+
+    private static func normalizedTurnID(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed?.isEmpty == false ? trimmed : nil
     }
 
     // Keeps Copy aligned with real run completion instead of per-message streaming heuristics.
@@ -1409,23 +1649,6 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         )
     }
 
-    private func logTimelineGeometryChangeIfNeeded(old: ScrollBottomGeometry, new: ScrollBottomGeometry) {
-        let delta = max(
-            abs(new.contentHeight - old.contentHeight),
-            abs(new.viewportHeight - old.viewportHeight)
-        )
-        let bucket = Int(delta / 20)
-        guard bucket != lastTimelineGeometryLogBucket || new.isAtBottom != old.isAtBottom else {
-            return
-        }
-        lastTimelineGeometryLogBucket = bucket
-        debugTimelineLog(
-            "geometry changed bucket=\(bucket) oldBottom=\(old.isAtBottom) newBottom=\(new.isAtBottom) "
-                + "contentDelta=\(Int(new.contentHeight - old.contentHeight)) "
-                + "viewportDelta=\(Int(new.viewportHeight - old.viewportHeight))"
-        )
-    }
-
     // Scroll callbacks hit this often; keep logging fully lazy and non-mutating.
     private func debugTimelineLog(_ message: @autoclosure () -> String) {
         #if DEBUG
@@ -1443,6 +1666,17 @@ private struct ScrollBottomGeometry: Equatable {
     let isAtBottom: Bool
     let viewportHeight: CGFloat
     let contentHeight: CGFloat
+}
+
+// Keeps scroll-only body passes from deeply hashing every hydrated message.
+private struct TurnTimelineRenderItemsCacheSignature: Equatable {
+    let threadID: String
+    let timelineChangeToken: Int
+    let visibleTailCount: Int
+    let messageCount: Int
+    let firstMessageID: String?
+    let lastMessageID: String?
+    let completedTurnIDsHash: Int
 }
 
 // Pins SwiftUI's backing UIScrollView to the vertical axis when an oversized row

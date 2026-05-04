@@ -4,6 +4,7 @@
 // Exports: TurnToolbarContent, TurnThreadNavigationContext
 
 import SwiftUI
+import UIKit
 
 struct TurnThreadNavigationContext {
     let folderName: String
@@ -26,6 +27,7 @@ struct TurnToolbarContent: ToolbarContent {
     let isGitActionEnabled: Bool
     let disabledGitActions: Set<TurnGitActionKind>
     let isRunningGitAction: Bool
+    let gitActionLoadingTitle: String?
     let showsDiscardRuntimeChangesAndSync: Bool
     let gitSyncState: String?
     var onTapMacHandoff: (() -> Void)?
@@ -136,6 +138,7 @@ struct TurnToolbarContent: ToolbarContent {
                         isEnabled: isGitActionEnabled,
                         disabledActions: disabledGitActions,
                         isRunningAction: isRunningGitAction,
+                        loadingTitle: gitActionLoadingTitle,
                         showsDiscardRuntimeChangesAndSync: showsDiscardRuntimeChangesAndSync,
                         gitSyncState: gitSyncState,
                         onSelect: onGitAction
@@ -268,6 +271,7 @@ struct TurnThreadPathSheet: View {
     var onRenameThread: ((String) -> Void)? = nil
 
     @State private var renamePrompt = ThreadRenamePromptState()
+    @State private var didCopyPath = false
 
     var body: some View {
         NavigationStack {
@@ -303,9 +307,35 @@ struct TurnThreadPathSheet: View {
                     }
 
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("Path")
-                            .font(AppFont.caption(weight: .semibold))
-                            .foregroundStyle(.secondary)
+                        HStack(spacing: 8) {
+                            Text("Path")
+                                .font(AppFont.caption(weight: .semibold))
+                                .foregroundStyle(.secondary)
+
+                            Button {
+                                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                                copyPathToPasteboard()
+                            } label: {
+                                Group {
+                                    if didCopyPath {
+                                        Image(systemName: "checkmark")
+                                            .font(AppFont.system(size: 12, weight: .semibold))
+                                    } else {
+                                        Image("copy")
+                                            .renderingMode(.template)
+                                            .resizable()
+                                            .scaledToFit()
+                                            .scaleEffect(x: -1, y: 1)
+                                    }
+                                }
+                                .frame(width: 16, height: 16)
+                                .foregroundStyle(.secondary)
+                                .frame(width: 32, height: 32)
+                                .contentShape(Circle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(didCopyPath ? "Path copied" : "Copy path")
+                        }
 
                         Text(context.fullPath)
                             .font(AppFont.mono(.callout))
@@ -322,6 +352,19 @@ struct TurnThreadPathSheet: View {
         .presentationDetents([.fraction(0.4), .medium])
         .threadRenamePrompt(state: $renamePrompt) { newTitle in
             onRenameThread?(newTitle)
+        }
+    }
+
+    // Copies the full local project path while keeping the sheet visible.
+    private func copyPathToPasteboard() {
+        UIPasteboard.general.string = context.fullPath
+        withAnimation(.easeInOut(duration: 0.15)) {
+            didCopyPath = true
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                didCopyPath = false
+            }
         }
     }
 }

@@ -103,6 +103,36 @@ final class TurnMessageCachesTests: XCTestCase {
         XCTAssertEqual(reference?.path, "/Users/example/project/out/mockup.webp")
     }
 
+    func testCommandOutputImageReferenceParserIgnoresGlobCandidates() {
+        let reference = CommandOutputImageReferenceParser.firstReference(
+            command: "rg --files -g '*.png'",
+            outputTail: "*.png",
+            cwd: "/Users/example/project"
+        )
+
+        XCTAssertNil(reference)
+    }
+
+    func testCommandOutputImageReferenceParserKeepsBracketedFileNames() {
+        let reference = CommandOutputImageReferenceParser.firstReference(
+            command: "echo done",
+            outputTail: "/Users/example/project/Screenshot [1].png",
+            cwd: "/Users/example/project"
+        )
+
+        XCTAssertEqual(reference?.path, "/Users/example/project/Screenshot [1].png")
+    }
+
+    func testCommandOutputImageReferenceParserKeepsTemporaryImagePaths() {
+        let reference = CommandOutputImageReferenceParser.firstReference(
+            command: "echo done",
+            outputTail: "/tmp/remodex-preview.png",
+            cwd: "/Users/example/project"
+        )
+
+        XCTAssertEqual(reference?.path, "/tmp/remodex-preview.png")
+    }
+
     func testAssistantMarkdownImageReferenceParserFindsLocalImage() {
         let references = AssistantMarkdownImageReferenceParser.references(
             in: "Here it is:\n![wing](/Users/example/.codex/generated_images/turn/wing.png)"
@@ -156,6 +186,21 @@ final class TurnMessageCachesTests: XCTestCase {
         XCTAssertFalse(visibleText.contains("![real](/Users/example/real.png)"))
     }
 
+    func testAssistantMarkdownImageReferenceParserReadsEscapedAnglePathWithClosingParenthesis() {
+        let path = "/Users/example/generated images/final)%20 mock.png"
+        let markdownPath = CodexService.markdownImagePath(path)
+        let text = "![Generated image](\(markdownPath))"
+
+        let references = AssistantMarkdownImageReferenceParser.references(in: text)
+
+        XCTAssertEqual(markdownPath, "</Users/example/generated images/final%29%2520 mock.png>")
+        XCTAssertEqual(references.map(\.path), [path])
+        XCTAssertEqual(
+            CodexService.markdownImagePath("/Users/example/final%20mock.png"),
+            "</Users/example/final%2520mock.png>"
+        )
+    }
+
     func testMessageRowRenderModelCachesAssistantImageReferences() {
         let text = "Before\n![wing](/Users/example/wing.png)\nAfter"
         let message = CodexMessage(
@@ -169,6 +214,32 @@ final class TurnMessageCachesTests: XCTestCase {
 
         XCTAssertEqual(renderModel.assistantImageReferences.first?.path, "/Users/example/wing.png")
         XCTAssertEqual(renderModel.assistantTextWithoutImageSyntax, "Before\nAfter")
+        XCTAssertTrue(renderModel.assistantInlineContentSegments.isEmpty)
+    }
+
+    func testAssistantMarkdownSegmentsKeepTemporaryImagePosition() {
+        let text = "Before\n![mobile](/tmp/emanuele-mobile.png)\nAfter"
+        let segments = AssistantMarkdownImageReferenceParser.contentSegmentsPreservingTemporaryImages(from: text)
+
+        XCTAssertEqual(segments.count, 3)
+        XCTAssertEqual(segments[0], .text(id: 0, value: "Before\n"))
+        XCTAssertEqual(segments[1], .image(AssistantMarkdownImageReference(
+            path: "/tmp/emanuele-mobile.png",
+            altText: "mobile",
+            occurrenceIndex: 0
+        )))
+        XCTAssertEqual(segments[2], .text(id: 1, value: "\nAfter"))
+    }
+
+    func testAssistantMarkdownSegmentsLeaveGeneratedImageForTrailingPreview() {
+        let text = """
+        Before
+        ![Generated image](/Users/example/.codex/generated_images/thread/wing.png)
+        After
+        """
+        let segments = AssistantMarkdownImageReferenceParser.contentSegmentsPreservingTemporaryImages(from: text)
+
+        XCTAssertEqual(segments, [.text(id: 0, value: "Before\n\nAfter")])
     }
 
     func testMessageRowRenderModelStripsImagesBeforeMermaidParsing() {

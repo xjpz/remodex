@@ -17,6 +17,7 @@ struct SidebarView: View {
     var isVisible: Bool = true
 
     let onClose: () -> Void
+    let onNewChatCreationStateChange: (Bool) -> Void
     let onOpenThread: (CodexThread) -> Void
 
     @State private var searchText = ""
@@ -56,6 +57,16 @@ struct SidebarView: View {
             )
             .padding(.horizontal, 16)
             .padding(.bottom, 10)
+
+            if SidebarThreadsLoadingPresentation.shouldShowInlineStatus(
+                isLoadingThreads: codex.isLoadingThreads,
+                threadCount: codex.threads.count
+            ) {
+                SidebarThreadsInlineLoadingView()
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
+                    .transition(.opacity)
+            }
 
             SidebarThreadListView(
                 isFiltering: !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -188,13 +199,12 @@ struct SidebarView: View {
         } message: {
             Text("All active chats in this project will be archived.")
         }
-        .confirmationDialog(
+        .alert(
             "Remove \"\(projectGroupPendingDeletion?.label ?? "project")\" from this phone?",
             isPresented: Binding(
                 get: { projectGroupPendingDeletion != nil },
                 set: { if !$0 { projectGroupPendingDeletion = nil } }
-            ),
-            titleVisibility: .visible
+            )
         ) {
             Button("Remove from Phone", role: .destructive) {
                 deletePendingProjectGroupLocally()
@@ -275,10 +285,15 @@ struct SidebarView: View {
     }
 
     private func handleNewChatTap(preferredProjectPath: String?) {
+        createThreadErrorMessage = nil
+        isCreatingThread = true
+        onNewChatCreationStateChange(true)
+        prepareSidebarForChatNavigation()
         Task { @MainActor in
-            createThreadErrorMessage = nil
-            isCreatingThread = true
-            defer { isCreatingThread = false }
+            defer {
+                isCreatingThread = false
+                onNewChatCreationStateChange(false)
+            }
 
             do {
                 let thread = try await WorktreeFlowCoordinator.startNewLocalChat(
@@ -295,10 +310,15 @@ struct SidebarView: View {
     }
 
     private func handleNewWorktreeChatTap(preferredProjectPath: String) {
+        createThreadErrorMessage = nil
+        isCreatingThread = true
+        onNewChatCreationStateChange(true)
+        prepareSidebarForChatNavigation()
         Task { @MainActor in
-            createThreadErrorMessage = nil
-            isCreatingThread = true
-            defer { isCreatingThread = false }
+            defer {
+                isCreatingThread = false
+                onNewChatCreationStateChange(false)
+            }
 
             do {
                 let thread = try await WorktreeFlowCoordinator.startNewWorktreeChat(
@@ -316,13 +336,21 @@ struct SidebarView: View {
 
     private func selectThread(_ thread: CodexThread) {
         debugSidebarLog("selectThread id=\(thread.id) title=\(thread.displayTitle)")
-        searchText = ""
+        prepareSidebarForChatNavigation()
         onOpenThread(thread)
     }
 
     private func openSettings() {
         searchText = ""
+        isSearchActive = false
         showSettings = true
+        onClose()
+    }
+
+    // Clears sidebar-only input state before navigation so full-width search mode cannot hold the drawer open.
+    private func prepareSidebarForChatNavigation() {
+        searchText = ""
+        isSearchActive = false
         onClose()
     }
 
@@ -554,6 +582,27 @@ enum SidebarThreadsLoadingPresentation {
     // Keeps pull-to-refresh from stacking a second spinner over an already populated sidebar.
     static func shouldShowOverlay(isLoadingThreads: Bool, threadCount: Int) -> Bool {
         isLoadingThreads && threadCount == 0
+    }
+
+    // Populated sidebars still need feedback while the complete metadata pass is running.
+    static func shouldShowInlineStatus(isLoadingThreads: Bool, threadCount: Int) -> Bool {
+        isLoadingThreads && threadCount > 0
+    }
+}
+
+private struct SidebarThreadsInlineLoadingView: View {
+    var body: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Syncing chats")
+                .font(AppFont.caption())
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 10)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
     }
 }
 

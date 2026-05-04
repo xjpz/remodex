@@ -40,7 +40,7 @@ func timelineDisplayText(for message: CodexMessage) -> String {
 // ─── File-Change Recap UI ─────────────────────────────────────
 
 // MARK: - FileChangeInlineActionRow
-// Compact row: small gray action label on top, filename (blue) + +/- counts below.
+// Keeps live file-change deltas as lightweight status rows while a turn is still streaming.
 private struct FileChangeInlineActionRow: View {
     let entry: TurnFileChangeSummaryEntry
     var showActionLabel: Bool = true
@@ -68,6 +68,149 @@ private struct FileChangeInlineActionRow: View {
     }
 }
 
+// MARK: - FileChangeSummaryBox
+// Renders turn-end file edits as one compact recap instead of chat-like rows.
+private struct FileChangeSummaryBox: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    let entries: [TurnFileChangeSummaryEntry]
+    let fallbackText: String
+    let messageID: String
+
+    // Default to expanded so the recap stays informative without an extra tap;
+    // collapse remains available for long lists or visual decluttering.
+    @State private var isExpanded: Bool = true
+    @State private var selectedEntry: TurnFileChangeSummaryEntry?
+
+    private var canCollapse: Bool {
+        !entries.isEmpty || !fallbackText.isEmpty
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+
+            if isExpanded {
+                if !entries.isEmpty {
+                    Divider()
+
+                    ForEach(entries.indices, id: \.self) { index in
+                        let entry = entries[index]
+                        let isLastEntry = index == entries.index(before: entries.endIndex)
+
+                        Button {
+                            selectedEntry = entry
+                        } label: {
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text(entry.compactPath)
+                                    .font(AppFont.subheadline())
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+
+                                Spacer(minLength: 8)
+
+                                if entry.additions > 0 || entry.deletions > 0 {
+                                    DiffCountsLabel(additions: entry.additions, deletions: entry.deletions)
+                                        .font(AppFont.mono(.caption))
+                                }
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 9)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+
+                        if !isLastEntry {
+                            Divider()
+                                .padding(.leading, 12)
+                        }
+                    }
+                } else if !fallbackText.isEmpty {
+                    Text(fallbackText)
+                        .font(AppFont.footnote())
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 10)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            UserBubbleColor.default.bubbleBackground(for: colorScheme),
+            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color(.separator).opacity(0.4), lineWidth: 0.5)
+        }
+        .padding(2)
+        .sheet(item: $selectedEntry) { entry in
+            TurnDiffSheet(
+                title: entry.compactPath,
+                entries: [entry],
+                bodyText: fallbackText,
+                messageID: messageID,
+                restrictToPath: entry.path
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var header: some View {
+        let content = HStack(spacing: 6) {
+            Image(systemName: "pencil.line")
+                .font(AppFont.footnote(weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            Text(title)
+                .font(AppFont.footnote(weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            Spacer(minLength: 8)
+
+            if canCollapse {
+                Image(systemName: "chevron.down")
+                    .font(AppFont.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .rotationEffect(.degrees(isExpanded ? 0 : -90))
+                    .accessibilityHidden(true)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 10)
+        .padding(.bottom, isExpanded && !entries.isEmpty ? 8 : 10)
+        .contentShape(Rectangle())
+
+        if canCollapse {
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                content
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(title)
+            .accessibilityHint(isExpanded ? "Collapse list" : "Expand list")
+            .accessibilityAddTraits(.isButton)
+        } else {
+            content
+        }
+    }
+
+    private var title: String {
+        let count = entries.count
+        if count == 0 {
+            return "Files modified"
+        }
+        if count == 1 {
+            return "1 file modified"
+        }
+        return "\(count) files modified"
+    }
+}
+
 /// Resets the in-memory AttributedString cache that backs ``MarkdownTextView``.
 /// Kept for explicit memory recovery without forcing cold parses on every thread switch.
 @MainActor
@@ -76,8 +219,8 @@ enum MarkdownParseCacheReset {
 }
 
 // Wraps the default Textual markdown parser with a bounded AttributedString
-// cache so Foundation's markdown parser is not re-run when LazyVStack
-// recycles a cell on upward scroll.
+// cache so Foundation's markdown parser is not re-run during timeline redraws
+// or when a future lazy container recycles a row on upward scroll.
 @MainActor
 private struct CachingMarkdownParser: MarkupParser {
     static let shared = CachingMarkdownParser()
@@ -99,19 +242,37 @@ private struct CachingMarkdownParser: MarkupParser {
     }
 }
 
+@MainActor
+private struct UncachedMarkdownParser: MarkupParser {
+    static let shared = UncachedMarkdownParser()
+    private let inner: AttributedStringMarkdownParser = .markdown()
+
+    func attributedString(for input: String) throws -> AttributedString {
+        try inner.attributedString(for: input)
+    }
+}
+
 struct MarkdownTextView: View {
     let text: String
     let profile: MarkdownRenderProfile
     var enablesSelection: Bool = false
     var constrainsToAvailableWidth: Bool = false
+    var usesCaches: Bool = true
 
     var body: some View {
-        let transformed = MarkdownTextFormatter.renderableText(from: text, profile: profile)
+        let transformed = MarkdownTextFormatter.renderableText(
+            from: text,
+            profile: profile,
+            usesCache: usesCaches
+        )
+        let parser: any MarkupParser = usesCaches
+            ? CachingMarkdownParser.shared
+            : UncachedMarkdownParser.shared
         // Keep prose on the app font, but let Textual own markdown/code layout to avoid block sizing regressions.
         // Force code-block overflow to wrap instead of scroll so horizontal ScrollViews
         // inside the timeline do not compete with the sidebar swipe gesture or let
         // the chat feel like a pannable canvas.
-        let baseView = StructuredText(transformed, parser: CachingMarkdownParser.shared)
+        let baseView = StructuredText(transformed, parser: parser)
             .font(AppFont.body())
             .textual.structuredTextStyle(.gitHub)
             .textual.overflowMode(.wrap)
@@ -142,28 +303,27 @@ private struct StreamingAssistantMarkdownTextView: View {
     var constrainsToAvailableWidth: Bool = false
 
     @State private var displayedText = ""
+    @State private var displayedSegments: StreamingMarkdownBlockSegments
+
+    init(
+        text: String,
+        enablesSelection: Bool = false,
+        constrainsToAvailableWidth: Bool = false
+    ) {
+        self.text = text
+        self.enablesSelection = enablesSelection
+        self.constrainsToAvailableWidth = constrainsToAvailableWidth
+        _displayedText = State(initialValue: text)
+        _displayedSegments = State(initialValue: StreamingMarkdownBlockSplitter.split(text))
+    }
 
     var body: some View {
-        let effectiveText = displayedText.isEmpty ? text : displayedText
-        let rendered = Text(effectiveText)
-            .font(AppFont.body())
-            .foregroundStyle(.primary)
-            .fixedSize(horizontal: false, vertical: true)
-
-        let selectable = Group {
-            if enablesSelection {
-                rendered.textSelection(.enabled)
-            } else {
-                rendered
-            }
-        }
-
         Group {
             if constrainsToAvailableWidth {
-                selectable
+                renderedSegments(displayedSegments)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                selectable
+                renderedSegments(displayedSegments)
             }
         }
         .onAppear {
@@ -174,17 +334,136 @@ private struct StreamingAssistantMarkdownTextView: View {
         }
     }
 
-    // Keep the streaming row append-oriented; the finalized row returns to Textual markdown.
+    @ViewBuilder
+    private func renderedSegments(_ segments: StreamingMarkdownBlockSegments) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(segments.stableChunks) { chunk in
+                MarkdownTextView(
+                    text: chunk.text,
+                    profile: .assistantProse,
+                    enablesSelection: enablesSelection,
+                    constrainsToAvailableWidth: constrainsToAvailableWidth
+                )
+            }
+
+            if !segments.activeMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                MarkdownTextView(
+                    text: segments.activeMarkdown,
+                    profile: .assistantProse,
+                    enablesSelection: enablesSelection,
+                    constrainsToAvailableWidth: constrainsToAvailableWidth,
+                    usesCaches: false
+                )
+            }
+        }
+    }
+
+    // Keep streaming append-oriented while promoting completed blocks to cached markdown.
     private func reconcileDisplayedText(with nextText: String) {
         guard !nextText.isEmpty else {
+            guard !displayedText.isEmpty else { return }
             displayedText = ""
+            displayedSegments = StreamingMarkdownBlockSplitter.split("")
             return
         }
         if nextText.hasPrefix(displayedText) {
-            displayedText.append(String(nextText.dropFirst(displayedText.count)))
+            let appended = String(nextText.dropFirst(displayedText.count))
+            guard !appended.isEmpty else { return }
+            displayedText.append(appended)
         } else {
+            guard displayedText != nextText else { return }
             displayedText = nextText
         }
+        displayedSegments = StreamingMarkdownBlockSplitter.split(displayedText)
+    }
+}
+
+private struct StreamingMarkdownBlockSegments {
+    let stableChunks: [StreamingMarkdownChunk]
+    let activeMarkdown: String
+}
+
+private struct StreamingMarkdownChunk: Identifiable {
+    let id: Int
+    let text: String
+}
+
+private enum StreamingMarkdownBlockSplitter {
+    private static let stableChunkTargetCharacterCount = 6_000
+
+    static func split(_ text: String) -> StreamingMarkdownBlockSegments {
+        var lineStart = text.startIndex
+        var chunkStart = text.startIndex
+        var isInsideFence = false
+        var stableChunks: [StreamingMarkdownChunk] = []
+
+        while lineStart < text.endIndex {
+            let lineEnd = text[lineStart...].firstIndex(of: "\n") ?? text.endIndex
+            let nextLineStart = lineEnd < text.endIndex ? text.index(after: lineEnd) : text.endIndex
+            let hasLineBreak = lineEnd < text.endIndex
+            let trimmedLine = String(text[lineStart..<lineEnd])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            var stableBoundary: String.Index?
+            if isFenceDelimiter(trimmedLine) {
+                isInsideFence.toggle()
+                if !isInsideFence {
+                    stableBoundary = nextLineStart
+                }
+            } else if !isInsideFence, hasLineBreak {
+                if trimmedLine.isEmpty || isStableSingleLineBlock(trimmedLine) {
+                    stableBoundary = nextLineStart
+                }
+            }
+
+            if let stableBoundary,
+               shouldSealChunk(in: text, from: chunkStart, to: stableBoundary) {
+                appendChunk(in: text, from: chunkStart, to: stableBoundary, into: &stableChunks)
+                chunkStart = stableBoundary
+            }
+
+            lineStart = nextLineStart
+        }
+
+        return StreamingMarkdownBlockSegments(
+            stableChunks: stableChunks,
+            activeMarkdown: String(text[chunkStart...])
+        )
+    }
+
+    // Keep the newest chunk intact so Textual can apply native paragraph/list/code spacing
+    // while old chunks stop reparsing during long streaming responses.
+    private static func shouldSealChunk(in text: String, from start: String.Index, to boundary: String.Index) -> Bool {
+        guard boundary < text.endIndex else { return false }
+        return text.distance(from: start, to: boundary) >= stableChunkTargetCharacterCount
+    }
+
+    private static func appendChunk(
+        in text: String,
+        from start: String.Index,
+        to end: String.Index,
+        into chunks: inout [StreamingMarkdownChunk]
+    ) {
+        guard start < end else { return }
+        let chunkText = String(text[start..<end])
+        guard !chunkText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        chunks.append(
+            StreamingMarkdownChunk(
+                id: chunks.count,
+                text: chunkText
+            )
+        )
+    }
+
+    private static func isFenceDelimiter(_ trimmedLine: String) -> Bool {
+        trimmedLine.hasPrefix("```") || trimmedLine.hasPrefix("~~~")
+    }
+
+    private static func isStableSingleLineBlock(_ trimmedLine: String) -> Bool {
+        let headingMarkerCount = trimmedLine.prefix(while: { $0 == "#" }).count
+        let isHeading = (1...6).contains(headingMarkerCount)
+            && trimmedLine.dropFirst(headingMarkerCount).hasPrefix(" ")
+        return isHeading || trimmedLine == "---" || trimmedLine == "***"
     }
 }
 
@@ -287,19 +566,33 @@ private struct CodeCommentFindingCard: View {
 
 enum MarkdownTextFormatter {
     // Applies lightweight markdown cleanup and turns file paths into link-styled labels.
-    static func renderableText(from raw: String, profile: MarkdownRenderProfile) -> String {
-        MarkdownRenderableTextCache.rendered(raw: raw, profile: profile) {
-            let normalizedSkills = SkillReferenceFormatter.replacingSkillReferences(
-                in: raw,
-                style: .displayName
-            )
-            let headingNormalized = replaceMatches(
-                in: normalizedSkills,
-                regex: TurnMessageRegexCache.heading,
-                template: "**$1**"
-            )
-            return linkifyFileReferenceLines(in: headingNormalized, profile: profile)
+    static func renderableText(
+        from raw: String,
+        profile: MarkdownRenderProfile,
+        usesCache: Bool = true
+    ) -> String {
+        let build = {
+            renderableTextUncached(from: raw, profile: profile)
         }
+
+        if usesCache {
+            return MarkdownRenderableTextCache.rendered(raw: raw, profile: profile, builder: build)
+        }
+
+        return build()
+    }
+
+    private static func renderableTextUncached(from raw: String, profile: MarkdownRenderProfile) -> String {
+        let normalizedSkills = SkillReferenceFormatter.replacingSkillReferences(
+            in: raw,
+            style: .displayName
+        )
+        let headingNormalized = replaceMatches(
+            in: normalizedSkills,
+            regex: TurnMessageRegexCache.heading,
+            template: "**$1**"
+        )
+        return linkifyFileReferenceLines(in: headingNormalized, profile: profile)
     }
 
     private static func linkifyFileReferenceLines(in text: String, profile: MarkdownRenderProfile) -> String {
@@ -652,115 +945,143 @@ private struct AssistantMarkdownImagePreviewButton: View {
     let currentWorkingDirectory: String?
 
     @Environment(CodexService.self) private var codex
-    @State private var isLoading = false
-    @State private var previewImage: PreviewImagePayload?
-    @State private var previewError: String?
+    @State private var previewRequest: AssistantWorkspaceImagePreviewRequest?
+    @State private var loadedPreview: PreviewImagePayload?
+    @State private var isAutoLoadingPreview = false
+    @State private var didAttemptAutoPreviewLoad = false
+
+    private static let cornerRadius: CGFloat = 18
+    private static let maxWidth: CGFloat = 200
 
     var body: some View {
         Button {
             HapticFeedback.shared.triggerImpactFeedback(style: .light)
-            loadPreview()
+            openPreview()
         } label: {
-            HStack(spacing: 8) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color(.secondarySystemFill))
-                    if isLoading {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Image(systemName: "photo")
-                            .font(AppFont.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .frame(width: 32, height: 32)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(reference.displayTitle)
-                        .font(AppFont.caption(weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Text(reference.fileName)
-                        .font(AppFont.mono(.caption))
-                        .foregroundStyle(.primary.opacity(0.78))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-
-                Spacer(minLength: 0)
-
-                Image(systemName: "chevron.right")
-                    .font(AppFont.system(size: 8, weight: .semibold))
-                    .foregroundStyle(.quaternary)
-            }
-            .padding(8)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color(.secondarySystemBackground).opacity(0.55))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(Color(.separator).opacity(0.55), lineWidth: 1)
-            )
+            content
         }
         .buttonStyle(.plain)
-        .disabled(isLoading)
-        .fullScreenCover(item: $previewImage) { payload in
-            ZoomableImagePreviewScreen(
-                payload: payload,
-                onDismiss: { previewImage = nil }
+        .task(id: autoPreviewLoadKey) {
+            await loadPreviewAfterChatSettlesIfNeeded()
+        }
+        .fullScreenCover(item: $previewRequest) { request in
+            AssistantWorkspaceImagePreviewScreen(
+                reference: request.reference,
+                currentWorkingDirectory: request.currentWorkingDirectory,
+                initialPayload: request.initialPayload,
+                onDismiss: { previewRequest = nil }
             )
         }
-        .alert("Image Preview", isPresented: previewErrorIsPresented, actions: {
-            Button("OK", role: .cancel) {
-                previewError = nil
-            }
-        }, message: {
-            Text(previewError ?? "")
-        })
     }
 
-    private func loadPreview() {
-        guard !isLoading else { return }
-        isLoading = true
-
-        Task { @MainActor in
-            defer { isLoading = false }
-            do {
-                let cachedPreview = await WorkspaceImagePreviewCache.shared.cachedPreview(forPath: reference.path)
-                let result = try await codex.readWorkspaceImage(
-                    path: reference.path,
-                    cwd: currentWorkingDirectory,
-                    cachedMetadata: cachedPreview?.metadata
-                )
-                if result.isNotModified, let cachedPreview {
-                    previewImage = PreviewImagePayload(
-                        image: cachedPreview.payload.image,
-                        title: cachedPreview.metadata.fileName.isEmpty ? reference.fileName : cachedPreview.metadata.fileName
-                    )
-                    return
-                }
-
-                let decodedImage = try await WorkspaceImagePreviewCache.shared.preview(for: result)
-                previewImage = PreviewImagePayload(
-                    image: decodedImage.image,
-                    title: result.fileName.isEmpty ? reference.fileName : result.fileName
-                )
-            } catch {
-                previewError = error.localizedDescription
-            }
+    @ViewBuilder
+    private var content: some View {
+        if let loadedPreview {
+            loadedImage(loadedPreview)
+        } else {
+            metadataCard
         }
     }
 
-    private var previewErrorIsPresented: Binding<Bool> {
-        Binding(
-            get: { previewError != nil },
-            set: { isPresented in
-                if !isPresented {
-                    previewError = nil
+    private func loadedImage(_ payload: PreviewImagePayload) -> some View {
+        Image(uiImage: payload.image)
+            .resizable()
+            .scaledToFit()
+            .frame(maxWidth: Self.maxWidth, alignment: .leading)
+            .clipShape(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
+                    .stroke(Color.primary.opacity(0.06), lineWidth: 0.5)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
+    }
+
+    private var metadataCard: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                Circle()
+                    .fill(Color.accentColor.opacity(0.12))
+                if isAutoLoadingPreview {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .tint(Color.accentColor)
+                } else {
+                    Image(systemName: "photo")
+                        .font(AppFont.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
                 }
             }
+            .frame(width: 32, height: 32)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(reference.fileName.isEmpty ? "Generated image" : reference.fileName)
+                    .font(AppFont.subheadline(weight: .semibold))
+                    .foregroundStyle(.primary)
+                Text(reference.path)
+                    .font(AppFont.mono(.caption))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer(minLength: 0)
+
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                .font(AppFont.system(size: 14, weight: .semibold))
+                .foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
+                .fill(Color(.secondarySystemBackground))
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 0.5)
+        )
+    }
+
+    private func openPreview() {
+        previewRequest = AssistantWorkspaceImagePreviewRequest(
+            reference: reference,
+            currentWorkingDirectory: currentWorkingDirectory,
+            initialPayload: loadedPreview
+        )
+    }
+
+    private var autoPreviewLoadKey: String {
+        "\(reference.id)|\(codex.connectionPhase)"
+    }
+
+    private var canAutoLoadPreview: Bool {
+        codex.connectionPhase == .connected
+    }
+
+    @MainActor
+    private func loadPreviewAfterChatSettlesIfNeeded() async {
+        guard canAutoLoadPreview,
+              loadedPreview == nil,
+              !isAutoLoadingPreview,
+              !didAttemptAutoPreviewLoad else {
+            return
+        }
+
+        do {
+            // Give post-connect UI reconciliation a beat before starting image reads.
+            try await Task.sleep(nanoseconds: 300_000_000)
+            guard canAutoLoadPreview, loadedPreview == nil else { return }
+            didAttemptAutoPreviewLoad = true
+            isAutoLoadingPreview = true
+            defer { isAutoLoadingPreview = false }
+            loadedPreview = try await AssistantWorkspaceImagePreviewLoader.load(
+                reference: reference,
+                currentWorkingDirectory: currentWorkingDirectory,
+                codex: codex
+            )
+        } catch {
+            // Inline auto-load stays silent; the fullscreen sheet owns visible errors and retry.
+        }
     }
 }
 
@@ -817,6 +1138,9 @@ private struct UserBubbleTextBlock<Content: View>: View {
 }
 
 struct MessageRow: View, Equatable {
+
+    @Environment(\.colorScheme) private var colorScheme
+    @AppStorage(UserBubbleColor.storageKey) private var userBubbleColorRawValue = UserBubbleColor.defaultStoredRawValue
 
     let message: CodexMessage
     let isRetryAvailable: Bool
@@ -913,7 +1237,8 @@ struct MessageRow: View, Equatable {
     }
 
     private func userBubble(text: String) -> some View {
-        HStack {
+        let bubbleColor = selectedUserBubbleColor
+        return HStack {
             Spacer(minLength: 60)
             VStack(alignment: .trailing, spacing: 4) {
                 if !message.attachments.isEmpty {
@@ -929,15 +1254,15 @@ struct MessageRow: View, Equatable {
                         contentIdentity: message.id,
                         rawText: text
                     ) {
-                        userBubbleText(text)
+                        userBubbleText(text, bubbleColor: bubbleColor)
                             .font(AppFont.body())
+                            .foregroundStyle(bubbleColor.bubbleForeground(for: colorScheme))
                     }
                         .padding(.vertical, 12)
                         .padding(.horizontal, 16)
                         .background {
-                            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                                .fill(Color(.tertiarySystemFill).opacity(0.8))
-                                .stroke(.secondary.opacity(0.08))
+                            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                                .fill(bubbleColor.bubbleBackground(for: colorScheme))
                         }
                 }
 
@@ -974,9 +1299,13 @@ struct MessageRow: View, Equatable {
         }
     }
 
+    private var selectedUserBubbleColor: UserBubbleColor {
+        UserBubbleColor(rawValue: userBubbleColorRawValue) ?? .default
+    }
+
     // Renders inline @file/plugin and $skill mentions inside one AttributedString so large
     // messages do not build an arbitrarily deep SwiftUI Text concatenation chain.
-    private func userBubbleText(_ rawText: String) -> Text {
+    private func userBubbleText(_ rawText: String, bubbleColor: UserBubbleColor) -> Text {
         let normalizedRawText = SkillReferenceFormatter.replacingSkillReferences(
             in: rawText,
             style: .mentionToken
@@ -1008,7 +1337,8 @@ struct MessageRow: View, Equatable {
                 from: normalizedRawText,
                 matches: matches,
                 nsText: nsText,
-                confirmedFileMentions: confirmedFileMentions
+                confirmedFileMentions: confirmedFileMentions,
+                bubbleColor: bubbleColor
             )
         )
     }
@@ -1035,7 +1365,8 @@ struct MessageRow: View, Equatable {
         from text: String,
         matches: [NSTextCheckingResult],
         nsText: NSString,
-        confirmedFileMentions: Set<String>
+        confirmedFileMentions: Set<String>,
+        bubbleColor: UserBubbleColor
     ) -> AttributedString {
         var attributed = AttributedString()
         var cursor = 0
@@ -1076,13 +1407,13 @@ struct MessageRow: View, Equatable {
                 if trigger == "@", isConfirmedFileMention {
                     let fileName = (normalizedToken as NSString).lastPathComponent
                     displayName = fileName.isEmpty ? normalizedToken : fileName
-                    color = .blue
+                    color = bubbleColor.mentionForeground(for: colorScheme, fallback: .blue)
                 } else if trigger == "@" {
                     displayName = SkillDisplayNameFormatter.displayName(for: normalizedToken)
-                    color = .blue
+                    color = bubbleColor.mentionForeground(for: colorScheme, fallback: .blue)
                 } else {
                     displayName = SkillDisplayNameFormatter.displayName(for: normalizedToken)
-                    color = .indigo
+                    color = bubbleColor.mentionForeground(for: colorScheme, fallback: .indigo)
                 }
 
                 var highlightedSegment = AttributedString(displayName)
@@ -1165,25 +1496,37 @@ struct MessageRow: View, Equatable {
             && visibleAssistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && inferredQuestionnaire == nil
             && mermaidContent == nil
-        // Prefer copying the exact assistant block the user can see instead of the
-        // whole non-user turn aggregate assembled by the timeline footer cache.
-        let assistantCopyText: String? = {
-            let trimmedVisibleText = visibleAssistantText.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmedVisibleText.isEmpty {
-                return trimmedVisibleText
-            }
-            return assistantBlockAccessoryState?.copyText
-        }()
         let usesCachedAssistantImageContent = !message.isStreaming && visibleAssistantText == bodyText
         let assistantImageReferences = usesCachedAssistantImageContent
             ? renderModel.assistantImageReferences
             : []
+        let assistantInlineContentSegments = usesCachedAssistantImageContent
+            ? renderModel.assistantInlineContentSegments
+            : []
+        let trailingAssistantImageReferences = assistantImageReferences.filter { !$0.isTemporaryScreenshotImage }
         let visibleAssistantTextWithoutImageSyntax = assistantImageReferences.isEmpty
             ? visibleAssistantText
             : (renderModel.assistantTextWithoutImageSyntax ?? visibleAssistantText)
-        let hasRenderableAssistantContent = !visibleAssistantTextWithoutImageSyntax.isEmpty
+        let trimmedVisibleAssistantText = visibleAssistantTextWithoutImageSyntax
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasVisibleAssistantText = !trimmedVisibleAssistantText.isEmpty
+        let rendersTemporaryImagesInline = !assistantInlineContentSegments.isEmpty
+            && !message.isStreaming
+            && mermaidContent == nil
+            && proposedPlan == nil
+            && inferredQuestionnaire == nil
+        let hasRenderableAssistantContent = hasVisibleAssistantText
             || proposedPlan != nil
-            || !assistantImageReferences.isEmpty
+            || !trailingAssistantImageReferences.isEmpty
+            || rendersTemporaryImagesInline
+        // Copy only the visible prose. Image-only artifact rows should not expose a
+        // second copy affordance for the hidden markdown image syntax.
+        let assistantCopyText: String? = {
+            if !trimmedVisibleAssistantText.isEmpty {
+                return trimmedVisibleAssistantText
+            }
+            return trailingAssistantImageReferences.isEmpty ? assistantBlockAccessoryState?.copyText : nil
+        }()
         return VStack(alignment: .leading, spacing: 8) {
             if let commentContent, commentContent.hasFindings {
                 VStack(alignment: .leading, spacing: 10) {
@@ -1234,24 +1577,45 @@ struct MessageRow: View, Equatable {
                         isStreaming: message.isStreaming,
                         canImplement: assistantTurnCompleted
                     )
+                } else if rendersTemporaryImagesInline {
+                    ForEach(assistantInlineContentSegments) { segment in
+                        switch segment {
+                        case .text(_, let segmentText):
+                            MarkdownTextView(
+                                text: segmentText,
+                                profile: .assistantProse,
+                                enablesSelection: enablesInlineMarkdownSelectionInTimeline,
+                                constrainsToAvailableWidth: true
+                            )
+                        case .image(let reference):
+                            AssistantMarkdownImagePreviewButton(
+                                reference: reference,
+                                currentWorkingDirectory: currentWorkingDirectory
+                            )
+                        }
+                    }
                 } else if message.isStreaming {
-                    StreamingAssistantMarkdownTextView(
-                        text: visibleAssistantTextWithoutImageSyntax,
-                        enablesSelection: enablesInlineMarkdownSelectionInTimeline,
-                        constrainsToAvailableWidth: true
-                    )
+                    if hasVisibleAssistantText {
+                        StreamingAssistantMarkdownTextView(
+                            text: visibleAssistantTextWithoutImageSyntax,
+                            enablesSelection: enablesInlineMarkdownSelectionInTimeline,
+                            constrainsToAvailableWidth: true
+                        )
+                    }
                 } else {
-                    MarkdownTextView(
-                        text: visibleAssistantTextWithoutImageSyntax,
-                        profile: .assistantProse,
-                        enablesSelection: enablesInlineMarkdownSelectionInTimeline,
-                        constrainsToAvailableWidth: true
-                    )
+                    if hasVisibleAssistantText {
+                        MarkdownTextView(
+                            text: visibleAssistantTextWithoutImageSyntax,
+                            profile: .assistantProse,
+                            enablesSelection: enablesInlineMarkdownSelectionInTimeline,
+                            constrainsToAvailableWidth: true
+                        )
+                    }
                 }
 
-                if !assistantImageReferences.isEmpty {
+                if !trailingAssistantImageReferences.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
-                        ForEach(assistantImageReferences) { reference in
+                        ForEach(trailingAssistantImageReferences) { reference in
                             AssistantMarkdownImagePreviewButton(
                                 reference: reference,
                                 currentWorkingDirectory: currentWorkingDirectory
@@ -1356,6 +1720,7 @@ struct MessageRow: View, Equatable {
         }
     }
 
+    @ViewBuilder
     private func fileChangeSystemView(text: String, renderModel: MessageRowRenderModel) -> some View {
         let renderState = renderModel.fileChangeState ?? FileChangeRenderState(
             summary: nil,
@@ -1365,22 +1730,47 @@ struct MessageRow: View, Equatable {
         let actionEntries = renderState.actionEntries
         let hasActionRows = !actionEntries.isEmpty
         let allEntries = hasActionRows ? actionEntries : (renderState.summary?.entries ?? [])
-        let grouped = renderModel.fileChangeGroups
+        let fallbackText = renderState.bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        return VStack(alignment: .leading, spacing: 8) {
-            ForEach(grouped, id: \.key) { group in
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(group.key)
-                        .font(AppFont.caption())
-                        .foregroundStyle(.secondary.opacity(0.6))
+        if message.isStreaming {
+            fileChangeStreamingSystemView(
+                text: text,
+                entries: allEntries,
+                fallbackText: fallbackText
+            )
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                FileChangeSummaryBox(
+                    entries: allEntries,
+                    fallbackText: fallbackText,
+                    messageID: message.id
+                )
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contextMenu {
+                selectableTextActions(text: text, usesMarkdownSelection: false)
+            }
+        }
+    }
 
-                    ForEach(group.entries) { entry in
-                        FileChangeInlineActionRow(entry: entry, showActionLabel: false)
-                    }
+    private func fileChangeStreamingSystemView(
+        text: String,
+        entries: [TurnFileChangeSummaryEntry],
+        fallbackText: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if entries.isEmpty {
+                Text(fallbackText.isEmpty ? text : fallbackText)
+                    .font(AppFont.footnote())
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                ForEach(entries) { entry in
+                    FileChangeInlineActionRow(entry: entry)
                 }
             }
 
-            if message.isStreaming && showsStreamingAnimations {
+            if showsStreamingAnimations {
                 TypingIndicator()
             }
         }
@@ -1461,8 +1851,12 @@ struct MessageRow: View, Equatable {
     @ViewBuilder
     private var turnEndActionButtons: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let revert = assistantBlockAccessoryState?.blockRevertPresentation {
-                assistantRevertButton(presentation: revert)
+            if let accessory = assistantBlockAccessoryState,
+               let revert = accessory.blockRevertPresentation {
+                assistantRevertButton(
+                    presentation: revert,
+                    targetMessage: accessory.blockRevertMessage ?? message
+                )
             }
 
             if let accessory = assistantBlockAccessoryState {
@@ -1530,7 +1924,10 @@ struct MessageRow: View, Equatable {
         }
     }
 
-    private func assistantRevertButton(presentation: AssistantRevertPresentation) -> some View {
+    private func assistantRevertButton(
+        presentation: AssistantRevertPresentation,
+        targetMessage: CodexMessage
+    ) -> some View {
         let iconName: String = {
             switch presentation.riskLevel {
             case .safe:
@@ -1555,7 +1952,7 @@ struct MessageRow: View, Equatable {
         return Button {
             guard presentation.isEnabled else { return }
             HapticFeedback.shared.triggerImpactFeedback(style: .light)
-            assistantRevertAction?(message)
+            assistantRevertAction?(targetMessage)
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: iconName)
@@ -1631,7 +2028,7 @@ struct MessageRow: View, Equatable {
         }
 
         assistantDisplayUpdateTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 80_000_000)
+            try? await Task.sleep(nanoseconds: 100_000_000)
             guard !Task.isCancelled else { return }
             throttledAssistantDisplayText = pendingAssistantDisplayText ?? nextText
             assistantDisplayUpdateTask = nil
@@ -1699,8 +2096,8 @@ private struct SelectableMessageTextSheet: View {
 // Centralizes the inline reasoning row so thinking-specific spacing, fonts, and
 // disclosure behavior are easy to tweak without hunting through MessageRow.
 // Kept as one flat struct (no sub-view nesting) to minimise per-cell view-tree
-// depth inside the LazyVStack — extra struct layers cost allocation + diffing on
-// every scroll frame.
+// depth in the scrolling timeline; extra struct layers cost allocation + diffing
+// on every scroll frame.
 private struct ThinkingSystemBlock: View {
     let messageID: String
     let isStreaming: Bool
@@ -1868,13 +2265,20 @@ private struct ThinkingDisclosureView: View {
     }
 
     private func detailText(_ value: String) -> some View {
-        Text(.init(value))
+        Text(runtimeMarkdownText(value))
             .font(AppFont.caption())
             .lineSpacing(2)
             .fontWeight(.regular)
             .foregroundStyle(.secondary.opacity(0.85))
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // Parse folded reasoning as inline markdown without routing through LocalizedStringKey interpolation.
+    private func runtimeMarkdownText(_ value: String) -> AttributedString {
+        var options = AttributedString.MarkdownParsingOptions()
+        options.interpretedSyntax = .inlineOnlyPreservingWhitespace
+        return (try? AttributedString(markdown: value, options: options)) ?? AttributedString(value)
     }
 }
 
@@ -1886,6 +2290,7 @@ private struct CommandExecutionStatusCard: View {
     @State private var isLoadingImagePreview = false
     @State private var imagePreviewError: String?
     @State private var previewImage: PreviewImagePayload?
+    @State private var unavailableImagePreviewPaths: Set<String> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1932,11 +2337,14 @@ private struct CommandExecutionStatusCard: View {
         guard let details = detailModel else {
             return nil
         }
-        return CommandOutputImageReferenceParser.firstReference(
+        guard let reference = CommandOutputImageReferenceParser.firstReference(
             command: details.fullCommand,
             outputTail: details.outputTail,
             cwd: details.cwd
-        )
+        ) else {
+            return nil
+        }
+        return unavailableImagePreviewPaths.contains(reference.path) ? nil : reference
     }
 
     private func commandImagePreviewButton(for reference: CommandOutputImageReference) -> some View {
@@ -2017,9 +2425,22 @@ private struct CommandExecutionStatusCard: View {
                     title: result.fileName.isEmpty ? reference.fileName : result.fileName
                 )
             } catch {
+                if Self.isMissingWorkspaceImageError(error) {
+                    unavailableImagePreviewPaths.insert(reference.path)
+                    return
+                }
                 imagePreviewError = error.localizedDescription
             }
         }
+    }
+
+    // Stale temp image previews are expected after streaming; hide the ghost row instead of interrupting the user.
+    private static func isMissingWorkspaceImageError(_ error: Error) -> Bool {
+        if case CodexServiceError.rpcError(let rpcError) = error {
+            return rpcError.message.localizedCaseInsensitiveContains("image file no longer exists")
+                || rpcError.message.localizedCaseInsensitiveContains("no longer exists")
+        }
+        return error.localizedDescription.localizedCaseInsensitiveContains("image file no longer exists")
     }
 
     private var imagePreviewErrorIsPresented: Binding<Bool> {
@@ -2030,6 +2451,197 @@ private struct CommandExecutionStatusCard: View {
                     imagePreviewError = nil
                 }
             }
+        )
+    }
+}
+
+private struct AssistantWorkspaceImagePreviewRequest: Identifiable {
+    let id = UUID()
+    let reference: AssistantMarkdownImageReference
+    let currentWorkingDirectory: String?
+    let initialPayload: PreviewImagePayload?
+}
+
+private struct AssistantWorkspaceImagePreviewScreen: View {
+    let reference: AssistantMarkdownImageReference
+    let currentWorkingDirectory: String?
+    let onDismiss: () -> Void
+
+    @Environment(CodexService.self) private var codex
+    @State private var isLoading = false
+    @State private var payload: PreviewImagePayload?
+    @State private var errorMessage: String?
+
+    init(
+        reference: AssistantMarkdownImageReference,
+        currentWorkingDirectory: String?,
+        initialPayload: PreviewImagePayload? = nil,
+        onDismiss: @escaping () -> Void
+    ) {
+        self.reference = reference
+        self.currentWorkingDirectory = currentWorkingDirectory
+        self.onDismiss = onDismiss
+        _payload = State(initialValue: initialPayload)
+    }
+
+    var body: some View {
+        Group {
+            if let payload {
+                ZoomableImagePreviewScreen(
+                    payload: payload,
+                    onDismiss: onDismiss
+                )
+            } else {
+                loadingOrErrorScreen
+            }
+        }
+        .task(id: reference.path) {
+            await loadPreview()
+        }
+    }
+
+    private var loadingOrErrorScreen: some View {
+        ZStack(alignment: .top) {
+            Color(.systemBackground)
+                .ignoresSafeArea()
+
+            LinearGradient(
+                colors: [
+                    Color(.secondarySystemBackground).opacity(0.7),
+                    Color(.systemBackground)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
+
+            VStack(spacing: 18) {
+                Spacer(minLength: 0)
+
+                if isLoading || errorMessage == nil {
+                    ProgressView()
+                        .controlSize(.large)
+                    Text(reference.fileName.isEmpty ? "Loading image" : reference.fileName)
+                        .font(AppFont.subheadline(weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                } else {
+                    Image(systemName: "photo")
+                        .font(AppFont.system(size: 32, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text(reference.fileName.isEmpty ? "Image unavailable" : reference.fileName)
+                        .font(AppFont.subheadline(weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                    if let errorMessage {
+                        Text(errorMessage)
+                            .font(AppFont.caption())
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .lineLimit(4)
+                    }
+                    Button {
+                        Task { await loadPreview(force: true) }
+                    } label: {
+                        Label("Retry", systemImage: "arrow.clockwise")
+                            .font(AppFont.subheadline(weight: .semibold))
+                            .padding(.horizontal, 16)
+                            .frame(height: 40)
+                            .adaptiveGlass(.regular, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 28)
+
+            topBar
+                .padding(.horizontal, 18)
+                .padding(.top, 18)
+        }
+    }
+
+    private var topBar: some View {
+        HStack(spacing: 14) {
+            Button {
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                onDismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(AppFont.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .frame(width: 38, height: 38)
+                    .adaptiveGlass(.regular, in: Circle())
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+
+            if !reference.fileName.isEmpty {
+                Text(reference.fileName)
+                    .font(AppFont.subheadline(weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .padding(.horizontal, 14)
+                    .frame(height: 38)
+                    .adaptiveGlass(.regular, in: Capsule())
+            }
+
+            Spacer(minLength: 0)
+        }
+    }
+
+    @MainActor
+    private func loadPreview(force: Bool = false) async {
+        guard !isLoading else { return }
+        if payload != nil, !force {
+            return
+        }
+
+        isLoading = true
+        errorMessage = nil
+        defer { isLoading = false }
+
+        do {
+            payload = try await AssistantWorkspaceImagePreviewLoader.load(
+                reference: reference,
+                currentWorkingDirectory: currentWorkingDirectory,
+                codex: codex,
+                force: force
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+private enum AssistantWorkspaceImagePreviewLoader {
+    @MainActor
+    static func load(
+        reference: AssistantMarkdownImageReference,
+        currentWorkingDirectory: String?,
+        codex: CodexService,
+        force: Bool = false
+    ) async throws -> PreviewImagePayload {
+        let cachedPreview = await WorkspaceImagePreviewCache.shared.cachedPreview(forPath: reference.path)
+        let result = try await codex.readWorkspaceImage(
+            path: reference.path,
+            cwd: currentWorkingDirectory,
+            cachedMetadata: force ? nil : cachedPreview?.metadata
+        )
+        if result.isNotModified, let cachedPreview {
+            return PreviewImagePayload(
+                image: cachedPreview.payload.image,
+                title: cachedPreview.metadata.fileName.isEmpty ? reference.fileName : cachedPreview.metadata.fileName
+            )
+        }
+
+        let decodedImage = try await WorkspaceImagePreviewCache.shared.preview(for: result)
+        return PreviewImagePayload(
+            image: decodedImage.image,
+            title: result.fileName.isEmpty ? reference.fileName : result.fileName
         )
     }
 }
@@ -2104,7 +2716,8 @@ private actor WorkspaceImagePreviewCache {
 
     private func cacheKey(for metadata: WorkspaceImageMetadata) -> String {
         let mtimeMs = metadata.mtimeMs.map { String($0.bitPattern) } ?? "missing"
-        return "\(metadata.path)|\(metadata.byteLength)|\(mtimeMs)"
+        let previewMax = metadata.previewMaxPixelDimension.map(String.init) ?? "original"
+        return "\(metadata.path)|\(metadata.byteLength)|\(mtimeMs)|\(previewMax)"
     }
 
     private func rememberMetadata(_ metadata: WorkspaceImageMetadata) {

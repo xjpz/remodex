@@ -109,8 +109,14 @@ struct TurnView: View {
                 allowsAssistantPlanFallbackRecovery: planSessionSource == .compatibilityFallback,
                 threadMessagesForPlanMatching: renderSnapshot.planMatchingMessages,
                 currentWorkingDirectory: gitWorkingDirectory,
-                errorMessage: codex.lastErrorMessage,
+                errorMessage: timelineFooterErrorMessage,
                 composerRecoveryAccessory: composerRecoveryAccessory,
+                hasRemoteEarlierMessages: renderSnapshot.hasRemoteOlderHistory,
+                hasLocallyProjectedEarlierMessages: renderSnapshot.hasLocallyProjectedOlderHistory,
+                usesPaginatedHistory: renderSnapshot.usesPaginatedHistory,
+                initialTurnsLoaded: renderSnapshot.initialTurnsLoaded,
+                isLoadingRemoteEarlierMessages: renderSnapshot.isLoadingOlderHistory,
+                olderHistoryLoadErrorMessage: renderSnapshot.olderHistoryLoadErrorMessage,
                 shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponseBinding,
                 isScrolledToBottom: isScrolledToBottomBinding,
                 isComposerFocused: isInputFocused,
@@ -140,6 +146,20 @@ struct TurnView: View {
                 },
                 onTapSubagent: { subagent in
                     openThread(subagent.threadId)
+                },
+                onRevealEarlierMessages: { pageSize in
+                    codex.noteThreadHistoryRevealRequested(threadId: thread.id, pageSize: pageSize)
+                },
+                onLoadRemoteEarlierMessages: {
+                    Task { @MainActor in
+                        await codex.loadOlderThreadHistoryPage(threadId: thread.id)
+                    }
+                },
+                onRetryEarlierMessages: { completion in
+                    Task { @MainActor in
+                        defer { completion() }
+                        _ = try? await codex.loadThreadHistoryIfNeeded(threadId: thread.id, forceRefresh: true)
+                    }
                 },
                 onTapOutsideComposer: {
                     guard isInputFocused else { return }
@@ -173,6 +193,7 @@ struct TurnView: View {
                 isGitActionEnabled: isGitActionEnabled,
                 disabledGitActions: disabledGitActions,
                 isRunningGitAction: viewModel.isRunningGitAction,
+                gitActionLoadingTitle: viewModel.gitActionLoadingTitle,
                 showsDiscardRuntimeChangesAndSync: viewModel.shouldShowDiscardRuntimeChangesAndSync,
                 gitSyncState: viewModel.gitSyncState,
                 onTapMacHandoff: onTapMacHandoff,
@@ -190,6 +211,11 @@ struct TurnView: View {
             )
         }
         .overlay {
+            if isStartingSiblingChat {
+                NewChatOpeningOverlay()
+                    .transition(.opacity)
+            }
+
             if isShowingWorktreeHandoff {
                 TurnWorktreeHandoffOverlay(
                     mode: .handoff,
@@ -228,6 +254,11 @@ struct TurnView: View {
                 .transition(.opacity)
             }
         }
+        .overlay(alignment: .top) {
+            gitActionToastOverlay
+        }
+        .animation(.spring(response: 0.35, dampingFraction: 0.88), value: viewModel.gitActionLoadingTitle)
+        .animation(.spring(response: 0.35, dampingFraction: 0.88), value: viewModel.gitActionSuccess?.id)
         .fullScreenCover(isPresented: isCameraPresentedBinding) {
             CameraImagePicker { data in
                 viewModel.enqueueCapturedImageData(data, codex: codex)
@@ -458,6 +489,32 @@ struct TurnView: View {
         )
     }
 
+    // Keeps reconnect prompts out of the red footer error slot; recovery UI owns that state.
+    private var timelineFooterErrorMessage: String? {
+        guard let message = codex.lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !message.isEmpty else {
+            return nil
+        }
+
+        if isConnectionRecoveryFooterNoise(message) || isBackgroundHistoryRetryNoise(message) {
+            return nil
+        }
+
+        return message
+    }
+
+    private func isConnectionRecoveryFooterNoise(_ message: String) -> Bool {
+        let normalizedMessage = message.lowercased()
+        return normalizedMessage.contains("tap reconnect")
+            || normalizedMessage.hasPrefix("connection was interrupted")
+            || normalizedMessage.hasPrefix("connection timed out")
+            || normalizedMessage.hasPrefix("trying to reconnect")
+    }
+
+    private func isBackgroundHistoryRetryNoise(_ message: String) -> Bool {
+        message.lowercased() == "couldn't load this chat yet. retrying in the background."
+    }
+
     private var voiceRecoveryPresentation: VoiceRecoveryPresentation? {
         guard let voiceRecoveryReason else {
             return nil
@@ -600,6 +657,93 @@ struct TurnView: View {
                     codex.lastErrorMessage = error.localizedDescription
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var gitActionToastOverlay: some View {
+        if let success = viewModel.gitActionSuccess {
+            InAppToastBannerView(
+                title: success.title,
+                subtitle: gitSuccessSubtitle(for: success),
+                accessibilityHint: gitSuccessAccessibilityHint(for: success),
+                isDismissable: true,
+                onTap: nil,
+                onDismiss: { viewModel.dismissGitActionSuccess() },
+                trailingAction: gitSuccessAction(for: success)
+            ) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(.white, Color.green)
+                    .symbolRenderingMode(.palette)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 10)
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .id(success.id)
+        } else if let progress = viewModel.gitActionProgress {
+            InAppToastBannerView(
+                title: progress.activeTitle,
+                subtitle: nil,
+                detailLines: gitProgressDetailLines(progress),
+                accessibilityHint: nil,
+                isDismissable: false,
+                onTap: nil,
+                onDismiss: nil
+            ) {
+                ProgressView()
+                    .controlSize(.regular)
+                    .tint(.primary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 10)
+            .transition(.move(edge: .top).combined(with: .opacity))
+        }
+    }
+
+    private func gitProgressDetailLines(_ progress: TurnGitActionProgress) -> [String] {
+        guard progress.plannedPhases.count > 1 else { return [] }
+        return progress.plannedPhases.map { phase in
+            switch progress.status(for: phase) {
+            case .completed:
+                return "✓ \(phase.completedTitle)"
+            case .skipped:
+                return "– \(phase.completedTitle)"
+            case .active:
+                return "• \(phase.activeTitle)"
+            case .pending:
+                return "○ \(phase.pendingTitle)"
+            }
+        }
+    }
+
+    private func gitSuccessSubtitle(for success: TurnGitActionSuccess) -> String? {
+        guard let subtitle = success.subtitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !subtitle.isEmpty else {
+            return nil
+        }
+        return subtitle
+    }
+
+    private func gitSuccessAccessibilityHint(for success: TurnGitActionSuccess) -> String? {
+        switch success.kind {
+        case .pullRequest where success.pullRequestURL != nil:
+            return "Tap View PR to open the pull request."
+        default:
+            return nil
+        }
+    }
+
+    private func gitSuccessAction(for success: TurnGitActionSuccess) -> InAppToastBannerAction? {
+        switch success.kind {
+        case .pullRequest:
+            guard let url = success.pullRequestURL else { return nil }
+            return InAppToastBannerAction(title: "View PR") {
+                UIApplication.shared.open(url)
+                viewModel.dismissGitActionSuccess()
+            }
+        case .commit, .push:
+            return nil
         }
     }
 
@@ -1147,7 +1291,7 @@ struct TurnView: View {
 
     private var selectedModelTitle: String {
         guard let selectedModel = codex.selectedModelOption() else {
-            return "Select model"
+            return "GPT-5.5"
         }
 
         return TurnComposerMetaMapper.modelTitle(for: selectedModel)
@@ -1686,7 +1830,7 @@ struct TurnView: View {
 
     private var loadingState: some View {
         chatPlaceholderState(
-            title: "Loading chat...",
+            title: Text("Loading chat..."),
             subtitle: "Fetching the latest messages for this conversation."
         )
     }
@@ -1702,12 +1846,27 @@ struct TurnView: View {
 
     private var emptyState: some View {
         chatPlaceholderState(
-            title: "Hi! How can I help you?",
+            title: emptyStateTitle,
             subtitle: "Chats are End-to-end encrypted"
         )
     }
 
-    private func chatPlaceholderState(title: String, subtitle: String) -> some View {
+    private var emptyStateTitle: Text {
+        guard let folder = emptyStateFolderName else {
+            return Text("Hi! How can I help you?")
+        }
+        return Text("What should we do in ")
+            + Text(folder).foregroundStyle(.secondary)
+            + Text("?")
+    }
+
+    private var emptyStateFolderName: String? {
+        guard let cwd = currentResolvedThread.gitWorkingDirectory else { return nil }
+        let component = (cwd as NSString).lastPathComponent
+        return component.isEmpty ? nil : component
+    }
+
+    private func chatPlaceholderState(title: Text, subtitle: String) -> some View {
         VStack(spacing: 12) {
             Spacer()
             Image("AppLogo")
@@ -1716,8 +1875,10 @@ struct TurnView: View {
                 .frame(width: 56, height: 56)
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .adaptiveGlass(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            Text(title)
-                .font(AppFont.title2(weight: .semibold))
+            title
+                .font(AppFont.title2(weight: .regular))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 28)
             Text(subtitle)
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)
@@ -1727,6 +1888,27 @@ struct TurnView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
+    }
+}
+
+private struct NewChatOpeningOverlay: View {
+    var body: some View {
+        VStack(spacing: 14) {
+            ProgressView()
+                .controlSize(.regular)
+
+            VStack(spacing: 4) {
+                Text("Starting new chat...")
+                    .font(AppFont.headline())
+                    .foregroundStyle(.primary)
+
+                Text("Preparing an empty conversation.")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(.systemBackground))
     }
 }
 

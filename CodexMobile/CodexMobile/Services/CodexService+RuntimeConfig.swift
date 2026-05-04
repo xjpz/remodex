@@ -13,6 +13,15 @@ private let runtimeDebugTimestampFormatter: DateFormatter = {
     return formatter
 }()
 
+private enum RuntimeConfigLoadingPolicy {
+    static let modelListTimeoutNanoseconds: UInt64 = 8_000_000_000
+}
+
+private enum RuntimeSelectionDefaults {
+    static let modelId = "gpt-5.5"
+    static let reasoningEffort = "medium"
+}
+
 extension CodexService {
     // Resolves the effective per-chat override record after normalizing the thread id.
     func threadRuntimeOverride(for threadId: String?) -> CodexThreadRuntimeOverride? {
@@ -62,7 +71,9 @@ extension CodexService {
                     "cursor": .null,
                     "limit": .integer(50),
                     "includeHidden": .bool(false),
-                ])
+                ]),
+                timeoutNanoseconds: RuntimeConfigLoadingPolicy.modelListTimeoutNanoseconds,
+                timeoutMessage: "model/list timed out while syncing runtime options."
             )
 
             guard let resultObject = response.result?.objectValue else {
@@ -89,7 +100,12 @@ extension CodexService {
 
     func setSelectedModelId(_ modelId: String?) {
         let normalized = modelId?.trimmingCharacters(in: .whitespacesAndNewlines)
-        selectedModelId = (normalized?.isEmpty == false) ? normalized : nil
+        if normalized?.isEmpty == false {
+            selectedModelId = normalized
+        } else {
+            selectedModelId = RuntimeSelectionDefaults.modelId
+            selectedReasoningEffort = RuntimeSelectionDefaults.reasoningEffort
+        }
         normalizeRuntimeSelectionsAfterModelsUpdate()
     }
 
@@ -134,7 +150,7 @@ extension CodexService {
     }
 
     func setSelectedServiceTier(_ serviceTier: CodexServiceTier?) {
-        selectedServiceTier = serviceTier
+        selectedServiceTier = normalizedServiceTierForSelectedModel(serviceTier)
         persistRuntimeSelections()
     }
 
@@ -143,8 +159,9 @@ extension CodexService {
             return
         }
 
+        let normalizedServiceTier = normalizedServiceTierForSelectedModel(serviceTier)
         mutateThreadRuntimeOverride(for: normalizedThreadID) { override in
-            override.serviceTierRawValue = serviceTier?.rawValue
+            override.serviceTierRawValue = normalizedServiceTier?.rawValue
             override.overridesServiceTier = true
         }
     }
@@ -188,6 +205,10 @@ extension CodexService {
         selectedGitWriterModelOption(from: availableModels)
     }
 
+    func selectedModelSupportsServiceTier(_ serviceTier: CodexServiceTier) -> Bool {
+        selectedModelOption()?.supportsServiceTier(serviceTier) == true
+    }
+
     func gitWriterModelIdentifier() -> String? {
         selectedGitWriterModelOption()?.model
     }
@@ -215,7 +236,7 @@ extension CodexService {
 
     func selectedReasoningEffortForSelectedModel(threadId: String? = nil) -> String? {
         guard let model = selectedModelOption() else {
-            return nil
+            return selectedReasoningEffort ?? RuntimeSelectionDefaults.reasoningEffort
         }
 
         let supported = Set(model.supportedReasoningEfforts.map { $0.reasoningEffort })
@@ -248,16 +269,22 @@ extension CodexService {
     }
 
     func runtimeModelIdentifierForTurn() -> String? {
-        selectedModelOption()?.model
+        selectedModelOption()?.model ?? selectedModelId ?? RuntimeSelectionDefaults.modelId
     }
 
     func effectiveServiceTier(for threadId: String? = nil) -> CodexServiceTier? {
+        let candidate: CodexServiceTier?
         if let threadOverride = threadRuntimeOverride(for: threadId),
            threadOverride.overridesServiceTier {
-            return threadOverride.serviceTier
+            candidate = threadOverride.serviceTier
+        } else {
+            candidate = selectedServiceTier
         }
 
-        return selectedServiceTier
+        guard let candidate else {
+            return nil
+        }
+        return selectedModelSupportsServiceTier(candidate) ? candidate : nil
     }
 
     func runtimeServiceTierForTurn(threadId: String? = nil) -> String? {
@@ -402,6 +429,16 @@ extension CodexService {
             || message.contains("onrequest")
             || message.contains("on-request")
     }
+
+    func normalizedServiceTierForSelectedModel(_ serviceTier: CodexServiceTier?) -> CodexServiceTier? {
+        guard let serviceTier else {
+            return nil
+        }
+        guard let selectedModel = selectedModelOption() else {
+            return serviceTier
+        }
+        return selectedModel.supportsServiceTier(serviceTier) ? serviceTier : nil
+    }
 }
 
 private extension CodexService {
@@ -430,6 +467,8 @@ private extension CodexService {
 
     func normalizeRuntimeSelectionsAfterModelsUpdate() {
         guard !availableModels.isEmpty else {
+            selectedModelId = selectedModelId ?? RuntimeSelectionDefaults.modelId
+            selectedReasoningEffort = selectedReasoningEffort ?? RuntimeSelectionDefaults.reasoningEffort
             persistRuntimeSelections()
             return
         }
@@ -452,8 +491,14 @@ private extension CodexService {
             } else {
                 selectedReasoningEffort = resolvedModel.supportedReasoningEfforts.first?.reasoningEffort
             }
+
+            if let selectedServiceTier,
+               !resolvedModel.supportsServiceTier(selectedServiceTier) {
+                self.selectedServiceTier = nil
+            }
         } else {
             selectedReasoningEffort = nil
+            selectedServiceTier = nil
         }
 
         if let selectedGitWriterModelId,
@@ -505,6 +550,13 @@ private extension CodexService {
     }
 
     func fallbackModel(from models: [CodexModelOption]) -> CodexModelOption? {
+        // Prefer GPT-5.5 when the bridge advertises it; the rest of the app treats
+        // it as the canonical default regardless of the bridge's `isDefault` flag.
+        if let preferred = models.first(where: {
+            $0.id.lowercased() == "gpt-5.5" || $0.model.lowercased() == "gpt-5.5"
+        }) {
+            return preferred
+        }
         if let defaultModel = models.first(where: { $0.isDefault }) {
             return defaultModel
         }

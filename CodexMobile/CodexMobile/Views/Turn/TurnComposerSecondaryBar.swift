@@ -52,9 +52,6 @@ struct TurnComposerSecondaryBar: View {
                 HStack(spacing: 8) {
                     runtimePicker
 
-                    accessMenuLabel
-                    Spacer()
-
                     if showsGitBranchSelector {
                         TurnGitBranchSelector(
                             isEnabled: isGitBranchSelectorEnabled,
@@ -71,8 +68,12 @@ struct TurnComposerSecondaryBar: View {
                             onSelectGitBaseBranch: onSelectGitBaseBranch,
                             onRefreshGitBranches: onRefreshGitBranches
                         )
+                        .equatable()
                     }
 
+                    Spacer()
+
+                    accessMenuLabel
                     statusControlCircle
                 }
 
@@ -100,8 +101,8 @@ struct TurnComposerSecondaryBar: View {
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: selectedAccessMode == .fullAccess
-                      ? "exclamationmark.shield"
-                      : "checkmark.shield")
+                      ? "hand.thumbsup"
+                      : "hand.raised")
                     .font(branchTextFont)
 
                 Image(systemName: "chevron.down")

@@ -177,7 +177,7 @@ extension CodexService {
         switch method {
         case "turn/plan/updated", "item/plan/delta", "item/completed", "serverRequest/resolved":
             debugRuntimeLog(
-                "rpc notification \(method) thread=\(paramsObject?["threadId"]?.stringValue ?? "") turn=\(paramsObject?["turnId"]?.stringValue ?? "") item=\(paramsObject?["itemId"]?.stringValue ?? "")"
+                debugNotificationSummary(method: method, paramsObject: paramsObject)
             )
         default:
             break
@@ -241,7 +241,8 @@ extension CodexService {
              "codex/event/background_event",
              "codex/event/read",
              "codex/event/search",
-             "codex/event/list_files":
+             "codex/event/list_files",
+             "codex/event/image_generation_end":
             if handleLegacyCodexNamedEvent(method: method, paramsObject: paramsObject) {
                 return
             }
@@ -256,6 +257,15 @@ extension CodexService {
 
         case "codex/event":
             if handleLegacyCodexEnvelopeEvent(paramsObject) {
+                return
+            }
+
+        case "image_generation_end":
+            if handleLegacyCodexEventType(
+                eventType: "image_generation_end",
+                payload: paramsObject ?? [:],
+                paramsObject: paramsObject
+            ) {
                 return
             }
 
@@ -282,6 +292,9 @@ extension CodexService {
 
         case "serverRequest/resolved":
             handleServerRequestResolved(paramsObject)
+
+        case "git/stackedAction/progress":
+            handleGitStackedActionProgress(paramsObject)
 
         default:
             if method.hasPrefix("codex/event/"),
@@ -520,11 +533,20 @@ extension CodexService {
             noteTurnFinished(turnId: resolvedTurnID)
             markTurnCompleted(threadId: threadId, turnId: resolvedTurnID)
             if terminalState == .completed {
+                Task { @MainActor [weak self] in
+                    await self?.captureTurnEndWorkspaceCheckpointIfPossible(
+                        threadId: threadId,
+                        turnId: resolvedTurnID
+                    )
+                }
                 markReadyIfUnread(threadId: threadId)
                 notifyRunCompletionIfNeeded(threadId: threadId, turnId: resolvedTurnID, result: .completed)
             } else if terminalState == .failed {
+                discardTurnStartWorkspaceCheckpointCopyIfNeeded(turnId: resolvedTurnID)
                 markFailedIfUnread(threadId: threadId)
                 notifyRunCompletionIfNeeded(threadId: threadId, turnId: resolvedTurnID, result: .failed)
+            } else {
+                discardTurnStartWorkspaceCheckpointCopyIfNeeded(turnId: resolvedTurnID)
             }
             requestImmediateSync(threadId: threadId)
 
@@ -574,6 +596,7 @@ extension CodexService {
             recordTurnTerminalState(threadId: threadId, turnId: resolvedTurnID, state: .failed)
             noteTurnFinished(turnId: resolvedTurnID)
             markTurnCompleted(threadId: threadId, turnId: resolvedTurnID)
+            discardTurnStartWorkspaceCheckpointCopyIfNeeded(turnId: resolvedTurnID)
             markFailedIfUnread(threadId: threadId)
             notifyRunCompletionIfNeeded(threadId: threadId, turnId: resolvedTurnID, result: .failed)
         } else {
@@ -1097,7 +1120,8 @@ extension CodexService {
         )
     }
 
-    // Consumes turn-level aggregated diff updates and renders them as file-change system messages.
+    // Consumes turn-level aggregated diffs only after a real file-change item exists;
+    // repo-wide dirty snapshots must not create turn-local change UI or undo state.
     private func handleTurnDiffUpdated(_ paramsObject: IncomingParamsObject?) {
         guard let paramsObject else { return }
 
@@ -1114,27 +1138,67 @@ extension CodexService {
         }
         if let turnId {
             threadIdByTurnID[turnId] = threadId
-            recordTurnDiffChangeSet(threadId: threadId, turnId: turnId, diff: diffText)
+            if shouldRecordTurnDiffChangeSet(threadId: threadId, turnId: turnId, diff: diffText) {
+                recordTurnDiffChangeSet(threadId: threadId, turnId: turnId, diff: diffText)
+            }
+        }
+    }
+
+    private func shouldRecordTurnDiffChangeSet(threadId: String, turnId: String, diff: String) -> Bool {
+        let diffPaths = normalizedPatchPaths(from: diff)
+        guard !diffPaths.isEmpty else {
+            return false
         }
 
-        let renderedBody = decodeTurnDiffUpdatedBody(from: diffText)
-        if let turnId, !turnId.isEmpty {
-            upsertStreamingSystemTurnMessage(
-                threadId: threadId,
-                turnId: turnId,
-                kind: .fileChange,
-                text: renderedBody,
-                isStreaming: false
-            )
-            return
+        let fileChangePaths = normalizedFileChangeEvidencePaths(threadId: threadId, turnId: turnId)
+        guard !fileChangePaths.isEmpty else {
+            return false
         }
 
-        appendSystemMessage(
-            threadId: threadId,
-            text: renderedBody,
-            turnId: turnId,
-            kind: .fileChange
-        )
+        return diffPaths.isSubset(of: fileChangePaths)
+    }
+
+    private func normalizedPatchPaths(from diff: String) -> Set<String> {
+        Set(AIUnifiedPatchParser.analyze(diff).fileChanges.compactMap {
+            normalizedTurnDiffPath($0.path)
+        })
+    }
+
+    private func normalizedFileChangeEvidencePaths(threadId: String, turnId: String) -> Set<String> {
+        let fileChangeMessages = messagesByThread[threadId] ?? []
+        return fileChangeMessages.reduce(into: Set<String>()) { paths, message in
+            guard message.role == .system,
+                  message.kind == .fileChange,
+                  message.turnId == turnId else {
+                return
+            }
+
+            for line in message.text.split(separator: "\n", omittingEmptySubsequences: false) {
+                let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard trimmedLine.lowercased().hasPrefix("path:") else { continue }
+                let rawPath = String(trimmedLine.dropFirst("Path:".count))
+                if let normalizedPath = normalizedTurnDiffPath(rawPath) {
+                    paths.insert(normalizedPath)
+                }
+            }
+        }
+    }
+
+    private func normalizedTurnDiffPath(_ rawPath: String) -> String? {
+        var normalized = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty, normalized != "/dev/null" else {
+            return nil
+        }
+
+        if normalized.hasPrefix("a/") || normalized.hasPrefix("b/") {
+            normalized = String(normalized.dropFirst(2))
+        }
+        if normalized.hasPrefix("./") {
+            normalized = String(normalized.dropFirst(2))
+        }
+
+        normalized = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized.lowercased()
     }
 
     // Supports legacy codex/event envelopes where `msg.type == "turn_diff"` and payload uses unified_diff.
@@ -1265,9 +1329,52 @@ extension CodexService {
                 payload: payload,
                 paramsObject: paramsObject
             )
+        case "image_generation_end":
+            return handleImageGenerationEndEvent(
+                payload: payload,
+                paramsObject: paramsObject
+            )
         default:
             return false
         }
+    }
+
+    private func handleImageGenerationEndEvent(
+        payload: IncomingParamsObject,
+        paramsObject: IncomingParamsObject?
+    ) -> Bool {
+        let imagePath = firstNonEmptyString([
+            firstStringValue(in: payload, keys: ["saved_path", "savedPath", "path", "file_path"]),
+            firstStringValue(in: paramsObject, keys: ["saved_path", "savedPath", "path", "file_path"])
+        ])
+        guard let imagePath, Self.isGeneratedImagePath(imagePath) else {
+            debugRuntimeLog("generated image event dropped reason=missing-path event=image_generation_end")
+            return false
+        }
+
+        var normalizedParams = paramsObject ?? [:]
+        if normalizedParams["event"] == nil {
+            normalizedParams["event"] = .object(payload)
+        }
+
+        let turnId = extractTurnID(from: normalizedParams)
+        guard let threadId = resolveThreadID(from: normalizedParams, turnIdHint: turnId) else {
+            debugRuntimeLog("generated image event dropped reason=missing-thread event=image_generation_end path=\(URL(fileURLWithPath: imagePath).lastPathComponent)")
+            return false
+        }
+
+        let itemId = firstNonEmptyString([
+            firstStringValue(in: payload, keys: ["call_id", "callId", "id"]),
+            firstStringValue(in: paramsObject, keys: ["itemId", "item_id", "call_id", "callId"])
+        ])
+        appendGeneratedImageReference(
+            threadId: threadId,
+            turnId: turnId,
+            itemId: itemId,
+            imagePath: imagePath
+        )
+        debugRuntimeLog("generated image event appended thread=\(threadId) turn=\(turnId ?? "") item=\(itemId ?? "") path=\(URL(fileURLWithPath: imagePath).lastPathComponent)")
+        return true
     }
 
     // Accepts legacy Codex token_count events, even when the runtime omits thread ids.
@@ -2018,6 +2125,7 @@ extension CodexService {
               !normalizedItemType(type).isEmpty else {
             return false
         }
+        let itemType = normalizedItemType(type)
 
         if object["content"] != nil || object["status"] != nil || object["output"] != nil {
             return true
@@ -2028,8 +2136,41 @@ extension CodexService {
         if object["result"] != nil || object["payload"] != nil || object["data"] != nil {
             return true
         }
+        let hasGeneratedImageIdentityOrPath = object["path"] != nil
+            || object["saved_path"] != nil
+            || object["savedPath"] != nil
+            || object["file_path"] != nil
+            || object["id"] != nil
+            || object["call_id"] != nil
+            || object["callId"] != nil
+        if isCompletedGeneratedImageItemType(itemType), hasGeneratedImageIdentityOrPath {
+            return true
+        }
 
         return false
+    }
+
+    private func debugNotificationSummary(method: String, paramsObject: IncomingParamsObject?) -> String {
+        let eventObject = paramsObject.flatMap { envelopeEventObject(from: $0) }
+        let itemObject = paramsObject.flatMap { extractIncomingItemObject(from: $0, eventObject: eventObject) }
+        let itemType = normalizedItemType(itemObject?["type"]?.stringValue ?? "")
+        let itemId = extractItemID(from: paramsObject, eventObject: eventObject, itemObject: itemObject) ?? ""
+        let nestedItemId = paramsObject?["item"]?.objectValue?["id"]?.stringValue ?? ""
+        let eventType = eventObject?["type"]?.stringValue ?? ""
+        let pathValue = firstNonEmptyString([
+            firstStringValue(in: itemObject, keys: ["saved_path", "savedPath", "path", "file_path"]),
+            firstStringValue(in: eventObject, keys: ["saved_path", "savedPath", "path", "file_path"]),
+            firstStringValue(in: paramsObject, keys: ["saved_path", "savedPath", "path", "file_path"])
+        ])
+        let pathName = pathValue.map { URL(fileURLWithPath: $0).lastPathComponent } ?? ""
+        let resultLength = [
+            itemObject?["result"]?.stringValue?.count,
+            eventObject?["result"]?.stringValue?.count,
+            paramsObject?["result"]?.stringValue?.count,
+        ]
+        .compactMap { $0 }
+        .first ?? 0
+        return "rpc notification \(method) thread=\(paramsObject?["threadId"]?.stringValue ?? "") turn=\(paramsObject?["turnId"]?.stringValue ?? "") item=\(itemId) nestedItem=\(nestedItemId) type=\(itemType) event=\(eventType) path=\(pathName) resultLen=\(resultLength)"
     }
 
     private func extractItemID(
@@ -2518,10 +2659,6 @@ extension CodexService {
         }
 
         return ""
-    }
-
-    private func decodeTurnDiffUpdatedBody(from diff: String) -> String {
-        renderUnifiedDiffBody(diff, status: "inProgress")
     }
 
     private func renderUnifiedDiffBody(_ diff: String, status: String) -> String {
@@ -3058,6 +3195,29 @@ extension CodexService {
         let threadId = normalizedResolvedRequestThreadID(paramsObject?["threadId"]?.stringValue)
         removeStructuredUserInputPrompt(requestID: requestID, threadIdHint: threadId)
         removePendingApproval(requestID: requestID)
+    }
+
+    // Routes phase notifications from `git/runStackedAction` to the per-call subscriber.
+    func handleGitStackedActionProgress(_ paramsObject: IncomingParamsObject?) {
+        guard let progressId = paramsObject?["progressId"]?.stringValue,
+              let phaseRaw = paramsObject?["phase"]?.stringValue,
+              let phase = TurnGitActionPhase(bridgePhase: phaseRaw),
+              let statusRaw = paramsObject?["status"]?.stringValue,
+              let status = TurnGitActionPhaseStatus(rawValue: statusRaw) else {
+            return
+        }
+        gitStackedActionProgressHandlers[progressId]?(phase, status)
+    }
+
+    func registerGitStackedActionProgressHandler(
+        progressId: String,
+        handler: @escaping (TurnGitActionPhase, TurnGitActionPhaseStatus) -> Void
+    ) {
+        gitStackedActionProgressHandlers[progressId] = handler
+    }
+
+    func unregisterGitStackedActionProgressHandler(progressId: String) {
+        gitStackedActionProgressHandlers.removeValue(forKey: progressId)
     }
 }
 

@@ -7,6 +7,10 @@
 import Foundation
 import UIKit
 
+private final class BackgroundTaskIdentifierBox: @unchecked Sendable {
+    var taskID: UIBackgroundTaskIdentifier = .invalid
+}
+
 extension CodexService {
     struct RunningThreadCatchupOutcome: Equatable {
         let didRefreshTurnState: Bool
@@ -152,6 +156,7 @@ extension CodexService {
         }
 
         do {
+            // Poll recent metadata only; full sidebar hydration happens in listThreads().
             let activeThreads = try await fetchServerThreads(limit: recentActiveThreadListLimit)
 
             // Also fetch server-archived threads so they survive app restarts.
@@ -649,6 +654,8 @@ extension CodexService {
         runningThreadCatchupTaskByThreadID.removeAll()
         forcedRunningCatchupEscalationThreadIDs.removeAll()
         lastForcedRunningResumeAtByThread.removeAll()
+        workspaceCheckpointCopyTaskByTurnID.values.forEach { $0.cancel() }
+        workspaceCheckpointCopyTaskByTurnID.removeAll()
         canonicalHistoryReconcileRetryTaskByThreadID.values.forEach { $0.cancel() }
         canonicalHistoryReconcileRetryTaskByThreadID.removeAll()
     }
@@ -848,6 +855,13 @@ extension CodexService {
         let shouldPreferDeferredClosedHydration = shouldDeferHeavyDisplayHydration(threadId: threadId)
             || threadsNeedingCanonicalHistoryReconcile.contains(threadId)
 
+        if !wasRunning,
+           hydratedThreadIDs.contains(threadId),
+           hasSatisfiedInitialThreadHistoryLoad(threadId: threadId),
+           !threadsNeedingCanonicalHistoryReconcile.contains(threadId) {
+            return
+        }
+
         // Long closed chats already have usable local rows. Avoid forcing a full thread/read
         // every sync tick after selection, which can reproduce the same open-chat crash.
         if !wasRunning, shouldPreferDeferredClosedHydration {
@@ -932,6 +946,7 @@ extension CodexService {
     // Starts or ends the iOS grace window that lets a just-backgrounded run finish cleanly.
     func updateBackgroundRunGraceTask() {
         guard !isAppInForeground else {
+            backgroundTurnGraceExpiredUntilForeground = false
             endBackgroundRunGraceTask(reason: "foreground")
             return
         }
@@ -941,13 +956,26 @@ extension CodexService {
             return
         }
 
+        guard !backgroundTurnGraceExpiredUntilForeground else {
+            return
+        }
+
         guard backgroundTurnGraceTaskID == .invalid else {
             return
         }
 
-        let taskID = UIApplication.shared.beginBackgroundTask(withName: "CodexRunGrace") { [weak self] in
+        let taskBox = BackgroundTaskIdentifierBox()
+        let taskID = UIApplication.shared.beginBackgroundTask(withName: "CodexRunGrace") { [weak self, taskBox] in
+            let expiredTaskID = taskBox.taskID
+            guard expiredTaskID != .invalid else {
+                return
+            }
+
+            // UIKit expects the task to end inside the expiration handler, before
+            // we hop back into CodexService's MainActor-isolated state.
+            UIApplication.shared.endBackgroundTask(expiredTaskID)
             Task { @MainActor [weak self] in
-                self?.endBackgroundRunGraceTask(reason: "expired")
+                self?.recordBackgroundRunGraceTaskExpired(taskID: expiredTaskID)
             }
         }
 
@@ -956,8 +984,19 @@ extension CodexService {
             return
         }
 
+        taskBox.taskID = taskID
         backgroundTurnGraceTaskID = taskID
         debugSyncLog("background run grace task started")
+    }
+
+    func recordBackgroundRunGraceTaskExpired(taskID: UIBackgroundTaskIdentifier) {
+        guard backgroundTurnGraceTaskID == taskID else {
+            return
+        }
+
+        backgroundTurnGraceTaskID = .invalid
+        backgroundTurnGraceExpiredUntilForeground = true
+        debugSyncLog("background run grace task ended reason=expired")
     }
 
     func endBackgroundRunGraceTask(reason: String) {

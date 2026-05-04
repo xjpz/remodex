@@ -207,6 +207,7 @@ struct MessageRowRenderModel {
     let codeCommentContent: CodeCommentDirectiveContent?
     let mermaidContent: MermaidMarkdownContent?
     let assistantImageReferences: [AssistantMarkdownImageReference]
+    let assistantInlineContentSegments: [AssistantMarkdownContentSegment]
     let assistantTextWithoutImageSyntax: String?
     let fileChangeState: FileChangeRenderState?
     let fileChangeGroups: [FileChangeGroup]
@@ -219,6 +220,7 @@ struct MessageRowRenderModel {
         codeCommentContent: nil,
         mermaidContent: nil,
         assistantImageReferences: [],
+        assistantInlineContentSegments: [],
         assistantTextWithoutImageSyntax: nil,
         fileChangeState: nil,
         fileChangeGroups: [],
@@ -253,6 +255,9 @@ enum MessageRowRenderModelCache {
             let assistantTextWithoutImageSyntax = assistantImageReferences.isEmpty
                 ? nil
                 : AssistantMarkdownImageReferenceParser.visibleTextRemovingImageSyntax(from: displayText)
+            let assistantInlineContentSegments = assistantImageReferences.contains(where: \.isTemporaryScreenshotImage)
+                ? AssistantMarkdownImageReferenceParser.contentSegmentsPreservingTemporaryImages(from: displayText)
+                : []
             let assistantRenderText = assistantTextWithoutImageSyntax ?? displayText
             // Defer Mermaid parsing until the assistant row is finalized so streaming deltas
             // keep the lightweight append-only path and avoid repeated parser/WebKit churn.
@@ -265,8 +270,9 @@ enum MessageRowRenderModelCache {
                     : MermaidMarkdownContentCache.content(
                         messageID: message.id,
                         text: assistantRenderText
-                    ),
+                ),
                 assistantImageReferences: assistantImageReferences,
+                assistantInlineContentSegments: assistantInlineContentSegments,
                 assistantTextWithoutImageSyntax: assistantTextWithoutImageSyntax,
                 fileChangeState: nil,
                 fileChangeGroups: [],
@@ -288,6 +294,7 @@ enum MessageRowRenderModelCache {
                     codeCommentContent: nil,
                     mermaidContent: nil,
                     assistantImageReferences: [],
+                    assistantInlineContentSegments: [],
                     assistantTextWithoutImageSyntax: nil,
                     fileChangeState: nil,
                     fileChangeGroups: [],
@@ -309,6 +316,7 @@ enum MessageRowRenderModelCache {
                     codeCommentContent: nil,
                     mermaidContent: nil,
                     assistantImageReferences: [],
+                    assistantInlineContentSegments: [],
                     assistantTextWithoutImageSyntax: nil,
                     fileChangeState: fileChangeState,
                     fileChangeGroups: FileChangeGroupingCache.grouped(messageID: message.id, entries: allEntries),
@@ -324,6 +332,7 @@ enum MessageRowRenderModelCache {
                     codeCommentContent: nil,
                     mermaidContent: nil,
                     assistantImageReferences: [],
+                    assistantInlineContentSegments: [],
                     assistantTextWithoutImageSyntax: nil,
                     fileChangeState: nil,
                     fileChangeGroups: [],
@@ -403,7 +412,7 @@ private struct FileChangeBlockAggregate {
     var deletions: Int
     var action: TurnFileChangeAction?
     var diffSections: [String]
-    var lastTotalsSourceIndex: Int
+    var totalsBySourceIndex: [Int: TurnDiffLineTotals]
 }
 
 private struct RawFileChangeDiffSection {
@@ -414,8 +423,8 @@ private struct RawFileChangeDiffSection {
     let diffCode: String
 }
 
-// Builds one per-file diff model from raw file-change messages so Totals stay authoritative
-// while diff hunks remain purely visual context.
+// Builds one per-file diff model from raw file-change messages. Summary Totals
+// override same-message diff counts, then separate messages for the same file add up.
 enum FileChangeBlockPresentationBuilder {
     static func build(from messages: [CodexMessage]) -> FileChangeBlockPresentation? {
         guard !messages.isEmpty else {
@@ -487,12 +496,11 @@ enum FileChangeBlockPresentationBuilder {
             var updated = existing
             updated.path = FileChangePathIdentity.preferredDisplayPath(existing.path, entry.path)
             updated.action = mergedFileChangeAction(existing: existing.action, incoming: entry.action)
-
-            if sourceIndex >= existing.lastTotalsSourceIndex {
-                updated.additions = entry.additions
-                updated.deletions = entry.deletions
-                updated.lastTotalsSourceIndex = sourceIndex
-            }
+            updated.totalsBySourceIndex[sourceIndex] = TurnDiffLineTotals(
+                additions: entry.additions,
+                deletions: entry.deletions
+            )
+            applyTotals(from: updated.totalsBySourceIndex, to: &updated)
 
             aggregates[existingIndex] = updated
             return
@@ -505,7 +513,12 @@ enum FileChangeBlockPresentationBuilder {
                 deletions: entry.deletions,
                 action: entry.action,
                 diffSections: [],
-                lastTotalsSourceIndex: sourceIndex
+                totalsBySourceIndex: [
+                    sourceIndex: TurnDiffLineTotals(
+                        additions: entry.additions,
+                        deletions: entry.deletions
+                    ),
+                ]
             )
         )
     }
@@ -532,14 +545,9 @@ enum FileChangeBlockPresentationBuilder {
                 return
             }
 
-            if existing.diffSections.isEmpty {
-                existing.additions = section.additions
-                existing.deletions = section.deletions
-            } else {
-                existing.additions += section.additions
-                existing.deletions += section.deletions
-            }
-            existing.lastTotalsSourceIndex = max(existing.lastTotalsSourceIndex, sourceIndex)
+            existing.totalsBySourceIndex[sourceIndex, default: TurnDiffLineTotals()].additions += section.additions
+            existing.totalsBySourceIndex[sourceIndex, default: TurnDiffLineTotals()].deletions += section.deletions
+            applyTotals(from: existing.totalsBySourceIndex, to: &existing)
             existing.diffSections.append(normalizedDiff)
             aggregates[existingIndex] = existing
             return
@@ -552,9 +560,22 @@ enum FileChangeBlockPresentationBuilder {
                 deletions: section.deletions,
                 action: section.action,
                 diffSections: [normalizedDiff],
-                lastTotalsSourceIndex: sourceIndex
+                totalsBySourceIndex: [
+                    sourceIndex: TurnDiffLineTotals(
+                        additions: section.additions,
+                        deletions: section.deletions
+                    ),
+                ]
             )
         )
+    }
+
+    private static func applyTotals(
+        from totalsBySourceIndex: [Int: TurnDiffLineTotals],
+        to aggregate: inout FileChangeBlockAggregate
+    ) {
+        aggregate.additions = totalsBySourceIndex.values.reduce(0) { $0 + $1.additions }
+        aggregate.deletions = totalsBySourceIndex.values.reduce(0) { $0 + $1.deletions }
     }
 
     private static func mergedFileChangeAction(
