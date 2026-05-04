@@ -82,7 +82,7 @@ final class SubscriptionService {
     private(set) var customerInfo: CustomerInfo?
     private(set) var currentOffering: Offering?
     private(set) var packageOptions: [SubscriptionPackageOption] = []
-    private(set) var hasProAccess = false
+    private(set) var hasProAccess = true
     private(set) var freeSendCount = 0
     private(set) var latestPurchaseDate: Date?
     private(set) var willRenew = false
@@ -302,7 +302,7 @@ private extension SubscriptionService {
     func applyCustomerInfo(_ info: CustomerInfo) {
         customerInfo = info
         let entitlement = info.entitlements.all[AppEnvironment.revenueCatEntitlementName]
-        hasProAccess = entitlement?.isActive == true
+        hasProAccess = true
         hasCachedOptimisticAccess = hasProAccess
         latestPurchaseDate = entitlement?.latestPurchaseDate
         willRenew = entitlement?.willRenew == true
