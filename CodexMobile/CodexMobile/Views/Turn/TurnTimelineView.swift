@@ -28,6 +28,9 @@ struct AssistantBlockAccessoryState: Equatable {
 }
 
 private struct TurnTimelineMessageRow: View {
+    @Environment(\.inlineCommitAndPushAction) private var inlineCommitAndPushAction
+    @Environment(\.inlineCommitAndPushPhase) private var inlineCommitAndPushPhase
+
     let message: CodexMessage
     let isRetryAvailable: Bool
     let cachedBlockInfoByMessageID: [String: AssistantBlockAccessoryState]
@@ -57,6 +60,8 @@ private struct TurnTimelineMessageRow: View {
             planMatchingFingerprint: planMatchingFingerprint,
             showsStreamingAnimations: autoScrollMode == .followBottom
                 && message.id == newestStreamingMessageID,
+            inlineCommitAndPushAction: inlineCommitAndPushAction,
+            inlineCommitAndPushPhase: inlineCommitAndPushPhase,
             assistantRevertAction: onTapAssistantRevert,
             subagentOpenAction: onTapSubagent
         )
@@ -361,6 +366,8 @@ private struct TurnTimelineRowsSection: View {
 private struct TurnTimelineFooterContainer<Composer: View>: View {
     let hidesErrorMessage: Bool
     let errorMessage: String?
+    let onReportError: (String) -> Void
+    let onDismissError: () -> Void
     let shouldShowScrollToLatestButton: Bool
     let scrollToLatestButtonLift: CGFloat
     let onScrollToLatest: (() -> Void)?
@@ -369,11 +376,13 @@ private struct TurnTimelineFooterContainer<Composer: View>: View {
     var body: some View {
         let footerContent = VStack(spacing: 0) {
             if !hidesErrorMessage, let errorMessage, !errorMessage.isEmpty {
-                Text(errorMessage)
-                    .font(AppFont.caption())
-                    .foregroundStyle(.red)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 4)
+                TurnErrorReportCard(
+                    message: errorMessage,
+                    onReport: { onReportError(errorMessage) },
+                    onDismiss: onDismissError
+                )
+                .padding(.horizontal, 12)
+                .padding(.bottom, 8)
             }
 
             composer()
@@ -424,6 +433,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     let isRetryAvailable: Bool
     let errorMessage: String?
     let hidesErrorMessage: Bool
+    let onReportError: (String) -> Void
+    let onDismissError: () -> Void
     let hasRemoteEarlierMessages: Bool
     let hasLocallyProjectedEarlierMessages: Bool
     let usesPaginatedHistory: Bool
@@ -870,6 +881,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         hasher.combine(latestTurnTerminalState)
         hasher.combine(completedTurnIDs)
         hasher.combine(stoppedTurnIDs)
+        hasher.combine(assistantRevertStatesByMessageID)
 
         for message in messages {
             hasher.combine(message.id)
@@ -914,6 +926,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         TurnTimelineFooterContainer(
             hidesErrorMessage: hidesErrorMessage,
             errorMessage: errorMessage,
+            onReportError: onReportError,
+            onDismissError: onDismissError,
             shouldShowScrollToLatestButton: shouldShowScrollToLatestButton,
             scrollToLatestButtonLift: Self.scrollToLatestButtonLift,
             onScrollToLatest: scrollToBottomAction,

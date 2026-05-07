@@ -332,6 +332,7 @@ struct AssistantRevertStateCacheEntry {
     let messageRevision: Int
     let busyRepoRevision: Int
     let revertStateRevision: Int
+    let workingDirectory: String?
     let statesByMessageID: [String: AssistantRevertPresentation]
 }
 
@@ -800,6 +801,7 @@ final class CodexService {
         } else {
             self.terminalStateByTurnID = [:]
         }
+        rehydrateLegacyFallbackChangeSetsFromPersistedMessages()
 
         if let savedThreadHistoryPaginationState = defaults.data(
             forKey: Self.threadHistoryPaginationStateDefaultsKey

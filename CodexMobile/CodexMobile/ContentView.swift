@@ -69,7 +69,7 @@ struct ContentView: View {
     private let sidebarGestureLogBucketWidth: CGFloat = 40
     private let sidebarSwipeCommitDistance: CGFloat = 30
     private let sidebarSelectionSuppressionDuration: TimeInterval = 0.35
-    private let whatsNewReleaseVersion = "1.1"
+    private let whatsNewReleaseVersion = "1.5"
     private static let sidebarSpring = Animation.spring(response: 0.35, dampingFraction: 0.85)
     private static var isSidebarDebugLoggingEnabled: Bool { false }
 
@@ -763,7 +763,7 @@ struct ContentView: View {
                     codex.activeThreadId = restoredThread.id
                 }
             } catch {
-                codex.lastErrorMessage = error.localizedDescription
+                codex.lastErrorMessage = codex.userFacingTurnErrorMessageForFooter(from: error)
             }
 
             codex.requestImmediateActiveThreadSync(threadId: thread.id)

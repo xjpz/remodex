@@ -15,11 +15,13 @@ struct ComposerBottomBar: View {
     let selectedModelID: String?
     let selectedModelTitle: String
     let isLoadingModels: Bool
+    let isRuntimeSelectionLoading: Bool
     let runtimeState: TurnComposerRuntimeState
     let runtimeActions: TurnComposerRuntimeActions
     let remainingAttachmentSlots: Int
     let isComposerInteractionLocked: Bool
     let isSendDisabled: Bool
+    let isSending: Bool
     let isPlanModeArmed: Bool
     let queuedCount: Int
     let isQueuePaused: Bool
@@ -62,6 +64,7 @@ struct ComposerBottomBar: View {
                 selectedModelID: selectedModelID,
                 selectedModelTitle: selectedModelTitle,
                 isLoadingModels: isLoadingModels,
+                isRuntimeSelectionLoading: isRuntimeSelectionLoading,
                 runtimeState: runtimeState,
                 runtimeActions: runtimeActions,
                 showsAllModelsSheet: $showsAllModelsSheet
@@ -88,7 +91,7 @@ struct ComposerBottomBar: View {
                 .accessibilityLabel("Resume queued messages")
             }
 
-            // Voice → Stop → Send
+            // Voice -> Stop/loading -> Send. New sends can look running before the turn id is interruptible.
             Button {
                 HapticFeedback.shared.triggerImpactFeedback()
                 onTapVoice()
@@ -98,7 +101,12 @@ struct ComposerBottomBar: View {
             .disabled(voiceButtonPresentation.isDisabled)
             .accessibilityLabel(voiceButtonPresentation.accessibilityLabel)
 
-            if isThreadRunning {
+            if isThreadRunning && isSending && activeTurnID == nil {
+                ProgressView()
+                    .tint(Color(.label))
+                    .frame(width: 32, height: 32)
+                    .accessibilityLabel("Starting run")
+            } else if isThreadRunning {
                 Button {
                     HapticFeedback.shared.triggerImpactFeedback()
                     onStopTurn(activeTurnID)
@@ -109,6 +117,7 @@ struct ComposerBottomBar: View {
                         .frame(width: 32, height: 32)
                         .background(Color(.label), in: Circle())
                 }
+                .accessibilityLabel("Stop current run")
             }
 
             Button {
@@ -272,6 +281,7 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
     let selectedModelID: String?
     let selectedModelTitle: String
     let isLoadingModels: Bool
+    let isRuntimeSelectionLoading: Bool
     let runtimeState: TurnComposerRuntimeState
     let runtimeActions: TurnComposerRuntimeActions
     @Binding var showsAllModelsSheet: Bool
@@ -286,6 +296,7 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
             && lhs.selectedModelID == rhs.selectedModelID
             && lhs.selectedModelTitle == rhs.selectedModelTitle
             && lhs.isLoadingModels == rhs.isLoadingModels
+            && lhs.isRuntimeSelectionLoading == rhs.isRuntimeSelectionLoading
             && lhs.runtimeState == rhs.runtimeState
     }
 
@@ -378,7 +389,7 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
 
     private var compactRuntimeTitle: String {
         if selectedModelID == nil {
-            return "5.5 Medium"
+            return isRuntimeSelectionLoading ? "Loading…" : "5.5 Medium"
         }
         return "\(compactModelTitle) \(runtimeState.selectedReasoningTitle)"
     }
