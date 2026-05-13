@@ -144,7 +144,7 @@ extension CodexService {
                         debugRuntimeLog("auto-approve triggered method=\(method)")
                         try await sendResponse(
                             id: requestID,
-                            result: approvalDecisionResult("accept")
+                            result: approvalResponseResult(for: request, decision: "accept")
                         )
                     } catch {
                         debugRuntimeLog("auto-approve failed method=\(method): \(error.localizedDescription)")
@@ -295,6 +295,9 @@ extension CodexService {
 
         case "git/stackedAction/progress":
             handleGitStackedActionProgress(paramsObject)
+
+        case "terminal/event":
+            handleTerminalEvent(paramsObject)
 
         default:
             if method.hasPrefix("codex/event/"),

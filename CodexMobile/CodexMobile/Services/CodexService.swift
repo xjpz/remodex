@@ -452,6 +452,12 @@ final class CodexService {
     var threadCompletionBanner: CodexThreadCompletionBanner?
     // Explains why a push-opened chat could not be restored and offers a recovery path.
     var missingNotificationThreadPrompt: CodexMissingNotificationThreadPrompt?
+    // Interactive SSH terminal state is owned on-device so it can bootstrap a Mac before the bridge runs.
+    var terminalSnapshot: RemodexTerminalSnapshot = .idle
+    var terminalSnapshotsById: [String: RemodexTerminalSnapshot] = [:]
+    var terminalProfile: RemodexTerminalProfile = RemodexTerminalProfileStore.load()
+    @ObservationIgnored let nativeSSHTerminal = RemodexNativeSSHTerminal()
+    @ObservationIgnored var nativeSSHTerminalsById: [String: RemodexNativeSSHTerminal] = [:]
 
     // --- Internal wiring ------------------------------------------------------
 
@@ -718,7 +724,7 @@ final class CodexService {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let hasSavedModelId = savedModelId?.isEmpty == false
         self.hasPersistedSelectedModelId = hasSavedModelId
-        self.selectedModelId = hasSavedModelId ? savedModelId : "gpt-5.5"
+        self.selectedModelId = hasSavedModelId ? savedModelId : nil
 
         let savedGitWriterModelId = defaults.string(forKey: Self.selectedGitWriterModelIdDefaultsKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -728,7 +734,7 @@ final class CodexService {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         self.selectedReasoningEffort = (hasSavedModelId && savedReasoning?.isEmpty == false)
             ? savedReasoning
-            : "medium"
+            : nil
 
         if defaults.object(forKey: Self.keepMacAwakeWhileBridgeRunsDefaultsKey) != nil {
             self.keepMacAwakeWhileBridgeRuns = defaults.bool(forKey: Self.keepMacAwakeWhileBridgeRunsDefaultsKey)
@@ -1006,7 +1012,7 @@ final class CodexService {
             return .loadingChats
         }
 
-        if isBootstrappingConnectionSync || isLoadingModels || isLoadingThreads {
+        if isBootstrappingConnectionSync || isLoadingThreads {
             return .syncing
         }
 
