@@ -27,8 +27,8 @@ enum TurnTimelineCacheKeyBuilder {
         )
     }
 
-    // During streaming, text changes every delta. Hash only the length for live rows
-    // to avoid O(text_length) work per frame, then hash full finalized text for reconciliation.
+    // Avoid hashing message bodies while opening large threads; CodexMessage keeps a
+    // tiny text revision that changes whenever row text is mutated.
     static func blockInfoInputKey(
         messages: [CodexMessage],
         isThreadRunning: Bool,
@@ -53,11 +53,7 @@ enum TurnTimelineCacheKeyBuilder {
             hasher.combine(message.kind)
             hasher.combine(message.turnId)
             hasher.combine(message.isStreaming)
-            if message.isStreaming {
-                hasher.combine(message.text.count)
-            } else {
-                hasher.combine(message.text)
-            }
+            hasher.combine(message.textRenderSignature)
         }
 
         return hasher.finalize()

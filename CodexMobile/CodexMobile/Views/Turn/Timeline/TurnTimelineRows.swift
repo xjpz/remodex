@@ -2,7 +2,7 @@
 // Purpose: Renders timeline row groups and message-row accessories.
 // Layer: View Component
 // Exports: AssistantBlockAccessoryState, TurnTimelineRowsSection
-// Depends on: SwiftUI, TurnTimelineRenderProjection, MessageRow
+// Depends on: SwiftUI, TurnTimelineRenderProjection, MessageRow, CodexMessage
 
 import SwiftUI
 
@@ -14,6 +14,15 @@ struct AssistantBlockAccessoryState: Equatable {
     let blockRevertPresentation: AssistantRevertPresentation?
     let blockRevertMessage: CodexMessage?
 
+    static func == (lhs: AssistantBlockAccessoryState, rhs: AssistantBlockAccessoryState) -> Bool {
+        lhs.copyText == rhs.copyText
+            && lhs.showsRunningIndicator == rhs.showsRunningIndicator
+            && lhs.blockDiffText == rhs.blockDiffText
+            && lhs.blockDiffEntries == rhs.blockDiffEntries
+            && lhs.blockRevertPresentation == rhs.blockRevertPresentation
+            && blockRevertMessageSignature(lhs.blockRevertMessage) == blockRevertMessageSignature(rhs.blockRevertMessage)
+    }
+
     func replacingCopyText(_ copyText: String?) -> AssistantBlockAccessoryState {
         AssistantBlockAccessoryState(
             copyText: copyText,
@@ -23,6 +32,31 @@ struct AssistantBlockAccessoryState: Equatable {
             blockRevertPresentation: blockRevertPresentation,
             blockRevertMessage: blockRevertMessage
         )
+    }
+
+    private static func blockRevertMessageSignature(_ message: CodexMessage?) -> AssistantBlockRevertMessageSignature? {
+        guard let message else { return nil }
+        return AssistantBlockRevertMessageSignature(message)
+    }
+}
+
+private struct AssistantBlockRevertMessageSignature: Equatable {
+    let id: String
+    let role: CodexMessageRole
+    let kind: CodexMessageKind
+    let turnId: String?
+    let itemId: String?
+    let isStreaming: Bool
+    let textSignature: CodexMessageTextRenderSignature
+
+    init(_ message: CodexMessage) {
+        self.id = message.id
+        self.role = message.role
+        self.kind = message.kind
+        self.turnId = message.turnId
+        self.itemId = message.itemId
+        self.isStreaming = message.isStreaming
+        self.textSignature = message.textRenderSignature
     }
 }
 

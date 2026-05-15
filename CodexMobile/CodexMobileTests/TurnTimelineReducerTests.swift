@@ -79,6 +79,43 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertTrue(projection.messages[0].text.contains("Running /usr/bin/bash"))
     }
 
+    func testCollapseConsecutiveThinkingKeepsLargeTextInsteadOfFingerprint() {
+        let threadID = "thread"
+        let now = Date()
+        let longThinking = "Resolved reasoning\n" + String(repeating: "reasoning detail\n", count: 6_000) + "TAIL"
+
+        let messages = [
+            makeMessage(
+                id: "thinking-placeholder",
+                threadID: threadID,
+                role: .system,
+                kind: .thinking,
+                text: "Thinking...",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "item-1",
+                isStreaming: true
+            ),
+            makeMessage(
+                id: "thinking-large",
+                threadID: threadID,
+                role: .system,
+                kind: .thinking,
+                text: longThinking,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "item-1",
+                isStreaming: false
+            ),
+        ]
+
+        let projection = TurnTimelineReducer.project(messages: messages)
+
+        XCTAssertEqual(projection.messages.count, 1)
+        XCTAssertEqual(projection.messages[0].text, longThinking)
+        XCTAssertFalse(projection.messages[0].text.hasPrefix("large|"))
+    }
+
     func testCollapseConsecutiveThinkingKeepsDistinctItemsSeparated() {
         let threadID = "thread"
         let now = Date()
@@ -1492,6 +1529,49 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(deduped.map(\.id), ["assistant-1", "assistant-2"])
     }
 
+    func testRemoveDuplicateAssistantMessagesKeepsDistinctLargeRowsWithSameSampledEdges() {
+        let now = Date()
+        let sharedPrefix = String(repeating: "p", count: 100)
+        let sharedMiddle = String(repeating: "m", count: 100)
+        let sharedSuffix = String(repeating: "s", count: 100)
+        let firstText = sharedPrefix
+            + String(repeating: "a", count: 40_000)
+            + sharedMiddle
+            + String(repeating: "b", count: 40_000)
+            + sharedSuffix
+        let secondText = sharedPrefix
+            + String(repeating: "c", count: 40_000)
+            + sharedMiddle
+            + String(repeating: "d", count: 40_000)
+            + sharedSuffix
+        let messages = [
+            makeMessage(
+                id: "assistant-large-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: firstText,
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "item-1"
+            ),
+            makeMessage(
+                id: "assistant-large-2",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: secondText,
+                createdAt: now.addingTimeInterval(0.2),
+                turnID: "turn-1",
+                itemID: "item-2"
+            ),
+        ]
+
+        let deduped = TurnTimelineReducer.removeDuplicateAssistantMessages(in: messages)
+
+        XCTAssertEqual(deduped.map(\.id), ["assistant-large-1", "assistant-large-2"])
+    }
+
     func testRemoveDuplicateAssistantMessagesStillDedupesTurnTextWhenOneIdentityIsMissing() {
         let now = Date()
         let messages = [
@@ -1894,6 +1974,50 @@ final class TurnTimelineReducerTests: XCTestCase {
         let projection = TurnTimelineReducer.project(messages: messages)
 
         XCTAssertEqual(projection.messages.map(\.id), ["user", "assistant", "diff"])
+    }
+
+    func testRenderProjectionKeepsLargeFileChangeRowsSeparateInsteadOfEagerParsing() {
+        let now = Date()
+        let largeDiffText = """
+        Status: completed
+
+        Path: Sources/App.swift
+        Kind: update
+        Totals: +1 -0
+        \(String(repeating: "context line\n", count: 9_000))
+        """
+        let messages = [
+            makeMessage(
+                id: "diff-large-1",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: largeDiffText,
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "diff-1"
+            ),
+            makeMessage(
+                id: "diff-large-2",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: largeDiffText,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "diff-2"
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+        let messageIDs = items.compactMap { item -> String? in
+            if case .message(let message) = item {
+                return message.id
+            }
+            return nil
+        }
+
+        XCTAssertEqual(messageIDs, ["diff-large-1", "diff-large-2"])
     }
 
     func testRemoveDuplicateFileChangeMessagesKeepsNewestMatchingTurnSnapshot() {

@@ -22,17 +22,291 @@ private let timelineStreamingPlaceholderTexts: Set<String> = [
     "Planning...",
     "Waiting for input...",
 ]
+private let timelinePlaceholderCheckByteLimit = 128
+private let timelineFullTrimByteLimit = 64_000
+private let timelineActionTextTrimByteLimit = 64_000
+
+private func messageRowTextSignature(_ text: String) -> String {
+    return TurnTextCacheKey.stableFingerprint(for: text)
+}
+
+private struct MessageRowMessageSignature: Equatable {
+    let id: String
+    let threadId: String
+    let role: CodexMessageRole
+    let kind: CodexMessageKind
+    let assistantPhase: String?
+    let textFingerprint: CodexMessageTextRenderSignature
+    let fileMentions: [String]
+    let turnId: String?
+    let itemId: String?
+    let isStreaming: Bool
+    let deliveryState: CodexMessageDeliveryState
+    let attachments: [MessageRowAttachmentSignature]
+    let planState: MessageRowPlanStateSignature?
+    let planPresentation: CodexPlanPresentation?
+    let proposedPlan: MessageRowProposedPlanSignature?
+    let subagentAction: MessageRowSubagentActionSignature?
+    let structuredUserInputRequest: MessageRowStructuredInputRequestSignature?
+    let orderIndex: Int
+
+    init(_ message: CodexMessage) {
+        self.id = message.id
+        self.threadId = message.threadId
+        self.role = message.role
+        self.kind = message.kind
+        self.assistantPhase = message.assistantPhase
+        self.textFingerprint = message.textRenderSignature
+        self.fileMentions = message.fileMentions
+        self.turnId = message.turnId
+        self.itemId = message.itemId
+        self.isStreaming = message.isStreaming
+        self.deliveryState = message.deliveryState
+        self.attachments = message.attachments.map(MessageRowAttachmentSignature.init)
+        self.planState = message.planState.map(MessageRowPlanStateSignature.init)
+        self.planPresentation = message.planPresentation
+        self.proposedPlan = message.proposedPlan.map(MessageRowProposedPlanSignature.init)
+        self.subagentAction = message.subagentAction.map(MessageRowSubagentActionSignature.init)
+        self.structuredUserInputRequest = message.structuredUserInputRequest
+            .map(MessageRowStructuredInputRequestSignature.init)
+        self.orderIndex = message.orderIndex
+    }
+}
+
+private struct MessageRowAttachmentSignature: Equatable {
+    let id: String
+    let thumbnailFingerprint: CodexTextContentFingerprint
+    let payloadFingerprint: CodexTextContentFingerprint?
+    let sourceFingerprint: CodexTextContentFingerprint?
+
+    init(_ attachment: CodexImageAttachment) {
+        self.id = attachment.id
+        self.thumbnailFingerprint = attachment.thumbnailContentFingerprint
+        self.payloadFingerprint = attachment.payloadContentFingerprint
+        self.sourceFingerprint = attachment.sourceContentFingerprint
+    }
+}
+
+private struct MessageRowProposedPlanSignature: Equatable {
+    let bodyFingerprint: String
+    let summaryFingerprint: String?
+
+    init(_ plan: CodexProposedPlan) {
+        self.bodyFingerprint = messageRowTextSignature(plan.body)
+        self.summaryFingerprint = plan.summary.map(messageRowTextSignature)
+    }
+}
+
+private struct MessageRowPlanStateSignature: Equatable {
+    let explanationFingerprint: String?
+    let steps: [MessageRowPlanStepSignature]
+
+    init(_ planState: CodexPlanState) {
+        self.explanationFingerprint = planState.explanation.map(messageRowTextSignature)
+        self.steps = planState.steps.map(MessageRowPlanStepSignature.init)
+    }
+}
+
+private struct MessageRowPlanStepSignature: Equatable {
+    let id: String
+    let stepFingerprint: String
+    let status: CodexPlanStepStatus
+
+    init(_ step: CodexPlanStep) {
+        self.id = step.id
+        self.stepFingerprint = messageRowTextSignature(step.step)
+        self.status = step.status
+    }
+}
+
+private struct MessageRowSubagentActionSignature: Equatable {
+    let tool: String
+    let status: String
+    let promptFingerprint: String?
+    let model: String?
+    let receiverThreadIds: [String]
+    let receiverAgents: [MessageRowSubagentRefSignature]
+    let agentStates: [MessageRowSubagentStateSignature]
+
+    init(_ action: CodexSubagentAction) {
+        self.tool = action.tool
+        self.status = action.status
+        self.promptFingerprint = action.prompt.map(messageRowTextSignature)
+        self.model = action.model
+        self.receiverThreadIds = action.receiverThreadIds
+        self.receiverAgents = action.receiverAgents.map(MessageRowSubagentRefSignature.init)
+        self.agentStates = action.agentStates
+            .keys
+            .sorted()
+            .compactMap { key in action.agentStates[key].map(MessageRowSubagentStateSignature.init) }
+    }
+}
+
+private struct MessageRowSubagentRefSignature: Equatable {
+    let threadId: String
+    let agentId: String?
+    let nickname: String?
+    let role: String?
+    let model: String?
+    let promptFingerprint: String?
+
+    init(_ ref: CodexSubagentRef) {
+        self.threadId = ref.threadId
+        self.agentId = ref.agentId
+        self.nickname = ref.nickname
+        self.role = ref.role
+        self.model = ref.model
+        self.promptFingerprint = ref.prompt.map(messageRowTextSignature)
+    }
+}
+
+private struct MessageRowSubagentStateSignature: Equatable {
+    let threadId: String
+    let status: String
+    let messageFingerprint: String?
+
+    init(_ state: CodexSubagentState) {
+        self.threadId = state.threadId
+        self.status = state.status
+        self.messageFingerprint = state.message.map(messageRowTextSignature)
+    }
+}
+
+private struct MessageRowStructuredInputRequestSignature: Equatable {
+    let requestID: JSONValue
+    let questions: [MessageRowStructuredInputQuestionSignature]
+
+    init(_ request: CodexStructuredUserInputRequest) {
+        self.requestID = request.requestID
+        self.questions = request.questions.map(MessageRowStructuredInputQuestionSignature.init)
+    }
+}
+
+private struct MessageRowStructuredInputQuestionSignature: Equatable {
+    let id: String
+    let headerFingerprint: String
+    let questionFingerprint: String
+    let isOther: Bool
+    let isSecret: Bool
+    let selectionLimit: Int?
+    let options: [MessageRowStructuredInputOptionSignature]
+
+    init(_ question: CodexStructuredUserInputQuestion) {
+        self.id = question.id
+        self.headerFingerprint = messageRowTextSignature(question.header)
+        self.questionFingerprint = messageRowTextSignature(question.question)
+        self.isOther = question.isOther
+        self.isSecret = question.isSecret
+        self.selectionLimit = question.selectionLimit
+        self.options = question.options.map(MessageRowStructuredInputOptionSignature.init)
+    }
+}
+
+private struct MessageRowStructuredInputOptionSignature: Equatable {
+    let id: String
+    let labelFingerprint: String
+    let descriptionFingerprint: String
+
+    init(_ option: CodexStructuredUserInputOption) {
+        self.id = option.id
+        self.labelFingerprint = messageRowTextSignature(option.label)
+        self.descriptionFingerprint = messageRowTextSignature(option.description)
+    }
+}
+
+private struct TimelineShowMoreTextButton: View {
+    let hiddenByteCount: Int
+    let onTap: () -> Void
+
+    var body: some View {
+        Button {
+            HapticFeedback.shared.triggerImpactFeedback(style: .light)
+            onTap()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.down")
+                    .font(AppFont.caption(weight: .semibold))
+                Text("Show more")
+                    .font(AppFont.caption(weight: .semibold))
+                Text(hiddenSizeLabel)
+                    .font(AppFont.mono(.caption2))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(.thinMaterial, in: Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Show more text")
+        .accessibilityValue(hiddenSizeLabel)
+    }
+
+    private var hiddenSizeLabel: String {
+        ByteCountFormatter.string(
+            fromByteCount: Int64(hiddenByteCount),
+            countStyle: .file
+        )
+    }
+}
 
 // Normalizes streaming placeholders once so assistant rows do not render transient status text
 // as if it were final message content.
-func timelineDisplayText(for message: CodexMessage) -> String {
-    let trimmedText = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
-    if message.isStreaming {
-        if trimmedText.isEmpty || timelineStreamingPlaceholderTexts.contains(trimmedText) {
-            return ""
-        }
+func timelineDisplayWindow(
+    for message: CodexMessage,
+    expansionLevel: Int = 0
+) -> TimelineTextClippingPolicy.DisplayWindow {
+    let rawText = message.text
+    if message.isStreaming, isTimelineStreamingPlaceholder(rawText) {
+        return TimelineTextClippingPolicy.DisplayWindow(text: "", isPartial: false, hiddenByteCount: 0)
     }
-    return trimmedText
+    let displaySource = timelineTrimmedDisplaySource(rawText)
+    guard !displaySource.isEmpty else {
+        return TimelineTextClippingPolicy.DisplayWindow(text: "", isPartial: false, hiddenByteCount: 0)
+    }
+    return TimelineTextClippingPolicy.displayWindow(
+        for: message,
+        text: displaySource,
+        expansionLevel: expansionLevel
+    )
+}
+
+func timelineDisplayText(for message: CodexMessage) -> String {
+    timelineDisplayWindow(for: message).text
+}
+
+private func isTimelineStreamingPlaceholder(_ text: String) -> Bool {
+    guard text.utf8.count <= timelinePlaceholderCheckByteLimit else {
+        return false
+    }
+    let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmedText.isEmpty || timelineStreamingPlaceholderTexts.contains(trimmedText)
+}
+
+private func timelineTrimmedDisplaySource(_ text: String) -> String {
+    guard text.utf8.count > timelineFullTrimByteLimit else {
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    return text
+}
+
+// Keeps user actions faithful to the underlying message even when display text is clipped.
+func timelineActionText(for message: CodexMessage) -> String {
+    if message.isStreaming, isTimelineStreamingPlaceholder(message.text) {
+        return ""
+    }
+    return message.text
+}
+
+// Context-menu actions may receive the full unclipped row. Avoid trimming huge strings while
+// still suppressing empty small messages.
+func timelineSelectableActionText(_ text: String) -> String? {
+    guard !text.isEmpty else { return nil }
+    guard text.utf8.count <= timelineActionTextTrimByteLimit else {
+        return text
+    }
+    let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmedText.isEmpty ? nil : trimmedText
 }
 
 // ─── Message row ────────────────────────────────────────────────────
@@ -62,9 +336,10 @@ struct MessageRow: View, Equatable {
     @State private var throttledAssistantDisplayText: String?
     @State private var pendingAssistantDisplayText: String?
     @State private var assistantDisplayUpdateTask: Task<Void, Never>?
+    @State private var textExpansionLevel = 0
 
     static func == (lhs: MessageRow, rhs: MessageRow) -> Bool {
-        lhs.message == rhs.message
+        MessageRowMessageSignature(lhs.message) == MessageRowMessageSignature(rhs.message)
             && lhs.isRetryAvailable == rhs.isRetryAvailable
             && lhs.assistantBlockAccessoryState == rhs.assistantBlockAccessoryState
             && lhs.planSessionSource == rhs.planSessionSource
@@ -77,6 +352,10 @@ struct MessageRow: View, Equatable {
             && lhs.inlineCommitAndPushPhase == rhs.inlineCommitAndPushPhase
     }
 
+    private var displayWindow: TimelineTextClippingPolicy.DisplayWindow {
+        timelineDisplayWindow(for: message, expansionLevel: textExpansionLevel)
+    }
+
     // Computed once per body evaluation and reused by all sub-views.
     private var displayText: String {
         if message.role == .assistant,
@@ -85,40 +364,57 @@ struct MessageRow: View, Equatable {
             return throttledAssistantDisplayText
         }
 
-        return timelineDisplayText(for: message)
+        return displayWindow.text
     }
 
     var body: some View {
+        let window = displayWindow
         let text = displayText
+        let actionText = timelineActionText(for: message)
         let renderModel = MessageRowRenderModelCache.model(for: message, displayText: text)
-        Group {
-            switch message.role {
-            case .user:
-                userBubble(text: text)
-            case .assistant:
-                assistantView(text: text, renderModel: renderModel)
-            case .system:
-                VStack(alignment: .leading, spacing: 8) {
-                    SystemMessageContentView(
-                        message: message,
+        VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 6) {
+            Group {
+                switch message.role {
+                case .user:
+                    userBubble(
                         text: text,
-                        renderModel: renderModel,
-                        showsStreamingAnimations: showsStreamingAnimations,
-                        subagentOpenAction: subagentOpenAction,
-                        onSelectText: { selectableTextSheet = $0 }
+                        actionText: actionText,
+                        isProgressiveTextWindow: window.isPartial
                     )
-                    if let assistantBlockAccessoryState, hasTurnEndActions {
-                        assistantTurnEndActions(accessoryState: assistantBlockAccessoryState)
-                    }
-                    if let assistantBlockAccessoryState {
-                        CopyBlockButton(
-                            text: assistantBlockAccessoryState.copyText,
-                            isRunning: assistantBlockAccessoryState.showsRunningIndicator
+                case .assistant:
+                    assistantView(text: text, actionText: actionText, renderModel: renderModel)
+                case .system:
+                    VStack(alignment: .leading, spacing: 8) {
+                        SystemMessageContentView(
+                            message: message,
+                            text: text,
+                            actionText: actionText,
+                            renderModel: renderModel,
+                            showsStreamingAnimations: showsStreamingAnimations,
+                            subagentOpenAction: subagentOpenAction,
+                            onSelectText: { selectableTextSheet = $0 }
                         )
+                        if let assistantBlockAccessoryState, hasTurnEndActions {
+                            assistantTurnEndActions(accessoryState: assistantBlockAccessoryState)
+                        }
+                        if let assistantBlockAccessoryState {
+                            CopyBlockButton(
+                                text: assistantBlockAccessoryState.copyText,
+                                isRunning: assistantBlockAccessoryState.showsRunningIndicator
+                            )
+                        }
                     }
+                    // Keep block-end actions pinned left when a system row is the last item in a turn.
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                // Keep block-end actions pinned left when a system row is the last item in a turn.
-                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            if window.isPartial {
+                TimelineShowMoreTextButton(
+                    hiddenByteCount: window.hiddenByteCount,
+                    onTap: expandVisibleText
+                )
+                .frame(maxWidth: .infinity, alignment: message.role == .user ? .trailing : .leading)
             }
         }
         .sheet(item: $selectableTextSheet) { sheet in
@@ -135,22 +431,31 @@ struct MessageRow: View, Equatable {
         .onChange(of: message.isStreaming) { _, isStreaming in
             synchronizeAssistantDisplayText(immediate: !isStreaming)
         }
+        .onChange(of: textExpansionLevel) { _, _ in
+            synchronizeAssistantDisplayText(immediate: true)
+        }
         .onDisappear {
             assistantDisplayUpdateTask?.cancel()
             assistantDisplayUpdateTask = nil
         }
     }
 
-    private func userBubble(text: String) -> some View {
+    private func userBubble(
+        text: String,
+        actionText: String,
+        isProgressiveTextWindow: Bool
+    ) -> some View {
         UserMessageBubble(
             message: message,
             text: text,
+            actionText: actionText,
+            isProgressiveTextWindow: isProgressiveTextWindow,
             isRetryAvailable: isRetryAvailable,
             onRetryUserMessage: onRetryUserMessage
         )
     }
 
-    private func assistantView(text: String, renderModel: MessageRowRenderModel) -> some View {
+    private func assistantView(text: String, actionText: String, renderModel: MessageRowRenderModel) -> some View {
         let commentContent = renderModel.codeCommentContent
         let bodyText = commentContent?.fallbackText ?? text
         let mermaidContent = renderModel.mermaidContent
@@ -217,9 +522,12 @@ struct MessageRow: View, Equatable {
             || proposedPlan != nil
             || !trailingAssistantImageReferences.isEmpty
             || rendersTemporaryImagesInline
-        // Copy only the visible prose. Image-only artifact rows should not expose a
-        // second copy affordance for the hidden markdown image syntax.
+        // Copy the full underlying text even when the rendered row is clipped.
+        // Image-only artifact rows still avoid a duplicate copy affordance.
         let assistantCopyText: String? = {
+            if !actionText.isEmpty {
+                return actionText
+            }
             if !trimmedVisibleAssistantText.isEmpty {
                 return trimmedVisibleAssistantText
             }
@@ -342,7 +650,7 @@ struct MessageRow: View, Equatable {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contextMenu {
-            selectableTextActions(text: text, usesMarkdownSelection: true)
+            selectableTextActions(text: actionText, usesMarkdownSelection: true)
         }
     }
 
@@ -350,6 +658,11 @@ struct MessageRow: View, Equatable {
         AssistantTurnEndActionVisibility.shouldShow(
             accessoryState: assistantBlockAccessoryState
         )
+    }
+
+    private func expandVisibleText() {
+        textExpansionLevel += 1
+        synchronizeAssistantDisplayText(immediate: true)
     }
 
     private func assistantTurnEndActions(accessoryState: AssistantBlockAccessoryState) -> some View {
@@ -364,13 +677,12 @@ struct MessageRow: View, Equatable {
 
     @ViewBuilder
     private func selectableTextActions(text: String, usesMarkdownSelection: Bool) -> some View {
-        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedText.isEmpty {
+        if let selectableText = timelineSelectableActionText(text) {
             Button {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 selectableTextSheet = SelectableMessageTextSheetState(
                     role: message.role,
-                    text: trimmedText,
+                    text: selectableText,
                     usesMarkdownSelection: usesMarkdownSelection
                 )
             } label: {
@@ -379,7 +691,7 @@ struct MessageRow: View, Equatable {
 
             Button {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                UIPasteboard.general.string = trimmedText
+                UIPasteboard.general.string = selectableText
             } label: {
                 Label("Copy", systemImage: "doc.on.doc")
             }
@@ -397,7 +709,7 @@ struct MessageRow: View, Equatable {
             return
         }
 
-        let nextText = timelineDisplayText(for: message)
+        let nextText = timelineDisplayWindow(for: message, expansionLevel: textExpansionLevel).text
         pendingAssistantDisplayText = nextText
 
         guard message.isStreaming else {

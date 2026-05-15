@@ -11,6 +11,70 @@ import XCTest
 final class CodexThreadForkTests: XCTestCase {
     private static var retainedServices: [CodexService] = []
 
+    func testForkThreadIfReadyWaitsForRuntimeInitializationDuringReconnect() async throws {
+        let service = makeService()
+        service.isConnected = true
+        service.isInitialized = false
+        service.threads = [makeSourceThread()]
+
+        var didForkThread = false
+        service.requestTransportOverride = { method, _ in
+            switch method {
+            case "thread/fork":
+                XCTAssertTrue(service.isInitialized)
+                didForkThread = true
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "thread": .object([
+                            "id": .string("fork-local"),
+                        ]),
+                    ]),
+                    includeJSONRPC: false
+                )
+            case "thread/resume":
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "thread": .object([
+                            "id": .string("fork-local"),
+                            "cwd": .string("/tmp/remodex"),
+                            "title": .string("Fork Local"),
+                        ]),
+                    ]),
+                    includeJSONRPC: false
+                )
+            case "thread/read":
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "thread": .object([
+                            "id": .string("fork-local"),
+                            "cwd": .string("/tmp/remodex"),
+                            "turns": .array([]),
+                        ]),
+                    ]),
+                    includeJSONRPC: false
+                )
+            default:
+                XCTFail("Unexpected method: \(method)")
+                throw CodexServiceError.invalidInput("Unexpected method")
+            }
+        }
+
+        let readinessTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            service.isInitialized = true
+        }
+        defer { readinessTask.cancel() }
+
+        let forkedThread = try await service.forkThreadIfReady(from: "source-thread", target: .currentProject)
+
+        XCTAssertTrue(didForkThread)
+        XCTAssertEqual(forkedThread.id, "fork-local")
+        XCTAssertEqual(service.activeThreadId, "fork-local")
+    }
+
     func testForkSendsOnlyThreadIdToThreadFork() async throws {
         let service = makeService()
         service.isConnected = true

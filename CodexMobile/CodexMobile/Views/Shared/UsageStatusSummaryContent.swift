@@ -154,6 +154,7 @@ struct UsageStatusSummaryContent: View {
                     .font(AppFont.subheadline(weight: .semibold))
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
+            .foregroundStyle(.primary)
         }
         .buttonStyle(.plain)
         .disabled(refreshControl.isRefreshing)

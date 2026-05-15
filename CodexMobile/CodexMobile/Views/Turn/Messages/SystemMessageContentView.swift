@@ -10,6 +10,7 @@ import UIKit
 struct SystemMessageContentView: View {
     let message: CodexMessage
     let text: String
+    let actionText: String
     let renderModel: MessageRowRenderModel
     let showsStreamingAnimations: Bool
     let subagentOpenAction: ((CodexSubagentThreadPresentation) -> Void)?
@@ -73,7 +74,7 @@ struct SystemMessageContentView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 2)
         .contextMenu {
-            selectableTextActions(text: text, usesMarkdownSelection: false)
+            selectableTextActions(text: actionText, usesMarkdownSelection: false)
         }
     }
 
@@ -82,7 +83,8 @@ struct SystemMessageContentView: View {
         let renderState = renderModel.fileChangeState ?? FileChangeRenderState(
             summary: nil,
             actionEntries: [],
-            bodyText: text
+            bodyText: text,
+            detailBodyText: actionText
         )
         let actionEntries = renderState.actionEntries
         let hasActionRows = !actionEntries.isEmpty
@@ -99,12 +101,13 @@ struct SystemMessageContentView: View {
                 FileChangeSummaryBox(
                     entries: allEntries,
                     fallbackText: fallbackText,
+                    detailBodyText: renderState.detailBodyText,
                     messageID: message.id
                 )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .contextMenu {
-                selectableTextActions(text: text, usesMarkdownSelection: false)
+                selectableTextActions(text: actionText, usesMarkdownSelection: false)
             }
         }
     }
@@ -131,7 +134,7 @@ struct SystemMessageContentView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contextMenu {
-            selectableTextActions(text: text, usesMarkdownSelection: false)
+            selectableTextActions(text: actionText, usesMarkdownSelection: false)
         }
     }
 
@@ -190,20 +193,19 @@ struct SystemMessageContentView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 2)
             .contextMenu {
-                selectableTextActions(text: text, usesMarkdownSelection: false)
+                selectableTextActions(text: actionText, usesMarkdownSelection: false)
             }
     }
 
     @ViewBuilder
     private func selectableTextActions(text: String, usesMarkdownSelection: Bool) -> some View {
-        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedText.isEmpty {
+        if let selectableText = timelineSelectableActionText(text) {
             Button {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 onSelectText(
                     SelectableMessageTextSheetState(
                         role: message.role,
-                        text: trimmedText,
+                        text: selectableText,
                         usesMarkdownSelection: usesMarkdownSelection
                     )
                 )
@@ -213,7 +215,7 @@ struct SystemMessageContentView: View {
 
             Button {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                UIPasteboard.general.string = trimmedText
+                UIPasteboard.general.string = selectableText
             } label: {
                 Label("Copy", systemImage: "doc.on.doc")
             }

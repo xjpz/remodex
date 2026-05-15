@@ -24,6 +24,107 @@ enum ThreadHistoryHydrationPolicy {
     static let duplicateOlderPageSkipLimit = 12
 }
 
+enum TimelineTextClippingPolicy {
+    private static let proseByteLimit = 32_000
+    private static let fileChangeByteLimit = 48_000
+    private static let thinkingByteLimit = 16_000
+    private static let activityByteLimit = 8_000
+    private static let clippingMarker = "\n\n...\n\n"
+    private static let maximumExpansionLevel = 12
+
+    struct DisplayWindow: Equatable {
+        let text: String
+        let isPartial: Bool
+        let hiddenByteCount: Int
+    }
+
+    // Keeps huge persisted rows from overwhelming row renderers without mutating stored history.
+    static func clippedText(for message: CodexMessage, text: String) -> String {
+        displayWindow(for: message, text: text, expansionLevel: 0).text
+    }
+
+    // Expands the visible head/tail window step by step while preserving the full backing text.
+    static func displayWindow(for message: CodexMessage, text: String, expansionLevel: Int) -> DisplayWindow {
+        let limit = byteLimit(for: message)
+        let expandedLimit = expandedByteLimit(baseLimit: limit, expansionLevel: expansionLevel)
+        guard text.utf8.count > expandedLimit else {
+            return DisplayWindow(text: text, isPartial: false, hiddenByteCount: 0)
+        }
+
+        return clippedLongText(text, limit: expandedLimit)
+    }
+
+    private static func byteLimit(for message: CodexMessage) -> Int {
+        switch (message.role, message.kind) {
+        case (.system, .fileChange):
+            return fileChangeByteLimit
+        case (.system, .thinking):
+            return thinkingByteLimit
+        case (.system, .toolActivity), (.system, .commandExecution):
+            return activityByteLimit
+        default:
+            return proseByteLimit
+        }
+    }
+
+    private static func expandedByteLimit(baseLimit: Int, expansionLevel: Int) -> Int {
+        let safeLevel = max(0, min(expansionLevel, maximumExpansionLevel))
+        var limit = baseLimit
+        for _ in 0..<safeLevel {
+            guard limit <= (Int.max / 2) else {
+                return Int.max
+            }
+            limit *= 2
+        }
+        return limit
+    }
+
+    private static func clippedLongText(_ text: String, limit: Int) -> DisplayWindow {
+        let markerByteCount = clippingMarker.utf8.count
+        let contentByteLimit = max(limit - markerByteCount, 2)
+        let headByteLimit = max(contentByteLimit / 3, 1)
+        let tailByteLimit = max(contentByteLimit - headByteLimit, 1)
+        let head = prefixWithinUTF8Limit(text, byteLimit: headByteLimit)
+        let tail = suffixWithinUTF8Limit(text, byteLimit: tailByteLimit)
+        let visibleContentBytes = head.utf8.count + tail.utf8.count
+        return DisplayWindow(
+            text: head + clippingMarker + tail,
+            isPartial: true,
+            hiddenByteCount: max(0, text.utf8.count - visibleContentBytes)
+        )
+    }
+
+    private static func prefixWithinUTF8Limit(_ text: String, byteLimit: Int) -> String {
+        var bytes = 0
+        var endIndex = text.startIndex
+        while endIndex < text.endIndex {
+            let nextIndex = text.index(after: endIndex)
+            let characterBytes = String(text[endIndex]).utf8.count
+            guard bytes + characterBytes <= byteLimit else {
+                break
+            }
+            bytes += characterBytes
+            endIndex = nextIndex
+        }
+        return String(text[..<endIndex])
+    }
+
+    private static func suffixWithinUTF8Limit(_ text: String, byteLimit: Int) -> String {
+        var bytes = 0
+        var startIndex = text.endIndex
+        while startIndex > text.startIndex {
+            let previousIndex = text.index(before: startIndex)
+            let characterBytes = String(text[previousIndex]).utf8.count
+            guard bytes + characterBytes <= byteLimit else {
+                break
+            }
+            bytes += characterBytes
+            startIndex = previousIndex
+        }
+        return String(text[startIndex..<text.endIndex])
+    }
+}
+
 struct ThreadTurnsHistoryPage {
     let turns: [JSONValue]
     let nextCursor: JSONValue

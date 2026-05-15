@@ -10,7 +10,7 @@ struct SettingsConnectionCard: View {
     @Environment(CodexService.self) private var codex
     @State private var isShowingComputerNameSheet = false
 
-    private let settingsAccentColor = Color(.plan)
+    private let settingsAccentColor = Color.primary
 
     var body: some View {
         SettingsCard(title: "Connection") {

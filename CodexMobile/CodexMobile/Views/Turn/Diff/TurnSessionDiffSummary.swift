@@ -55,6 +55,8 @@ enum TurnSessionDiffResetMarker {
 }
 
 enum TurnSessionDiffSummaryCalculator {
+    private static let eagerFileChangeSummaryByteLimit = 128_000
+
     // Sums distinct file-change messages for either the whole conversation
     // or only the unpushed tail after the latest successful push.
     static func totals(
@@ -69,6 +71,7 @@ enum TurnSessionDiffSummaryCalculator {
 
         for message in relevantMessages {
             guard message.role == .system, message.kind == .fileChange else { continue }
+            guard message.text.utf8.count <= eagerFileChangeSummaryByteLimit else { continue }
             guard let summary = TurnFileChangeSummaryParser.parse(from: message.text) else { continue }
 
             // Collapse streaming/final duplicates only within the same turn so repeated

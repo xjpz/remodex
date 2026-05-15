@@ -2093,6 +2093,60 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         )
     }
 
+    func testLargeClosedAssistantSnapshotDoesNotReplaceDifferentLocalText() {
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let localText = "final\n" + String(repeating: "a", count: 80_000)
+        let serverText = "flattened\n" + String(repeating: "b", count: 80_000)
+        let localMessage = CodexMessage(
+            threadId: threadID,
+            role: .assistant,
+            text: localText,
+            turnId: turnID,
+            itemId: "message-1",
+            isStreaming: false
+        )
+        let serverMessage = CodexMessage(
+            threadId: threadID,
+            role: .assistant,
+            text: serverText,
+            turnId: turnID,
+            itemId: "message-1",
+            isStreaming: false
+        )
+
+        XCTAssertFalse(
+            CodexService.shouldReplaceClosedAssistantMessage(localMessage, with: serverMessage)
+        )
+    }
+
+    func testLargeHistoryMessageKeyDoesNotEmbedFullMessageText() {
+        let message = CodexMessage(
+            threadId: "thread",
+            role: .assistant,
+            text: String(repeating: "a", count: 80_000),
+            turnId: "turn-1",
+            isStreaming: false
+        )
+
+        let key = CodexService.historyMessageKey(for: message)
+
+        XCTAssertLessThan(key.count, 200)
+        XCTAssertTrue(key.contains("large:"))
+    }
+
+    func testLargeStreamingSnapshotMergeChoosesSingleSnapshot() {
+        let existing = "existing\n" + String(repeating: "a", count: 80_000)
+        let incoming = "incoming\n" + String(repeating: "b", count: 90_000)
+
+        let merged = CodexService.mergeStreamingSnapshotText(
+            existingText: existing,
+            incomingText: incoming
+        )
+
+        XCTAssertEqual(merged, incoming)
+    }
+
     func testRunningHistorySnapshotWithoutItemDoesNotPolluteItemScopedAssistant() throws {
         let threadID = "thread-\(UUID().uuidString)"
         let turnID = "turn-\(UUID().uuidString)"

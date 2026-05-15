@@ -42,6 +42,7 @@ struct FileChangeSummaryBox: View {
 
     let entries: [TurnFileChangeSummaryEntry]
     let fallbackText: String
+    let detailBodyText: String
     let messageID: String
 
     // Default to expanded so the recap stays informative without an extra tap;
@@ -116,7 +117,7 @@ struct FileChangeSummaryBox: View {
             TurnDiffSheet(
                 title: entry.compactPath,
                 entries: [entry],
-                bodyText: fallbackText,
+                bodyText: detailBodyText,
                 messageID: messageID,
                 restrictToPath: entry.path
             )

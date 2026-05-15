@@ -13,6 +13,8 @@ struct UserMessageBubble: View {
 
     let message: CodexMessage
     let text: String
+    let actionText: String
+    var isProgressiveTextWindow: Bool = false
     let isRetryAvailable: Bool
     let onRetryUserMessage: (String) -> Void
 
@@ -31,7 +33,17 @@ struct UserMessageBubble: View {
                     }
                 }
 
-                if !text.isEmpty {
+                if !text.isEmpty, isProgressiveTextWindow {
+                    userBubbleText(text, bubbleColor: bubbleColor)
+                        .font(AppFont.body())
+                        .foregroundStyle(bubbleColor.bubbleForeground(for: colorScheme))
+                        .padding(.vertical, 12)
+                        .padding(.horizontal, 16)
+                        .background {
+                            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                                .fill(bubbleColor.bubbleBackground(for: colorScheme))
+                        }
+                } else if !text.isEmpty {
                     UserBubbleTextBlock(
                         contentIdentity: message.id,
                         rawText: text
@@ -55,18 +67,18 @@ struct UserMessageBubble: View {
                 }
             }
             .contextMenu {
-                if !text.isEmpty {
+                if !actionText.isEmpty {
                     Button {
                         HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                        UIPasteboard.general.string = text
+                        UIPasteboard.general.string = actionText
                     } label: {
                         Label("Copy", systemImage: "doc.on.doc")
                     }
                 }
-                if isRetryAvailable, !text.isEmpty {
+                if isRetryAvailable, !actionText.isEmpty {
                     Button {
                         HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                        onRetryUserMessage(text)
+                        onRetryUserMessage(actionText)
                     } label: {
                         Label("Retry", systemImage: "arrow.clockwise")
                     }

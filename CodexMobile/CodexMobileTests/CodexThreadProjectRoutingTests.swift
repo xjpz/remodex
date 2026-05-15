@@ -11,6 +11,41 @@ import XCTest
 final class CodexThreadProjectRoutingTests: XCTestCase {
     private static var retainedServices: [CodexService] = []
 
+    func testStartThreadIfReadyWaitsForRuntimeInitializationDuringReconnect() async throws {
+        let service = makeService()
+        service.isConnected = true
+        service.isInitialized = false
+
+        var didStartThread = false
+        service.requestTransportOverride = { method, _ in
+            XCTAssertEqual(method, "thread/start")
+            XCTAssertTrue(service.isInitialized)
+            didStartThread = true
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "thread": .object([
+                        "id": .string("thread-new"),
+                        "cwd": .string("/tmp/remodex-local"),
+                    ]),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        let readinessTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            service.isInitialized = true
+        }
+        defer { readinessTask.cancel() }
+
+        let thread = try await service.startThreadIfReady(preferredProjectPath: "/tmp/remodex-local")
+
+        XCTAssertTrue(didStartThread)
+        XCTAssertEqual(thread.id, "thread-new")
+        XCTAssertEqual(service.activeThreadId, "thread-new")
+    }
+
     func testMoveThreadToProjectPathKeepsRebindWhenResumeFailsOnlyBecauseRolloutIsMissing() async throws {
         let service = makeService()
         let originalThread = CodexThread(

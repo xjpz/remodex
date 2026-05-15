@@ -8,6 +8,7 @@ import SwiftUI
 
 struct ComposerBottomBar: View {
     @Environment(\.colorScheme) private var colorScheme
+    @AppStorage(UserBubbleColor.storageKey) private var userBubbleColorRawValue = UserBubbleColor.defaultStoredRawValue
     @State private var showsAllModelsSheet = false
 
     // Data
@@ -44,14 +45,18 @@ struct ComposerBottomBar: View {
     private let metaVerticalPadding: CGFloat = 6
     private let plusTapTargetSide: CGFloat = 22
 
+    private var selectedUserBubbleColor: UserBubbleColor {
+        UserBubbleColor(rawValue: userBubbleColorRawValue) ?? .default
+    }
+
     private var sendButtonIconColor: Color {
         if isSendDisabled { return Color(.systemGray2) }
-        return Color(.systemBackground)
+        return selectedUserBubbleColor.bubbleForeground(for: colorScheme)
     }
 
     private var sendButtonBackgroundColor: Color {
         if isSendDisabled { return Color(.systemGray5) }
-        return Color(.label)
+        return selectedUserBubbleColor.bubbleBackground(for: colorScheme)
     }
 
     // MARK: - Body
@@ -113,9 +118,9 @@ struct ComposerBottomBar: View {
                 } label: {
                     Image(systemName: "stop.fill")
                         .font(AppFont.system(size: 12, weight: .bold))
-                        .foregroundStyle(Color(.systemBackground))
+                        .foregroundStyle(selectedUserBubbleColor.bubbleForeground(for: colorScheme))
                         .frame(width: 32, height: 32)
-                        .background(Color(.label), in: Circle())
+                        .background(selectedUserBubbleColor.bubbleBackground(for: colorScheme), in: Circle())
                 }
                 .accessibilityLabel("Stop current run")
             }

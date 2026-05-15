@@ -11,6 +11,9 @@ struct TurnTimelineProjection {
 }
 
 enum TurnTimelineReducer {
+    private static let largeTextDedupeByteLimit = 64_000
+    private static let smallWhitespaceScanByteLimit = 512
+
     // ─── ENTRY POINT ─────────────────────────────────────────────
 
     // Applies all render-only timeline transforms in one pass.
@@ -141,10 +144,12 @@ enum TurnTimelineReducer {
         // file-change cards still need semantic trailing placement after the final answer.
         var distinctAssistantTexts: Set<String> = []
         var distinctAssistantItemIDs: Set<String> = []
+        var hasLargeAssistantText = false
         for message in turnMessages where message.role == .assistant {
-            let text = normalizedMessageText(message.text)
-            if !text.isEmpty {
+            if let text = normalizedSmallMessageText(message.text) {
                 distinctAssistantTexts.insert(text)
+            } else if hasMeaningfulMessageText(message.text) {
+                hasLargeAssistantText = true
             }
             if let itemID = normalizedIdentifier(message.itemId) {
                 distinctAssistantItemIDs.insert(itemID)
@@ -152,7 +157,7 @@ enum TurnTimelineReducer {
         }
         let hasFileChangeCard = turnMessages.contains { $0.role == .system && $0.kind == .fileChange }
         if !hasFileChangeCard,
-           distinctAssistantTexts.count > 1,
+           (distinctAssistantTexts.count > 1 || (hasLargeAssistantText && distinctAssistantItemIDs.count > 1)),
            distinctAssistantItemIDs.count > 1 {
             return true
         }
@@ -268,9 +273,8 @@ enum TurnTimelineReducer {
             }
 
             var previous = result[previousIndex]
-            let incoming = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !incoming.isEmpty {
-                previous.text = mergeThinkingText(existing: previous.text, incoming: incoming)
+            if hasMeaningfulMessageText(message.text) {
+                previous.text = mergeThinkingText(existing: previous.text, incoming: message.text)
             }
 
             // The newest thinking row should own the final streaming/completed state.
@@ -372,11 +376,19 @@ enum TurnTimelineReducer {
 
     // Identifies placeholder-only rows that should be reused instead of stacked.
     private static func isPlaceholderThinkingRow(_ message: CodexMessage) -> Bool {
+        guard message.text.utf8.count <= smallWhitespaceScanByteLimit else {
+            return false
+        }
         ThinkingDisclosureParser.normalizedThinkingContent(from: message.text).isEmpty
     }
 
     // Merges streaming/history snapshots only when their visible reasoning content overlaps.
     private static func thinkingSnapshotsOverlap(previous: CodexMessage, incoming: CodexMessage) -> Bool {
+        if previous.text.utf8.count > largeTextDedupeByteLimit
+            || incoming.text.utf8.count > largeTextDedupeByteLimit {
+            return true
+        }
+
         let previousText = ThinkingDisclosureParser.normalizedThinkingContent(from: previous.text)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let incomingText = ThinkingDisclosureParser.normalizedThinkingContent(from: incoming.text)
@@ -395,6 +407,11 @@ enum TurnTimelineReducer {
 
     // Preserves useful activity lines while still allowing newer thinking snapshots to win.
     private static func mergeThinkingText(existing: String, incoming: String) -> String {
+        if existing.utf8.count > largeTextDedupeByteLimit
+            || incoming.utf8.count > largeTextDedupeByteLimit {
+            return preferredLargeThinkingSnapshot(existing: existing, incoming: incoming)
+        }
+
         let existingTrimmed = existing.trimmingCharacters(in: .whitespacesAndNewlines)
         let incomingTrimmed = incoming.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !incomingTrimmed.isEmpty else { return existingTrimmed }
@@ -424,6 +441,28 @@ enum TurnTimelineReducer {
         return "\(existingTrimmed)\n\(incomingTrimmed)"
     }
 
+    // Long reasoning snapshots are usually streaming/history replacements. Pick one
+    // snapshot instead of concatenating huge strings or lowering/scanning the whole body.
+    private static func preferredLargeThinkingSnapshot(existing: String, incoming: String) -> String {
+        guard hasMeaningfulMessageText(incoming) else { return existing }
+        guard hasMeaningfulMessageText(existing) else { return incoming }
+
+        if isSmallPlaceholderThinkingText(incoming) {
+            return existing
+        }
+        if isSmallPlaceholderThinkingText(existing) {
+            return incoming
+        }
+        return incoming.utf8.count >= existing.utf8.count ? incoming : existing
+    }
+
+    private static func isSmallPlaceholderThinkingText(_ text: String) -> Bool {
+        guard text.utf8.count <= smallWhitespaceScanByteLimit else {
+            return false
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "thinking..."
+    }
+
     // Hides command-status echoes that are already rendered as dedicated command cards.
     private static func removeRedundantThinkingCommandActivityMessages(
         in messages: [CodexMessage]
@@ -447,6 +486,9 @@ enum TurnTimelineReducer {
                   message.kind == .thinking,
                   let turnId = normalizedIdentifier(message.turnId),
                   let commandKeys = commandKeysByTurn[turnId] else {
+                return true
+            }
+            guard message.text.utf8.count <= largeTextDedupeByteLimit else {
                 return true
             }
 
@@ -530,7 +572,7 @@ enum TurnTimelineReducer {
         guard previous.role == .user,
               incoming.role == .user,
               previous.threadId == incoming.threadId,
-              normalizedMessageText(previous.text) == normalizedMessageText(incoming.text),
+              messageTextsMatchForDedupe(previous.text, incoming.text),
               userMessageMetadataLooksCompatible(previous: previous, incoming: incoming) else {
             return false
         }
@@ -584,16 +626,45 @@ enum TurnTimelineReducer {
             merged.attachments = incoming.attachments
         }
 
-        let incomingText = incoming.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !incomingText.isEmpty {
+        if hasMeaningfulMessageText(incoming.text) {
             merged.text = incoming.text
         }
 
         return merged
     }
 
-    private static func normalizedMessageText(_ text: String) -> String {
-        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    private static func normalizedSmallMessageText(_ text: String) -> String? {
+        guard text.utf8.count <= largeTextDedupeByteLimit else {
+            return nil
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func messageTextsMatchForDedupe(_ lhs: String, _ rhs: String) -> Bool {
+        guard lhs.utf8.count <= largeTextDedupeByteLimit,
+              rhs.utf8.count <= largeTextDedupeByteLimit else {
+            return lhs == rhs
+        }
+
+        return lhs.trimmingCharacters(in: .whitespacesAndNewlines)
+            == rhs.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func hasMeaningfulMessageText(_ text: String) -> Bool {
+        guard !text.isEmpty else { return false }
+        guard text.utf8.count <= smallWhitespaceScanByteLimit else { return true }
+        return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private static func assistantReplayTextAlreadyRepresented(previous: String, incoming: String) -> Bool {
+        guard previous.utf8.count <= largeTextDedupeByteLimit,
+              incoming.utf8.count <= largeTextDedupeByteLimit else {
+            return previous == incoming
+        }
+        let previousText = previous.trimmingCharacters(in: .whitespacesAndNewlines)
+        let incomingText = incoming.trimmingCharacters(in: .whitespacesAndNewlines)
+        return previousText.count >= incomingText.count || previousText.contains(incomingText)
     }
 
     private static func attachmentSignature(for message: CodexMessage) -> String {
@@ -646,8 +717,7 @@ enum TurnTimelineReducer {
                 continue
             }
 
-            let normalizedText = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !normalizedText.isEmpty else {
+            guard hasMeaningfulMessageText(message.text) else {
                 result.append(message)
                 continue
             }
@@ -670,8 +740,10 @@ enum TurnTimelineReducer {
                 if let replayIndex = result.indices.reversed().first(where: {
                     shouldMergeAssistantReplay(previous: result[$0], incoming: message)
                 }) {
-                    let previousText = result[replayIndex].text.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if previousText.count >= normalizedText.count || previousText.contains(normalizedText) {
+                    if assistantReplayTextAlreadyRepresented(
+                        previous: result[replayIndex].text,
+                        incoming: message.text
+                    ) {
                         continue
                     }
 
@@ -685,34 +757,38 @@ enum TurnTimelineReducer {
                     continue
                 }
 
-                let dedupeScope = normalizedIdentifier(message.itemId)
-                let key = "\(turnId)|\(dedupeScope ?? "no-item")|\(normalizedText)"
-                if seenKeys.contains(key) {
-                    continue
-                }
+                if let normalizedText = normalizedSmallMessageText(message.text) {
+                    let dedupeScope = normalizedIdentifier(message.itemId)
+                    let key = "\(turnId)|\(dedupeScope ?? "no-item")|\(normalizedText)"
+                    if seenKeys.contains(key) {
+                        continue
+                    }
 
-                let hasStableIdentity = dedupeScope != nil
-                let turnTextKey = "\(turnId)|\(normalizedText)"
-                if let previous = seenTurnText[turnTextKey],
-                   abs(message.createdAt.timeIntervalSince(previous.createdAt)) <= 12,
-                   !previous.hasStableIdentity || !hasStableIdentity {
-                    continue
+                    let hasStableIdentity = dedupeScope != nil
+                    let turnTextKey = "\(turnId)|\(normalizedText)"
+                    if let previous = seenTurnText[turnTextKey],
+                       abs(message.createdAt.timeIntervalSince(previous.createdAt)) <= 12,
+                       !previous.hasStableIdentity || !hasStableIdentity {
+                        continue
+                    }
+                    seenKeys.insert(key)
+                    seenTurnText[turnTextKey] = AssistantTurnTextObservation(
+                        createdAt: message.createdAt,
+                        hasStableIdentity: hasStableIdentity
+                    )
                 }
-                seenKeys.insert(key)
-                seenTurnText[turnTextKey] = AssistantTurnTextObservation(
-                    createdAt: message.createdAt,
-                    hasStableIdentity: hasStableIdentity
-                )
                 result.append(message)
                 continue
             }
 
-            if let previous = seenNoTurnByText[normalizedText],
-               abs(message.createdAt.timeIntervalSince(previous)) <= 12 {
-                continue
-            }
+            if let normalizedText = normalizedSmallMessageText(message.text) {
+                if let previous = seenNoTurnByText[normalizedText],
+                   abs(message.createdAt.timeIntervalSince(previous)) <= 12 {
+                    continue
+                }
 
-            seenNoTurnByText[normalizedText] = message.createdAt
+                seenNoTurnByText[normalizedText] = message.createdAt
+            }
             result.append(message)
         }
 
@@ -733,10 +809,9 @@ enum TurnTimelineReducer {
             return false
         }
 
-        let previousText = normalizedMessageText(previous.text)
-        let incomingText = normalizedMessageText(incoming.text)
-        guard previousText.count >= 24,
-              previousText == incomingText else {
+        let minimumTextLength = min(previous.text.utf8.count, incoming.text.utf8.count)
+        guard minimumTextLength >= 24,
+              messageTextsMatchForDedupe(previous.text, incoming.text) else {
             return false
         }
 
@@ -752,7 +827,7 @@ enum TurnTimelineReducer {
         if normalizedIdentifier(merged.itemId) == nil || isProvisionalAssistantIdentity(merged.itemId) {
             merged.itemId = incoming.itemId ?? merged.itemId
         }
-        if incoming.text.count > merged.text.count {
+        if incoming.text.utf8.count > merged.text.utf8.count {
             merged.text = incoming.text
         }
         return merged
@@ -774,6 +849,11 @@ enum TurnTimelineReducer {
         }
         guard isProvisionalAssistantIdentity(previousItemId) || isProvisionalAssistantIdentity(incomingItemId) else {
             return false
+        }
+
+        guard previous.text.utf8.count <= largeTextDedupeByteLimit,
+              incoming.text.utf8.count <= largeTextDedupeByteLimit else {
+            return previous.text == incoming.text
         }
 
         let previousText = previous.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -920,12 +1000,12 @@ enum TurnTimelineReducer {
     private static func duplicateFileChangeKey(for message: CodexMessage) -> String? {
         let turnLabel = normalizedIdentifier(message.turnId) ?? "turnless"
 
-        if let summaryKey = TurnFileChangeSummaryParser.dedupeKey(from: message.text) {
+        if message.text.utf8.count <= largeTextDedupeByteLimit,
+           let summaryKey = TurnFileChangeSummaryParser.dedupeKey(from: message.text) {
             return "\(turnLabel)|\(summaryKey)"
         }
 
-        let normalizedText = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedText.isEmpty else {
+        guard let normalizedText = normalizedSmallMessageText(message.text) else {
             return nil
         }
         return "\(turnLabel)|\(normalizedText)"
@@ -942,7 +1022,9 @@ enum TurnTimelineReducer {
 
         let turnId = normalizedIdentifier(message.turnId)
         let key = duplicateFileChangeKey(for: message)
-        let entries = TurnFileChangeSummaryParser.parse(from: message.text)?.entries ?? []
+        let entries = message.text.utf8.count <= largeTextDedupeByteLimit
+            ? (TurnFileChangeSummaryParser.parse(from: message.text)?.entries ?? [])
+            : []
 
         let paths = Set(
             entries.map(\.path)

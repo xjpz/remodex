@@ -395,19 +395,23 @@ extension CodexService {
             return nil
         }
 
-        let joined = textParts.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        if !joined.isEmpty {
+        let joined = Self.normalizedMessageText(textParts.joined(separator: "\n"))
+        if Self.hasMeaningfulHistoryText(joined) {
             return joined
         }
 
-        if let directText = itemObject["text"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !directText.isEmpty {
-            return directText
+        if let directText = itemObject["text"]?.stringValue {
+            let normalizedDirectText = Self.normalizedMessageText(directText)
+            if Self.hasMeaningfulHistoryText(normalizedDirectText) {
+                return normalizedDirectText
+            }
         }
 
-        if let nestedText = itemObject["message"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !nestedText.isEmpty {
-            return nestedText
+        if let nestedText = itemObject["message"]?.stringValue {
+            let normalizedNestedText = Self.normalizedMessageText(nestedText)
+            if Self.hasMeaningfulHistoryText(normalizedNestedText) {
+                return normalizedNestedText
+            }
         }
 
         return ""
@@ -898,8 +902,7 @@ extension CodexService {
         }
 
         if value.role == .assistant {
-            let serverText = normalizedMessageText(serverMessage.text)
-            if !serverText.isEmpty {
+            if hasMeaningfulHistoryText(serverMessage.text) {
                 if preservesRunningPresentation {
                     if assistantHistoryIdentityAllowsRunningReconcile(
                         localMessage: localMessage,
@@ -918,8 +921,7 @@ extension CodexService {
                 ? (localMessage.isStreaming || serverMessage.isStreaming || runningThreadIDs.contains(localMessage.threadId))
                 : false
         } else if value.role == .system {
-            let serverText = normalizedMessageText(serverMessage.text)
-            if !serverText.isEmpty {
+            if hasMeaningfulHistoryText(serverMessage.text) {
                 value.text = preservesRunningPresentation && localMessage.isStreaming
                     ? mergeStreamingSnapshotText(existingText: value.text, incomingText: serverMessage.text)
                     : serverMessage.text
@@ -940,13 +942,48 @@ extension CodexService {
         return [
             message.role.rawValue,
             message.turnId ?? "no-turn",
-            message.text,
+            historyTextKey(for: message.text),
             attachmentSignature(for: message.attachments),
         ].joined(separator: "|")
     }
 
+    private static let historyLargeTextByteLimit = 64_000
+    private static let historySmallWhitespaceScanByteLimit = 512
+
     nonisolated static func normalizedMessageText(_ text: String) -> String {
+        guard text.utf8.count <= historyLargeTextByteLimit else {
+            return text
+        }
         text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    nonisolated static func hasMeaningfulHistoryText(_ text: String) -> Bool {
+        guard !text.isEmpty else { return false }
+        guard text.utf8.count <= historySmallWhitespaceScanByteLimit else { return true }
+        return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    nonisolated static func historyTextsMatch(_ lhs: String, _ rhs: String) -> Bool {
+        guard lhs.utf8.count <= historyLargeTextByteLimit,
+              rhs.utf8.count <= historyLargeTextByteLimit else {
+            return lhs == rhs
+        }
+
+        return normalizedMessageText(lhs) == normalizedMessageText(rhs)
+    }
+
+    // History keys must not embed megabyte-scale message bodies, but they still need a
+    // full-text digest so pagination overlap does not collapse distinct long rows.
+    nonisolated static func historyTextKey(for text: String) -> String {
+        let normalized = normalizedMessageText(text)
+        guard normalized.utf8.count > historyLargeTextByteLimit else {
+            return normalized
+        }
+        return "large:\(stableHistoryTextFingerprint(for: normalized))"
+    }
+
+    nonisolated static func stableHistoryTextFingerprint(for text: String) -> String {
+        CodexTextContentFingerprint.cacheKey(for: text)
     }
 
     nonisolated static func normalizedHistoryIdentifier(_ value: String?) -> String? {
@@ -999,6 +1036,9 @@ extension CodexService {
         message: CodexMessage,
         turnId: String
     ) -> Int? {
+        guard message.text.utf8.count <= historyLargeTextByteLimit else {
+            return nil
+        }
         let normalizedText = normalizedMessageText(message.text)
         guard !normalizedText.isEmpty else {
             return nil
@@ -1081,6 +1121,9 @@ extension CodexService {
     }
 
     nonisolated static func normalizedToolActivityLines(from text: String) -> [String] {
+        guard text.utf8.count <= historyLargeTextByteLimit else {
+            return []
+        }
         normalizedMessageText(text)
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
@@ -1096,6 +1139,11 @@ extension CodexService {
 
         if incomingText == existingText {
             return existingText
+        }
+
+        guard existingText.utf8.count <= historyLargeTextByteLimit,
+              incomingText.utf8.count <= historyLargeTextByteLimit else {
+            return incomingText.utf8.count > existingText.utf8.count ? incomingText : existingText
         }
 
         if existingText.hasSuffix(incomingText) {
@@ -1137,6 +1185,11 @@ extension CodexService {
             return existingText
         }
 
+        guard existingText.utf8.count <= historyLargeTextByteLimit,
+              incomingText.utf8.count <= historyLargeTextByteLimit else {
+            return existingText
+        }
+
         if existingText.hasSuffix(incomingText) {
             return existingText
         }
@@ -1154,6 +1207,15 @@ extension CodexService {
         _ localMessage: CodexMessage,
         with serverMessage: CodexMessage
     ) -> Bool {
+        guard localMessage.text.utf8.count <= historyLargeTextByteLimit,
+              serverMessage.text.utf8.count <= historyLargeTextByteLimit else {
+            guard hasMeaningfulHistoryText(serverMessage.text) else {
+                return false
+            }
+            return !hasMeaningfulHistoryText(localMessage.text)
+                || localMessage.text == serverMessage.text
+        }
+
         let localText = normalizedMessageText(localMessage.text)
         let serverText = normalizedMessageText(serverMessage.text)
 
@@ -1240,7 +1302,7 @@ extension CodexService {
     ) -> Bool {
         guard candidate.role == .user,
               candidate.deliveryState != .failed,
-              normalizedMessageText(candidate.text) == normalizedMessageText(message.text) else {
+              historyTextsMatch(candidate.text, message.text) else {
             return false
         }
 
@@ -1263,7 +1325,7 @@ extension CodexService {
     ) -> Bool {
         guard candidate.role == .user,
               candidate.deliveryState == .pending,
-              normalizedMessageText(candidate.text) == normalizedMessageText(message.text),
+              historyTextsMatch(candidate.text, message.text),
               userMessageMetadataLooksCompatible(
                 localMessage: candidate,
                 serverMessage: message,
@@ -1327,6 +1389,9 @@ extension CodexService {
     }
 
     nonisolated static func normalizedCommandExecutionPreviewKey(from text: String) -> String? {
+        guard text.utf8.count <= historyLargeTextByteLimit else {
+            return nil
+        }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             return nil
@@ -1406,7 +1471,9 @@ extension CodexService {
                 attachments: attachments,
                 planState: planState,
                 planPresentation: planPresentation,
-                proposedPlan: role == .assistant ? CodexProposedPlanParser.parse(from: text) : nil,
+                proposedPlan: role == .assistant && text.utf8.count <= historyLargeTextByteLimit
+                    ? CodexProposedPlanParser.parse(from: text)
+                    : nil,
                 subagentAction: subagentAction
             )
         )
@@ -1433,6 +1500,9 @@ extension CodexService {
             }
 
             let existingText = result[targetIndex].text
+            guard existingText.utf8.count <= historyLargeTextByteLimit else {
+                continue
+            }
             let existingImagePaths = Set(AssistantMarkdownImageReferenceParser.references(in: existingText).map(\.path))
             let imageText = imageOnlyIndices
                 .filter { index in
@@ -1459,6 +1529,7 @@ extension CodexService {
                     candidate.id != result[index].id
                         && candidate.role == .assistant
                         && candidate.turnId == turnId
+                        && candidate.text.utf8.count <= historyLargeTextByteLimit
                         && !Self.isHistoryGeneratedImageArtifactOnly(candidate.text)
                         && AssistantMarkdownImageReferenceParser.references(in: candidate.text).contains { reference in
                             result[index].text.contains(reference.path)
@@ -1471,6 +1542,9 @@ extension CodexService {
     }
 
     nonisolated static func isHistoryGeneratedImageArtifactOnly(_ text: String) -> Bool {
+        guard text.utf8.count <= historyLargeTextByteLimit else {
+            return false
+        }
         let imageReferences = AssistantMarkdownImageReferenceParser.references(in: text)
         guard !imageReferences.isEmpty,
               imageReferences.allSatisfy(\.isCodexGeneratedImage) else {
@@ -1775,8 +1849,8 @@ extension CodexService {
     }
 
     private func decodeHistoryNormalizedPlanText(_ value: JSONValue?) -> String? {
-        let flattened = decodeHistoryStringParts(value).joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !flattened.isEmpty else {
+        let flattened = Self.normalizedMessageText(decodeHistoryStringParts(value).joined(separator: "\n"))
+        guard Self.hasMeaningfulHistoryText(flattened) else {
             return nil
         }
         return flattened
@@ -2051,7 +2125,10 @@ extension CodexService {
     }
 
     func shortHistoryCommand(_ rawCommand: String, maxLength: Int = 92) -> String {
-        let trimmed = rawCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+        let previewSource = rawCommand.utf8.count <= Self.historyLargeTextByteLimit
+            ? rawCommand
+            : String(rawCommand.prefix(maxLength))
+        let trimmed = previewSource.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "command" }
 
         let collapsedWhitespace = trimmed.replacingOccurrences(
@@ -2203,8 +2280,8 @@ extension CodexService {
             forAnyKey: ["diff", "unified_diff", "unifiedDiff", "patch"],
             in: .object(itemObject)
         ) {
-            let trimmedDiff = diff.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmedDiff.isEmpty {
+            let trimmedDiff = Self.normalizedMessageText(diff)
+            if Self.hasMeaningfulHistoryText(trimmedDiff) {
                 return "Status: \(status)\n\n```diff\n\(trimmedDiff)\n```"
             }
         }
@@ -2225,6 +2302,9 @@ extension CodexService {
             ],
             in: .object(itemObject)
         ) {
+            guard output.utf8.count <= Self.historyLargeTextByteLimit else {
+                return nil
+            }
             let lines = output
                 .split(separator: "\n", omittingEmptySubsequences: false)
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -2310,9 +2390,12 @@ extension CodexService {
             var diff = decodeHistoryChangeDiff(from: changeObject)
             let totals = decodeHistoryChangeInlineTotals(from: changeObject)
             if diff.isEmpty,
-               let content = changeObject["content"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !content.isEmpty {
-                diff = synthesizeHistoryUnifiedDiffFromContent(content, kind: kind, path: path)
+               let content = changeObject["content"]?.stringValue,
+               content.utf8.count <= Self.historyLargeTextByteLimit {
+                let normalizedContent = Self.normalizedMessageText(content)
+                if Self.hasMeaningfulHistoryText(normalizedContent) {
+                    diff = synthesizeHistoryUnifiedDiffFromContent(normalizedContent, kind: kind, path: path)
+                }
             }
             return (path: path, kind: kind, diff: diff, inlineTotals: totals)
         }
@@ -2374,7 +2457,7 @@ extension CodexService {
             ?? changeObject["patch"]?.stringValue
             ?? changeObject["delta"]?.stringValue
             ?? ""
-        return diff.trimmingCharacters(in: .whitespacesAndNewlines)
+        return Self.normalizedMessageText(diff)
     }
 
     func decodeHistoryChangeInlineTotals(
@@ -2480,15 +2563,17 @@ extension CodexService {
         for key in keys {
             if let value = decodeHistoryFirstValue(forKey: key, in: root, maxDepth: maxDepth) {
                 if let text = value.stringValue {
-                    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !trimmed.isEmpty {
+                    let trimmed = Self.normalizedMessageText(text)
+                    if Self.hasMeaningfulHistoryText(trimmed) {
                         return trimmed
                     }
                 }
 
-                if let flattened = decodeHistoryFlattenText(from: value, maxDepth: maxDepth),
-                   !flattened.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    return flattened.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let flattened = decodeHistoryFlattenText(from: value, maxDepth: maxDepth) {
+                    let trimmed = Self.normalizedMessageText(flattened)
+                    if Self.hasMeaningfulHistoryText(trimmed) {
+                        return trimmed
+                    }
                 }
             }
         }
@@ -2541,8 +2626,8 @@ extension CodexService {
         guard maxDepth >= 0 else { return nil }
         switch root {
         case .string(let text):
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : trimmed
+            let trimmed = Self.normalizedMessageText(text)
+            return Self.hasMeaningfulHistoryText(trimmed) ? trimmed : nil
         case .array(let values):
             let parts = values.compactMap { decodeHistoryFlattenText(from: $0, maxDepth: maxDepth - 1) }
             guard !parts.isEmpty else { return nil }
@@ -2571,7 +2656,7 @@ extension CodexService {
         case .null:
             return true
         case .string(let text):
-            return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            return !Self.hasMeaningfulHistoryText(text)
         case .array(let values):
             return values.isEmpty
         case .object(let object):
@@ -2586,27 +2671,27 @@ extension CodexService {
 
         switch value {
         case .string(let text):
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? [] : [trimmed]
+            let trimmed = Self.normalizedMessageText(text)
+            return Self.hasMeaningfulHistoryText(trimmed) ? [trimmed] : []
         case .array(let values):
             return values.compactMap { candidate in
                 if let text = candidate.stringValue {
-                    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                    return trimmed.isEmpty ? nil : trimmed
+                    let trimmed = Self.normalizedMessageText(text)
+                    return Self.hasMeaningfulHistoryText(trimmed) ? trimmed : nil
                 }
 
                 if let object = candidate.objectValue,
                    let text = object["text"]?.stringValue {
-                    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                    return trimmed.isEmpty ? nil : trimmed
+                    let trimmed = Self.normalizedMessageText(text)
+                    return Self.hasMeaningfulHistoryText(trimmed) ? trimmed : nil
                 }
 
                 return nil
             }
         case .object(let object):
             if let text = object["text"]?.stringValue {
-                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                return trimmed.isEmpty ? [] : [trimmed]
+                let trimmed = Self.normalizedMessageText(text)
+                return Self.hasMeaningfulHistoryText(trimmed) ? [trimmed] : []
             }
             return []
         default:

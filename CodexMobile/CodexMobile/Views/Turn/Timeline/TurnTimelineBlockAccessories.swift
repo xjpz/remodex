@@ -7,6 +7,10 @@
 import Foundation
 
 extension TurnTimelineView {
+    private static var blockCopyTextByteLimit: Int { 64_000 }
+    private static var eagerBlockDiffByteLimit: Int { 96_000 }
+    private static var smallWhitespaceScanByteLimit: Int { 512 }
+
     /// For each message index, returns the aggregated assistant block text if the message
     /// is the last non-user message before the next user message (or end of list).
     /// Returns nil for all other indices.
@@ -30,18 +34,12 @@ extension TurnTimelineView {
                 blockStart -= 1
             }
 
-            var blockTextParts: [String] = []
-            blockTextParts.reserveCapacity(blockEnd - blockStart + 1)
             var blockTurnID: String?
             var fileChangeMessages: [CodexMessage] = []
             var blockRevert: (presentation: AssistantRevertPresentation, message: CodexMessage)?
 
             for index in blockStart...blockEnd {
                 let message = messages[index]
-                let trimmedText = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmedText.isEmpty {
-                    blockTextParts.append(trimmedText)
-                }
                 if message.role == .system, message.kind == .fileChange, !message.isStreaming {
                     fileChangeMessages.append(message)
                 }
@@ -60,22 +58,18 @@ extension TurnTimelineView {
                 }
             }
 
-            let blockText = blockTextParts.joined(separator: "\n\n")
             let isLatestBlock = latestBlockEnd == blockEnd
-            let copyText: String?
-            if !blockText.isEmpty,
-               shouldShowCopyButton(
+            let copyAllowed = shouldShowCopyButton(
                 blockTurnID: blockTurnID,
                 activeTurnID: activeTurnID,
                 isThreadRunning: isThreadRunning,
                 isLatestBlock: isLatestBlock,
                 latestTurnTerminalState: latestTurnTerminalState,
                 stoppedTurnIDs: stoppedTurnIDs
-               ) {
-                copyText = blockText
-            } else {
-                copyText = nil
-            }
+            )
+            let copyText = copyAllowed
+                ? blockCopyText(in: blockStart...blockEnd, messages: messages)
+                : nil
 
             let showsRunningIndicator = shouldShowRunningIndicator(
                 blockTurnID: blockTurnID,
@@ -86,13 +80,14 @@ extension TurnTimelineView {
                 stoppedTurnIDs: stoppedTurnIDs
             )
 
-            let blockDiffPresentation = fileChangeMessages.isEmpty
+            let shouldBuildBlockDiff = shouldEagerlyBuildBlockDiff(for: fileChangeMessages)
+            let blockDiffPresentation = fileChangeMessages.isEmpty || !shouldBuildBlockDiff
                 ? nil
                 : FileChangeBlockPresentationCache.presentation(from: fileChangeMessages)
             let blockDiffText = blockDiffPresentation?.bodyText
             let blockDiffEntries = blockDiffPresentation?.entries
 
-            if copyText != nil || showsRunningIndicator || blockDiffEntries != nil || blockRevert != nil {
+            if copyAllowed || showsRunningIndicator || blockDiffEntries != nil || blockRevert != nil {
                 result[blockEnd] = AssistantBlockAccessoryState(
                     copyText: copyText,
                     showsRunningIndicator: showsRunningIndicator,
@@ -105,6 +100,53 @@ extension TurnTimelineView {
             i = blockStart - 1
         }
         return result
+    }
+
+    private static func blockCopyText(
+        in range: ClosedRange<Int>,
+        messages: [CodexMessage]
+    ) -> String? {
+        guard messages[range.upperBound].role != .assistant else {
+            // Assistant rows copy from their own full action text, so avoid duplicating
+            // large response bodies into block accessory state during timeline load.
+            return nil
+        }
+
+        var parts: [String] = []
+        var totalBytes = 0
+        for index in range {
+            let rawText = messages[index].text
+            guard hasMeaningfulBlockText(rawText) else { continue }
+            totalBytes += rawText.utf8.count
+            guard totalBytes <= blockCopyTextByteLimit else {
+                return nil
+            }
+            parts.append(normalizedSmallBlockText(rawText))
+        }
+
+        return parts.isEmpty ? nil : parts.joined(separator: "\n\n")
+    }
+
+    private static func hasMeaningfulBlockText(_ text: String) -> Bool {
+        guard !text.isEmpty else { return false }
+        guard text.utf8.count <= smallWhitespaceScanByteLimit else { return true }
+        return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private static func normalizedSmallBlockText(_ text: String) -> String {
+        guard text.utf8.count <= smallWhitespaceScanByteLimit else { return text }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func shouldEagerlyBuildBlockDiff(for messages: [CodexMessage]) -> Bool {
+        var totalBytes = 0
+        for message in messages {
+            totalBytes += message.text.utf8.count
+            if totalBytes > eagerBlockDiffByteLimit {
+                return false
+            }
+        }
+        return true
     }
 
     static func rehomeCollapsedFinalAccessoryStates(
@@ -135,10 +177,21 @@ extension TurnTimelineView {
             )
             guard let sourceState else { continue }
 
-            let finalCopyText = finalMessage.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            updated[finalMessage.id] = sourceState.replacingCopyText(finalCopyText.isEmpty ? nil : finalCopyText)
+            updated[finalMessage.id] = sourceState.replacingCopyText(
+                rehomedFinalCopyText(for: finalMessage.text)
+            )
         }
         return updated
+    }
+
+    // Assistant rows can copy from their full action text; keep accessory copy state small.
+    private static func rehomedFinalCopyText(for text: String) -> String? {
+        guard hasMeaningfulBlockText(text),
+              text.utf8.count <= blockCopyTextByteLimit else {
+            return nil
+        }
+        let copyText = normalizedSmallBlockText(text)
+        return copyText.isEmpty ? nil : copyText
     }
 
     // When late tool rows are collapsed after the final answer, their block action

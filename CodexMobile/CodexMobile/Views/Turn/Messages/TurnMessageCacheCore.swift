@@ -127,13 +127,7 @@ enum TurnTextCacheKey {
     }
 
     static func stableFingerprint(for text: String) -> String {
-        let byteCount = text.utf8.count
-        var hash: UInt64 = 14_695_981_039_346_656_037
-        for byte in text.utf8 {
-            hash ^= UInt64(byte)
-            hash &*= 1_099_511_628_211
-        }
-        return "\(byteCount)|\(String(hash, radix: 16))"
+        CodexTextContentFingerprint.cacheKey(for: text)
     }
 
     static func stableKey(namespace: String, text: String) -> String {

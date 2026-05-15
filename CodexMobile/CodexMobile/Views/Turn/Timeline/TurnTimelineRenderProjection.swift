@@ -68,6 +68,10 @@ enum TurnTimelineRenderItem: Identifiable, Equatable {
 // ─── Projection ────────────────────────────────────────────────
 
 enum TurnTimelineRenderProjection {
+    private static let largeArtifactTextByteLimit = 64_000
+    private static let eagerFileChangeCollapseByteLimit = 96_000
+    private static let smallWhitespaceScanByteLimit = 512
+
     // Groups tool runs and completed-turn preamble rows so the visible timeline stays compact.
     static func project(messages: [CodexMessage], completedTurnIDs: Set<String> = []) -> [TurnTimelineRenderItem] {
         var items: [TurnTimelineRenderItem] = []
@@ -196,6 +200,9 @@ enum TurnTimelineRenderProjection {
         for indices in groups.values where indices.count > 1 {
             guard let targetIndex = indices.max() else { continue }
             let fileChangeMessages = indices.map { messages[$0] }
+            guard shouldEagerlyCollapseFileChanges(fileChangeMessages) else {
+                continue
+            }
             guard let presentation = FileChangeBlockPresentationBuilder.build(from: fileChangeMessages) else {
                 continue
             }
@@ -225,6 +232,7 @@ enum TurnTimelineRenderProjection {
             defer { pendingFileChanges.removeAll(keepingCapacity: true) }
 
             guard pendingFileChanges.count > 1,
+                  shouldEagerlyCollapseFileChanges(pendingFileChanges),
                   let presentation = FileChangeBlockPresentationBuilder.build(from: pendingFileChanges),
                   var replacement = pendingFileChanges.last else {
                 mergedItems.append(contentsOf: pendingFileChanges.map(TurnTimelineRenderItem.message))
@@ -250,6 +258,19 @@ enum TurnTimelineRenderProjection {
 
         flushPendingFileChanges()
         return mergedItems
+    }
+
+    // File-change collapse parses diff bodies; skip eager parsing for very large rows
+    // and let the bounded individual timeline cards render instead.
+    private static func shouldEagerlyCollapseFileChanges(_ messages: [CodexMessage]) -> Bool {
+        var totalBytes = 0
+        for message in messages {
+            totalBytes += message.text.utf8.count
+            if totalBytes > eagerFileChangeCollapseByteLimit {
+                return false
+            }
+        }
+        return true
     }
 
     // Finds completed final answers and the same-turn status/tool rows that should sit behind the disclosure.
@@ -313,7 +334,7 @@ enum TurnTimelineRenderProjection {
             let message = messages[index]
             guard message.role == .assistant,
                   !message.isStreaming,
-                  !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  hasMeaningfulAssistantText(message.text),
                   let turnID = normalizedIdentifier(message.turnId),
                   completedTurnIDs.contains(turnID) else {
                 continue
@@ -423,6 +444,10 @@ enum TurnTimelineRenderProjection {
               finalMessage.role == .assistant else {
             return false
         }
+        guard message.text.utf8.count <= largeArtifactTextByteLimit,
+              finalMessage.text.utf8.count <= largeArtifactTextByteLimit else {
+            return false
+        }
 
         if isCommentaryAssistantPhase(message.assistantPhase),
            isFinalAnswerAssistantPhase(finalMessage.assistantPhase) {
@@ -480,11 +505,16 @@ enum TurnTimelineRenderProjection {
         collapsedMessages: [CodexMessage],
         generatedImageArtifacts: [CodexMessage]
     ) -> CodexMessage? {
+        guard finalMessage.text.utf8.count <= largeArtifactTextByteLimit else {
+            return nil
+        }
+
         var replacement = finalMessage
         var replacementText = finalMessage.text.trimmingCharacters(in: .whitespacesAndNewlines)
 
         replacementText = collapsedMessages.reduce(replacementText) { text, collapsedMessage in
-            guard collapsedMessage.role == .assistant else {
+            guard collapsedMessage.role == .assistant,
+                  collapsedMessage.text.utf8.count <= largeArtifactTextByteLimit else {
                 return text
             }
             return textRemovingReplay(from: text, replayText: collapsedMessage.text)
@@ -550,7 +580,8 @@ enum TurnTimelineRenderProjection {
     private static func isGeneratedImageArtifactAlreadyInFinal(_ message: CodexMessage, finalMessage: CodexMessage) -> Bool {
         guard message.role == .assistant,
               finalMessage.role == .assistant,
-              isGeneratedImageArtifactOnly(message) else {
+              isGeneratedImageArtifactOnly(message),
+              finalMessage.text.utf8.count <= largeArtifactTextByteLimit else {
             return false
         }
 
@@ -588,6 +619,9 @@ enum TurnTimelineRenderProjection {
         guard message.role == .assistant, !message.isStreaming else {
             return false
         }
+        guard message.text.utf8.count <= largeArtifactTextByteLimit else {
+            return false
+        }
 
         let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
@@ -607,6 +641,12 @@ enum TurnTimelineRenderProjection {
         let codeCommentContent = CodeCommentDirectiveParser.parse(from: text)
         return codeCommentContent.hasFindings
             && codeCommentContent.fallbackText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private static func hasMeaningfulAssistantText(_ text: String) -> Bool {
+        guard !text.isEmpty else { return false }
+        guard text.utf8.count <= smallWhitespaceScanByteLimit else { return true }
+        return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private static func isCommentaryAssistantPhase(_ phase: String?) -> Bool {
@@ -634,6 +674,9 @@ enum TurnTimelineRenderProjection {
     private static func shouldSkipVisualRow(_ message: CodexMessage) -> Bool {
         guard message.role == .system,
               message.kind == .thinking else {
+            return false
+        }
+        guard message.text.utf8.count <= smallWhitespaceScanByteLimit else {
             return false
         }
 

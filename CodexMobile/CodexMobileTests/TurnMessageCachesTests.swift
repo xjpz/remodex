@@ -48,6 +48,26 @@ final class TurnMessageCachesTests: XCTestCase {
         )
     }
 
+    func testAttachmentContentFingerprintSeparatesSamePrefixSameLengthPayloads() {
+        let sharedPrefix = "data:image/jpeg;base64," + String(repeating: "A", count: 64)
+        let firstPayload = sharedPrefix + "B" + String(repeating: "C", count: 64)
+        let secondPayload = sharedPrefix + "D" + String(repeating: "C", count: 64)
+        let firstAttachment = CodexImageAttachment(
+            id: "image",
+            thumbnailBase64JPEG: "thumbnail",
+            payloadDataURL: firstPayload
+        )
+        let secondAttachment = CodexImageAttachment(
+            id: "image",
+            thumbnailBase64JPEG: "thumbnail",
+            payloadDataURL: secondPayload
+        )
+
+        XCTAssertEqual(firstPayload.utf8.count, secondPayload.utf8.count)
+        XCTAssertEqual(Array(firstPayload.utf8.prefix(24)), Array(secondPayload.utf8.prefix(24)))
+        XCTAssertNotEqual(firstAttachment.payloadContentFingerprint, secondAttachment.payloadContentFingerprint)
+    }
+
     func testMessageRowRenderModelCacheSeparatesEqualLengthCommandTexts() {
         let runningMessage = CodexMessage(
             id: "message-row-cache",
@@ -77,6 +97,117 @@ final class TurnMessageCachesTests: XCTestCase {
 
         XCTAssertEqual(running?.statusLabel, "running")
         XCTAssertEqual(stopped?.statusLabel, "stopped")
+    }
+
+    func testTimelineClippingKeepsTailForCompletedLongRows() {
+        let message = CodexMessage(
+            id: "long-assistant",
+            threadId: "thread-1",
+            role: .assistant,
+            kind: .chat,
+            text: String(repeating: "a", count: 36_000) + "TAIL-MARKER",
+            isStreaming: false
+        )
+
+        let displayText = timelineDisplayText(for: message)
+
+        XCTAssertTrue(displayText.contains("\n\n...\n\n"))
+        XCTAssertTrue(displayText.hasSuffix("TAIL-MARKER"))
+        XCTAssertLessThan(displayText.count, message.text.count)
+    }
+
+    func testTimelineClippingRespectsByteLimitForUnicodeRows() {
+        let message = CodexMessage(
+            id: "unicode-assistant",
+            threadId: "thread-1",
+            role: .assistant,
+            kind: .chat,
+            text: String(repeating: "é", count: 20_000) + "TAIL",
+            isStreaming: false
+        )
+
+        let displayText = timelineDisplayText(for: message)
+
+        XCTAssertTrue(displayText.contains("\n\n...\n\n"))
+        XCTAssertTrue(displayText.hasSuffix("TAIL"))
+        XCTAssertLessThanOrEqual(displayText.utf8.count, 32_000)
+    }
+
+    func testTimelineClippingExpandsInlineWithoutMutatingSourceText() {
+        let message = CodexMessage(
+            id: "expandable-assistant",
+            threadId: "thread-1",
+            role: .assistant,
+            kind: .chat,
+            text: String(repeating: "a", count: 90_000) + "TAIL",
+            isStreaming: false
+        )
+
+        let initialWindow = timelineDisplayWindow(for: message, expansionLevel: 0)
+        let expandedWindow = timelineDisplayWindow(for: message, expansionLevel: 1)
+
+        XCTAssertTrue(initialWindow.isPartial)
+        XCTAssertTrue(expandedWindow.isPartial)
+        XCTAssertGreaterThan(expandedWindow.text.utf8.count, initialWindow.text.utf8.count)
+        XCTAssertLessThan(expandedWindow.hiddenByteCount, initialWindow.hiddenByteCount)
+        XCTAssertEqual(message.text.suffix(4), "TAIL")
+    }
+
+    func testTimelineSelectableActionTextDoesNotTrimHugeRowsOnRender() {
+        let largeText = "\n" + String(repeating: "a", count: 80_000) + "TAIL\n"
+
+        XCTAssertEqual(timelineSelectableActionText(largeText), largeText)
+    }
+
+    func testFileChangeRenderModelParsesFullTextButKeepsDisplayFallbackBounded() {
+        let fullText = """
+        Preparing file summary.
+        \(String(repeating: "context\n", count: 200))
+        - Edited Sources/Deep/File.swift (+12 -3)
+        """
+        let displayText = "Preparing file summary.\n\n..."
+        let message = CodexMessage(
+            id: "file-change-full-source",
+            threadId: "thread-1",
+            role: .system,
+            kind: .fileChange,
+            text: fullText
+        )
+
+        let renderModel = MessageRowRenderModelCache.model(for: message, displayText: displayText)
+
+        XCTAssertEqual(renderModel.fileChangeState?.summary?.entries.first?.path, "Sources/Deep/File.swift")
+        XCTAssertEqual(renderModel.fileChangeState?.summary?.entries.first?.additions, 12)
+        XCTAssertEqual(renderModel.fileChangeState?.summary?.entries.first?.deletions, 3)
+        XCTAssertEqual(renderModel.fileChangeState?.bodyText, displayText)
+        XCTAssertNotEqual(renderModel.fileChangeState?.detailBodyText, displayText)
+    }
+
+    func testLargeFileChangeRenderModelDoesNotReuseCachedDetailText() {
+        let displayText = "- Edited Sources/Large.swift (+1 -0)"
+        let firstText = displayText + "\n" + String(repeating: "A", count: 140_000) + "FIRST-DETAIL"
+        let secondText = displayText + "\n" + String(repeating: "B", count: 140_000) + "SECOND-DETAIL"
+        let firstMessage = CodexMessage(
+            id: "large-file-change-cache",
+            threadId: "thread-1",
+            role: .system,
+            kind: .fileChange,
+            text: firstText
+        )
+        let secondMessage = CodexMessage(
+            id: "large-file-change-cache",
+            threadId: "thread-1",
+            role: .system,
+            kind: .fileChange,
+            text: secondText
+        )
+
+        let first = MessageRowRenderModelCache.model(for: firstMessage, displayText: displayText)
+        let second = MessageRowRenderModelCache.model(for: secondMessage, displayText: displayText)
+
+        XCTAssertTrue(first.fileChangeState?.detailBodyText.contains("FIRST-DETAIL") == true)
+        XCTAssertTrue(second.fileChangeState?.detailBodyText.contains("SECOND-DETAIL") == true)
+        XCTAssertFalse(second.fileChangeState?.detailBodyText.contains("FIRST-DETAIL") == true)
     }
 
     func testCommandOutputImageReferenceParserCombinesLsDirectoryAndOutputFile() {
@@ -272,13 +403,17 @@ final class TurnMessageCachesTests: XCTestCase {
     }
 
     func testFileChangeRenderCacheSeparatesEqualLengthTexts() {
+        let firstText = fileChangeText(path: "A.swift")
+        let secondText = fileChangeText(path: "B.swift")
         let first = FileChangeSystemRenderCache.renderState(
             messageID: "file-change-cache",
-            sourceText: fileChangeText(path: "A.swift")
+            sourceText: firstText,
+            displayText: firstText
         )
         let second = FileChangeSystemRenderCache.renderState(
             messageID: "file-change-cache",
-            sourceText: fileChangeText(path: "B.swift")
+            sourceText: secondText,
+            displayText: secondText
         )
 
         XCTAssertEqual(first.summary?.entries.first?.path, "A.swift")

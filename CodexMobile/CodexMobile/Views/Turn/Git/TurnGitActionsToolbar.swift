@@ -61,6 +61,9 @@ struct TurnGitActionsToolbarButton: View {
     let loadingTitle: String?
     let showsDiscardRuntimeChangesAndSync: Bool
     let gitSyncState: String?
+    let repoDiffTotals: GitDiffTotals?
+    let isLoadingRepoDiff: Bool
+    let onTapRepoDiff: (() -> Void)?
     let onSelect: (TurnGitActionKind) -> Void
 
     private let minToolbarButtonSize: CGFloat = 28
@@ -108,8 +111,10 @@ struct TurnGitActionsToolbarButton: View {
                     actionButton(for: .initialize)
                 }
             } else {
-                Section("Update") {
-                    actionButton(for: .syncNow)
+                if let repoDiffTotals, let onTapRepoDiff {
+                    Section("Changes") {
+                        repoDiffButton(totals: repoDiffTotals, onTap: onTapRepoDiff)
+                    }
                 }
 
                 Section("Write") {
@@ -118,12 +123,8 @@ struct TurnGitActionsToolbarButton: View {
                     }
                 }
 
-                if !recoveryActions.isEmpty {
-                    Section("Recovery") {
-                        ForEach(recoveryActions, id: \.self) { action in
-                            actionButton(for: action)
-                        }
-                    }
+                Section("Update") {
+                    actionButton(for: .syncNow)
                 }
             }
         } label: {
@@ -153,10 +154,6 @@ struct TurnGitActionsToolbarButton: View {
         .accessibilityValue(loadingTitle ?? syncStatusAccessibilityValue ?? "Repository status unavailable")
     }
 
-    private var recoveryActions: [TurnGitActionKind] {
-        showsDiscardRuntimeChangesAndSync ? [.discardRuntimeChangesAndSync] : []
-    }
-
     private func actionButton(for action: TurnGitActionKind) -> some View {
         Button {
             HapticFeedback.shared.triggerImpactFeedback()
@@ -169,6 +166,30 @@ struct TurnGitActionsToolbarButton: View {
             }
         }
         .disabled(!isEnabled || disabledActions.contains(action))
+    }
+
+    // Keeps the repo-wide diff totals inside the git menu so the topbar stays compact while
+    // surfacing pending changes as the first thing the user sees when opening the menu.
+    private func repoDiffButton(totals: GitDiffTotals, onTap: @escaping () -> Void) -> some View {
+        Button {
+            HapticFeedback.shared.triggerImpactFeedback(style: .light)
+            onTap()
+        } label: {
+            Label {
+                Text("File Changes  \(repoDiffTotalsLabel(for: totals))")
+            } icon: {
+                Image(systemName: "doc.text.magnifyingglass")
+            }
+        }
+        .disabled(isLoadingRepoDiff)
+    }
+
+    private func repoDiffTotalsLabel(for totals: GitDiffTotals) -> String {
+        var parts = ["+\(totals.additions)", "-\(totals.deletions)"]
+        if totals.binaryFiles > 0 {
+            parts.append("B\(totals.binaryFiles)")
+        }
+        return parts.joined(separator: " ")
     }
 
     @ViewBuilder

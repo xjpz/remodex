@@ -19,12 +19,6 @@ enum WorktreeFlowHandoffOutcome: Sendable {
 }
 
 enum WorktreeFlowCoordinator {
-    private static let forkReadinessRetryDelays: [UInt64] = [
-        0,
-        350_000_000,
-        900_000_000,
-    ]
-
     // Input: optional Local checkout path chosen by the user.
     // Output: a brand-new chat in Local or project-less Quick Chat mode.
     // Side effects: issues only `thread/start`.
@@ -387,24 +381,7 @@ private extension WorktreeFlowCoordinator {
     }
 
     static func awaitPreparedWorktreeForkReadiness(codex: CodexService) async throws {
-        for (index, delay) in forkReadinessRetryDelays.enumerated() {
-            if delay > 0 {
-                try? await Task.sleep(nanoseconds: delay)
-            }
-
-            if codex.isConnected && codex.isInitialized {
-                return
-            }
-
-            let hasMoreAttempts = index < (forkReadinessRetryDelays.count - 1)
-            guard hasMoreAttempts else { break }
-        }
-
-        if !codex.isConnected {
-            throw CodexServiceError.invalidInput("Connect to runtime first.")
-        }
-
-        throw CodexServiceError.invalidInput("Runtime is still initializing. Wait a moment and retry.")
+        try await codex.awaitRuntimeInitializedIfNeeded()
     }
 
     static func recoverFailedThreadRebind(

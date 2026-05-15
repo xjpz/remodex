@@ -17,6 +17,16 @@ extension CodexService {
     private static let maxTrustedReconnectFailures = 3
     private static let connectionBootstrapRequestTimeoutNanoseconds: UInt64 = 12_000_000_000
     private static let planModeProbeTimeoutNanoseconds: UInt64 = 5_000_000_000
+    private static let runtimeReadinessRetryDelays: [UInt64] = [
+        0,
+        100_000_000,
+        250_000_000,
+        500_000_000,
+        1_000_000_000,
+        2_000_000_000,
+        3_000_000_000,
+        5_000_000_000,
+    ]
     private static let trustedReconnectRecoveryMessage =
         "Secure reconnect could not be restored from the saved session. Try reconnecting again."
 
@@ -369,6 +379,30 @@ extension CodexService {
         if shouldProbePlanCollaborationMode {
             schedulePlanCollaborationModeProbe()
         }
+    }
+
+    // Waits through the short connected-but-handshaking window before user actions hit runtime APIs.
+    func awaitRuntimeInitializedIfNeeded() async throws {
+        guard isConnected else {
+            throw CodexServiceError.invalidInput("Connect to runtime first.")
+        }
+        guard !isInitialized else {
+            return
+        }
+
+        for delay in Self.runtimeReadinessRetryDelays {
+            if delay > 0 {
+                try await Task.sleep(nanoseconds: delay)
+            }
+            if isConnected && isInitialized {
+                return
+            }
+            guard isConnected else {
+                throw CodexServiceError.invalidInput("Connect to runtime first.")
+            }
+        }
+
+        throw CodexServiceError.invalidInput("Runtime is still initializing. Wait a moment and retry.")
     }
 
     // Converts a bridge-declared "your iPhone app is too old" initialize failure into

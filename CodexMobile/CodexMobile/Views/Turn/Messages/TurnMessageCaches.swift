@@ -9,6 +9,11 @@
 
 import Foundation
 
+private let fileChangeFullParseByteLimit = 128_000
+private func fileChangeSourceCacheFingerprint(for text: String) -> String {
+    return TurnTextCacheKey.stableFingerprint(for: text)
+}
+
 /// Explicit cache flush hook for memory-pressure/manual recovery paths.
 /// Normal thread switching should keep these hot caches warm.
 enum TurnCacheManager {
@@ -51,6 +56,8 @@ struct FileChangeRenderState {
     let summary: TurnFileChangeSummary?
     let actionEntries: [TurnFileChangeSummaryEntry]
     let bodyText: String
+    // Full detail text is reserved for on-demand diff sheets; timeline rows get bounded bodyText.
+    let detailBodyText: String
 }
 
 struct MessageRowRenderModel {
@@ -85,18 +92,26 @@ enum MessageRowRenderModelCache {
     private static let cache = BoundedCache<String, MessageRowRenderModel>(maxEntries: 512)
 
     static func model(for message: CodexMessage, displayText: String) -> MessageRowRenderModel {
-        let textFingerprint = message.isStreaming
-            ? TurnTextCacheKey.fingerprint(for: displayText)
-            : TurnTextCacheKey.stableFingerprint(for: displayText)
-        let key = "\(message.id)|\(message.kind.rawValue)|\(message.role.rawValue)|\(message.isStreaming)|\(textFingerprint)"
-        return cache.getOrSet(key) { buildModel(for: message, displayText: displayText) }
+        if message.kind == .fileChange,
+           message.text.utf8.count > fileChangeFullParseByteLimit {
+            // Large file-change rows carry full detail text for the on-demand sheet; avoid
+            // pinning that body inside the shared row-model cache while scrolling threads.
+            return buildModel(for: message, displayText: displayText, sourceText: message.text)
+        }
+
+        let textFingerprint = "\(displayText.utf8.count)|\(message.textRenderSignature)"
+        let sourceFingerprint = message.kind == .fileChange
+            ? "|source:\(fileChangeSourceCacheFingerprint(for: message.text))"
+            : ""
+        let key = "\(message.id)|\(message.kind.rawValue)|\(message.role.rawValue)|\(message.isStreaming)|\(textFingerprint)\(sourceFingerprint)"
+        return cache.getOrSet(key) { buildModel(for: message, displayText: displayText, sourceText: message.text) }
     }
 
     static func reset() {
         cache.removeAll()
     }
 
-    private static func buildModel(for message: CodexMessage, displayText: String) -> MessageRowRenderModel {
+    private static func buildModel(for message: CodexMessage, displayText: String, sourceText: String) -> MessageRowRenderModel {
         switch message.role {
         case .assistant:
             let assistantImageReferences = message.isStreaming
@@ -136,7 +151,7 @@ enum MessageRowRenderModelCache {
         case .system:
             switch message.kind {
             case .thinking:
-                let thinkingText = ThinkingDisclosureParser.normalizedThinkingContent(from: message.text)
+                let thinkingText = ThinkingDisclosureParser.normalizedThinkingContent(from: displayText)
                 let thinkingActivityPreview = thinkingText.isEmpty
                     ? nil
                     : ThinkingDisclosureParser.compactActivityPreview(fromNormalizedText: thinkingText)
@@ -158,7 +173,8 @@ enum MessageRowRenderModelCache {
             case .fileChange:
                 let fileChangeState = FileChangeSystemRenderCache.renderState(
                     messageID: message.id,
-                    sourceText: displayText
+                    sourceText: sourceText,
+                    displayText: displayText
                 )
                 let actionEntries = fileChangeState.actionEntries
                 let allEntries = actionEntries.isEmpty ? (fileChangeState.summary?.entries ?? []) : actionEntries
@@ -235,19 +251,42 @@ enum FileChangeSystemRenderCache {
 
     static func reset() { cache.removeAll() }
 
-    static func renderState(messageID: String, sourceText: String) -> FileChangeRenderState {
-        cache.getOrSet(TurnTextCacheKey.key(messageID: messageID, kind: "file-change-render", text: sourceText)) {
-            let summary = TurnFileChangeSummaryParser.parse(from: sourceText)
-            let actionEntries = summary?.entries.filter { $0.action != nil } ?? []
-            let bodyText = actionEntries.isEmpty
-                ? sourceText
-                : TurnFileChangeSummaryParser.removingInlineEditingRows(from: sourceText)
-            return FileChangeRenderState(
-                summary: summary,
-                actionEntries: actionEntries,
-                bodyText: bodyText
-            )
+    static func renderState(messageID: String, sourceText: String, displayText: String) -> FileChangeRenderState {
+        let parsesFullSource = sourceText.utf8.count <= fileChangeFullParseByteLimit
+        guard parsesFullSource else {
+            return buildRenderState(sourceText: sourceText, displayText: displayText, parsesFullSource: false)
         }
+
+        let key = [
+            "\(messageID)|file-change-source|\(fileChangeSourceCacheFingerprint(for: sourceText))",
+            "\(messageID)|file-change-display|\(TurnTextCacheKey.stableFingerprint(for: displayText))",
+        ].joined(separator: "|")
+        return cache.getOrSet(key) {
+            buildRenderState(sourceText: sourceText, displayText: displayText, parsesFullSource: true)
+        }
+    }
+
+    private static func buildRenderState(
+        sourceText: String,
+        displayText: String,
+        parsesFullSource: Bool
+    ) -> FileChangeRenderState {
+        let summarySourceText = parsesFullSource ? sourceText : displayText
+        let summary = TurnFileChangeSummaryParser.parse(from: summarySourceText)
+        let actionEntries = summary?.entries.filter { $0.action != nil } ?? []
+        // Large diff rows stay display-bounded on the timeline; full detail remains available on demand.
+        let bodyText = actionEntries.isEmpty
+            ? displayText
+            : TurnFileChangeSummaryParser.removingInlineEditingRows(from: displayText)
+        let detailBodyText = actionEntries.isEmpty || !parsesFullSource
+            ? sourceText
+            : TurnFileChangeSummaryParser.removingInlineEditingRows(from: sourceText)
+        return FileChangeRenderState(
+            summary: summary,
+            actionEntries: actionEntries,
+            bodyText: bodyText,
+            detailBodyText: detailBodyText
+        )
     }
 }
 

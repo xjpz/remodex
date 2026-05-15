@@ -10,6 +10,7 @@ struct TerminalOptionsMenu: View {
     let statusLabel: String
     let errorDetail: String?
     let statusTone: TerminalStatusTone
+    let theme: RemodexTerminalTheme
     let fontSize: Double
     let sessions: [TerminalMenuSessionItem]
     let activeTerminalId: String
@@ -32,20 +33,27 @@ struct TerminalOptionsMenu: View {
             sessionSection
             connectionSection
         } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "circle.fill")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(Color(hexString: statusTone.tint))
-                Text(statusLabel)
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(Color(hexString: statusTone.text))
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .adaptiveGlass(.regular, in: Capsule())
-            .contentShape(Capsule())
+            Image(systemName: "ellipsis")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Color(hexString: theme.foreground))
+                .frame(width: 36, height: 36)
+                .overlay(alignment: .topTrailing) {
+                    // Tiny corner status badge: keeps a glanceable hint of
+                    // running/error state without restoring the wordy pill.
+                    Circle()
+                        .fill(Color(hexString: statusTone.tint))
+                        .frame(width: 8, height: 8)
+                        .overlay(
+                            Circle()
+                                .stroke(Color(hexString: theme.background).opacity(0.7), lineWidth: 1)
+                        )
+                        .padding(5)
+                }
+                .adaptiveGlass(.regular, in: Circle())
+                .contentShape(Circle())
         }
         .accessibilityLabel("Terminal options")
+        .accessibilityValue(statusLabel)
     }
 
     private var statusSection: some View {

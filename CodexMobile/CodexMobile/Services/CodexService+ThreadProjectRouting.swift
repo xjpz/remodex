@@ -12,12 +12,7 @@ extension CodexService {
         pendingComposerAction: CodexPendingThreadComposerAction? = nil,
         runtimeOverride: CodexThreadRuntimeOverride? = nil
     ) async throws -> CodexThread {
-        guard isConnected else {
-            throw CodexServiceError.invalidInput("Connect to runtime first.")
-        }
-        guard isInitialized else {
-            throw CodexServiceError.invalidInput("Runtime is still initializing. Wait a moment and retry.")
-        }
+        try await awaitRuntimeInitializedIfNeeded()
 
         if let pendingComposerAction {
             return try await startThread(

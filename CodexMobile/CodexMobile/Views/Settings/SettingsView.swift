@@ -24,6 +24,7 @@ struct SettingsView: View {
         }
         .listStyle(.insetGrouped)
         .font(AppFont.body())
+        .tint(.primary)
         .navigationTitle("Settings")
     }
 
@@ -103,7 +104,7 @@ private struct SettingsAppearanceCard: View {
     @Binding var appFontStyle: AppFont.Style
     @AppStorage("codex.useLiquidGlass") private var useLiquidGlass = true
     @AppStorage(UserBubbleColor.storageKey) private var userBubbleColorRawValue = UserBubbleColor.defaultStoredRawValue
-    private let settingsAccentColor = Color(.plan)
+    private let settingsAccentColor = Color.primary
 
     var body: some View {
         SettingsCard(title: "Appearance") {

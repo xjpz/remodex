@@ -73,7 +73,7 @@ struct TerminalRouteAccessoryBar: View {
     let onDirectionalInput: (String) -> Void
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
                     ForEach(clusters) { cluster in
@@ -92,6 +92,20 @@ struct TerminalRouteAccessoryBar: View {
                 .padding(.vertical, 3)
             }
             .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+            // Soft fade on both edges so any future overflow reads as
+            // "more to scroll" instead of the hard clip we had before.
+            .mask(
+                LinearGradient(
+                    stops: [
+                        .init(color: .clear,        location: 0.0),
+                        .init(color: .black,        location: 0.025),
+                        .init(color: .black,        location: 0.94),
+                        .init(color: .clear,        location: 1.0),
+                    ],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+            )
 
             TerminalRouteCircleAction(
                 systemImage: "keyboard.chevron.compact.down",
@@ -107,7 +121,7 @@ struct TerminalRouteAccessoryBar: View {
                 onInput: onDirectionalInput
             )
         }
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 10)
         .padding(.vertical, 4)
         .frame(minHeight: remodexTerminalAccessoryHeight)
         .background(Color.clear)

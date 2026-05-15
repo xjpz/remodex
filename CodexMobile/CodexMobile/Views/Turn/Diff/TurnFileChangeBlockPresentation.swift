@@ -31,8 +31,11 @@ private struct RawFileChangeDiffSection {
 // Builds one per-file diff model from raw file-change messages. Summary Totals
 // override same-message diff counts, then separate messages for the same file add up.
 enum FileChangeBlockPresentationBuilder {
+    private static let eagerBuildByteLimit = 96_000
+
     static func build(from messages: [CodexMessage]) -> FileChangeBlockPresentation? {
-        guard !messages.isEmpty else {
+        guard !messages.isEmpty,
+              shouldBuildEagerPresentation(from: messages) else {
             return nil
         }
 
@@ -87,6 +90,17 @@ enum FileChangeBlockPresentationBuilder {
         .joined(separator: "\n\n---\n\n")
 
         return FileChangeBlockPresentation(entries: entries, bodyText: bodyText)
+    }
+
+    private static func shouldBuildEagerPresentation(from messages: [CodexMessage]) -> Bool {
+        var totalBytes = 0
+        for message in messages {
+            totalBytes += message.text.utf8.count
+            if totalBytes > eagerBuildByteLimit {
+                return false
+            }
+        }
+        return true
     }
 
     private static func mergeSummaryEntry(
