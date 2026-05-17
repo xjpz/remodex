@@ -32,7 +32,7 @@ struct ComposerAttachmentTile: View {
                 case .failed:
                     placeholderTile
                         .overlay(
-                            Image(systemName: "exclamationmark.triangle.fill")
+                            RemodexIcon.image(systemName: "exclamationmark.triangle.fill")
                                 .font(AppFont.system(size: 16, weight: .semibold))
                                 .foregroundStyle(.orange)
                         )
@@ -52,7 +52,7 @@ struct ComposerAttachmentTile: View {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 onRemove(attachment.id)
             } label: {
-                Image(systemName: "xmark.circle.fill")
+                RemodexIcon.image(systemName: "xmark.circle.fill")
                     .font(AppFont.system(size: 17, weight: .semibold))
                     .foregroundStyle(.white, .black.opacity(0.65))
             }
@@ -67,7 +67,7 @@ struct ComposerAttachmentTile: View {
         RoundedRectangle(cornerRadius: TurnAttachmentPipeline.thumbnailCornerRadius, style: .continuous)
             .fill(Color(.secondarySystemFill))
             .overlay(
-                Image(systemName: "photo")
+                RemodexIcon.image(systemName: "photo")
                     .foregroundStyle(.secondary)
             )
     }

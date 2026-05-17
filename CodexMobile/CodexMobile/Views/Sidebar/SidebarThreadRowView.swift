@@ -11,7 +11,6 @@ struct SidebarThreadRowView: View {
     let isSelected: Bool
     let runBadgeState: CodexThreadRunBadgeState?
     let timingLabel: String?
-    let diffTotals: TurnSessionDiffTotals?
     let isPinned: Bool
     let pinnedProjectLabel: String?
     let childSubagentCount: Int
@@ -24,7 +23,6 @@ struct SidebarThreadRowView: View {
     var onDelete: (() -> Void)? = nil
 
     @State private var renamePrompt = ThreadRenamePromptState()
-    private let titleLeadingSlotWidth: CGFloat = 16
 
     var body: some View {
         Group {
@@ -40,7 +38,7 @@ struct SidebarThreadRowView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 6)
         .contextMenu { contextMenuContent }
         .threadRenamePrompt(state: $renamePrompt) { newName in
             onRename?(newName)
@@ -52,14 +50,12 @@ struct SidebarThreadRowView: View {
     private var parentRow: some View {
         Button(action: { HapticFeedback.shared.triggerImpactFeedback(style: .light); onTap() }) {
             HStack(alignment: .center, spacing: 8) {
-                leadingIndicatorSlot
-
                 // Keep trailing metadata inside the main stack so long titles truncate before it.
                 Group {
                     if let pinnedProjectLabel, !pinnedProjectLabel.isEmpty {
                         HStack(spacing: 6) {
                             if isPinned && !thread.isSubagent {
-                                Image(systemName: "pin.fill")
+                                RemodexIcon.image(systemName: "pin.fill")
                                     .font(AppFont.system(size: 10, weight: .semibold))
                                     .foregroundStyle(.secondary)
                             }
@@ -81,7 +77,7 @@ struct SidebarThreadRowView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             HStack(spacing: 6) {
                                 if isPinned && !thread.isSubagent {
-                                    Image(systemName: "pin.fill")
+                                    RemodexIcon.image(systemName: "pin.fill")
                                         .font(AppFont.system(size: 10, weight: .semibold))
                                         .foregroundStyle(.secondary)
                                 }
@@ -112,7 +108,8 @@ struct SidebarThreadRowView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .padding(.horizontal, 12)
+        .padding(.leading, 4)
+        .padding(.trailing, 12)
         .padding(.vertical, 12)
     }
 
@@ -127,15 +124,14 @@ struct SidebarThreadRowView: View {
                     .background(Color.orange.opacity(0.12), in: Capsule())
             }
 
-            if let diffTotals {
-                SidebarThreadDiffTotalsLabel(totals: diffTotals)
-            }
-
             expansionToggleButton
 
             threadStatusIconSlot(pointSize: 12)
 
-            if let timingLabel {
+            // Run-state dot supersedes the timestamp so an active/recent run is visible at a glance.
+            if let runBadgeState {
+                SidebarThreadRunBadgeView(state: runBadgeState)
+            } else if let timingLabel {
                 Text(timingLabel)
                     .font(AppFont.footnote())
                     .foregroundStyle(.secondary)
@@ -149,8 +145,6 @@ struct SidebarThreadRowView: View {
     private var subagentRow: some View {
         Button(action: { HapticFeedback.shared.triggerImpactFeedback(style: .light); onTap() }) {
             HStack(alignment: .center, spacing: 8) {
-                leadingIndicatorSlot
-
                 SidebarSubagentNameLabel(thread: thread)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -161,7 +155,8 @@ struct SidebarThreadRowView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .padding(.horizontal, 12)
+        .padding(.leading, 4)
+        .padding(.trailing, 12)
         .padding(.vertical, 4)
     }
 
@@ -183,26 +178,13 @@ struct SidebarThreadRowView: View {
     // MARK: - Shared
 
     @ViewBuilder
-    private var leadingIndicatorSlot: some View {
-        Group {
-            if let runBadgeState, !thread.isSubagent {
-                SidebarThreadRunBadgeView(state: runBadgeState)
-            } else {
-                Color.clear
-                    .frame(width: 10, height: 10)
-            }
-        }
-        .frame(width: titleLeadingSlotWidth, alignment: .center)
-    }
-
-    @ViewBuilder
     private var expansionToggleButton: some View {
         if childSubagentCount > 0, let onToggleSubagents {
             Button(action: {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 onToggleSubagents()
             }) {
-                Image(systemName: isSubagentExpanded ? "chevron.down" : "chevron.right")
+                RemodexIcon.image(systemName: isSubagentExpanded ? "chevron.down" : "chevron.right")
                     .font(AppFont.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .frame(width: 18, height: 18)
@@ -268,9 +250,9 @@ struct SidebarThreadRowView: View {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 onArchiveToggle()
             } label: {
-                Label(
+                RemodexIcon.label(
                     thread.syncState == .archivedLocal ? "Unarchive" : "Archive",
-                    systemImage: thread.syncState == .archivedLocal ? "tray.and.arrow.up" : "archivebox"
+                    systemName: thread.syncState == .archivedLocal ? "tray.and.arrow.up" : "archivebox"
                 )
             }
         }
@@ -280,9 +262,9 @@ struct SidebarThreadRowView: View {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 onPinToggle()
             } label: {
-                Label(
+                RemodexIcon.label(
                     isPinned ? "Unpin" : "Pin",
-                    systemImage: isPinned ? "pin.slash" : "pin"
+                    systemName: isPinned ? "pin.slash" : "pin"
                 )
             }
         }
@@ -366,12 +348,6 @@ private enum SidebarRowPreviewFixtures {
         "t3": .ready,
     ]
 
-    static let diffTotals: [String: TurnSessionDiffTotals] = [
-        "t1": TurnSessionDiffTotals(additions: 42, deletions: 17, distinctDiffCount: 5),
-        "t2": TurnSessionDiffTotals(additions: 8, deletions: 3, distinctDiffCount: 2),
-        "t3": TurnSessionDiffTotals(additions: 120, deletions: 55, distinctDiffCount: 12),
-    ]
-
     static func timingLabel(for thread: CodexThread) -> String? {
         guard let updated = thread.updatedAt else { return nil }
         let seconds = Int(now.timeIntervalSince(updated))
@@ -389,7 +365,6 @@ private enum SidebarRowPreviewFixtures {
         selectedThread: SidebarRowPreviewFixtures.allThreads[2], // Locke selected
         bottomContentInset: 80,
         timingLabelProvider: SidebarRowPreviewFixtures.timingLabel,
-        diffTotalsByThreadID: SidebarRowPreviewFixtures.diffTotals,
         runBadgeStateByThreadID: SidebarRowPreviewFixtures.runBadges,
         onSelectThread: { _ in },
         onCreateThreadInProjectGroup: { _ in },
@@ -398,19 +373,4 @@ private enum SidebarRowPreviewFixtures {
         onDeleteThread: { _ in }
     )
     .environment(CodexService())
-}
-
-// MARK: - Diff totals
-
-private struct SidebarThreadDiffTotalsLabel: View {
-    let totals: TurnSessionDiffTotals
-
-    var body: some View {
-        DiffCountsLabel(additions: totals.additions, deletions: totals.deletions)
-            .font(AppFont.mono(.caption2))
-            .lineLimit(1)
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("Conversation diff total")
-            .accessibilityValue("+\(totals.additions) -\(totals.deletions)")
-    }
 }

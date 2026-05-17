@@ -27,7 +27,7 @@ struct TurnComposerRuntimeMenuBuilder {
 
         return UIMenu(
             title: "Chat Runtime",
-            image: UIImage(systemName: "slider.horizontal.3"),
+            image: RemodexIcon.uiImage(systemName: "slider.horizontal.3"),
             children: children
         )
     }
@@ -49,7 +49,7 @@ struct TurnComposerRuntimeMenuBuilder {
 
         return UIMenu(
             title: "Reasoning",
-            image: UIImage(systemName: "brain"),
+            image: RemodexIcon.uiImage(systemName: "brain"),
             children: children
         )
     }
@@ -72,7 +72,7 @@ struct TurnComposerRuntimeMenuBuilder {
             contentsOf: CodexServiceTier.allCases.map { serviceTier in
                 UIAction(
                     title: serviceTier.displayName,
-                    image: UIImage(systemName: serviceTier.iconName),
+                    image: RemodexIcon.uiImage(systemName: serviceTier.iconName),
                     state: runtimeState.isSelectedServiceTier(serviceTier) ? .on : .off
                 ) { _ in
                     runtimeActions.selectServiceTier(serviceTier)
@@ -82,7 +82,7 @@ struct TurnComposerRuntimeMenuBuilder {
 
         return UIMenu(
             title: "Speed",
-            image: UIImage(systemName: "bolt.fill"),
+            image: RemodexIcon.uiImage(systemName: "bolt.fill"),
             children: children
         )
     }

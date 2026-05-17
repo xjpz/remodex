@@ -233,15 +233,11 @@ struct SlashCommandAutocompletePanel: View {
     @ViewBuilder
     private func commandIcon(for command: TurnComposerSlashCommand, isEnabled: Bool) -> some View {
         if command == .fork {
-            Image("git-branch")
-                .renderingMode(.template)
-                .resizable()
-                .scaledToFit()
+            RemodexIcon.image(systemName: "remodex.git-branch", size: 16)
                 .foregroundStyle(commandPrimaryStyle(isEnabled: isEnabled))
-                .frame(width: 16, height: 16)
                 .frame(width: 22)
         } else {
-            Image(systemName: command.symbolName)
+            RemodexIcon.image(systemName: command.symbolName)
                 .font(AppFont.system(size: 15, weight: .semibold))
                 .foregroundStyle(commandPrimaryStyle(isEnabled: isEnabled))
                 .frame(width: 22)
@@ -256,17 +252,13 @@ struct SlashCommandAutocompletePanel: View {
     private func forkDestinationIcon(for destination: TurnComposerForkDestination) -> some View {
         switch destination {
         case .local:
-            Image(systemName: destination.symbolName)
+            RemodexIcon.image(systemName: destination.symbolName)
                 .font(AppFont.system(size: 15, weight: .semibold))
                 .foregroundStyle(.primary)
                 .frame(width: 22)
         case .newWorktree:
-            Image("git-branch")
-                .renderingMode(.template)
-                .resizable()
-                .scaledToFit()
+            RemodexIcon.image(systemName: "remodex.git-branch", size: 16)
                 .foregroundStyle(.primary)
-                .frame(width: 16, height: 16)
                 .frame(width: 22)
         }
     }
@@ -347,7 +339,7 @@ struct SlashCommandAutocompletePanel: View {
             Spacer(minLength: 8)
 
             Button(action: onClose) {
-                Image(systemName: "xmark")
+                RemodexIcon.image(systemName: "xmark")
                     .font(AppFont.system(size: 11, weight: .bold))
                     .foregroundStyle(.secondary)
                     .frame(width: 28, height: 28)

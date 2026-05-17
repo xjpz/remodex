@@ -119,7 +119,7 @@ struct AboutRemodexView: View {
                     .frame(maxWidth: .infinity, alignment: .trailing)
 
                 VStack(spacing: 2) {
-                    Image(systemName: "arrow.right")
+                    RemodexIcon.image(systemName: "arrow.right")
                         .font(.system(size: 9, weight: .bold))
                         .foregroundStyle(.tertiary)
                     Text(via)
@@ -327,7 +327,7 @@ struct AboutRemodexView: View {
     @ViewBuilder
     private func iconRow(_ icon: String, _ text: String) -> some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: icon)
+            RemodexIcon.image(systemName: icon)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.secondary)
                 .frame(width: 22, height: 22)
@@ -367,7 +367,7 @@ struct AboutRemodexView: View {
     @ViewBuilder
     private func calloutCard(icon: String, color: Color, text: String) -> some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: icon)
+            RemodexIcon.image(systemName: icon)
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(color)
                 .frame(width: 28, height: 28)

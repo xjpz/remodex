@@ -56,7 +56,7 @@ struct TurnErrorReportCard: View {
             HapticFeedback.shared.triggerImpactFeedback(style: .light)
             onDismiss()
         } label: {
-            Image(systemName: "xmark")
+            RemodexIcon.image(systemName: "xmark")
                 .font(AppFont.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .frame(width: 20, height: 20)

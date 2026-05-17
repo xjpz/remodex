@@ -134,7 +134,7 @@ struct OnboardingView: View {
     private func secondaryCapsuleButton(title: String, systemImage: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 10) {
-                Image(systemName: systemImage)
+                RemodexIcon.image(systemName: systemImage)
                     .font(.system(size: 15, weight: .semibold))
 
                 Text(title)

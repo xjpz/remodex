@@ -181,7 +181,7 @@ struct QRScannerView: View {
     // Keeps the first-run scanner escapable without turning reconnect recovery into onboarding.
     private func backButton(action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: "chevron.left")
+            RemodexIcon.image(systemName: "chevron.left")
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(.white)
                 .frame(width: 44, height: 44)
@@ -213,7 +213,7 @@ struct QRScannerView: View {
 
     private var cameraPermissionView: some View {
         VStack(spacing: 20) {
-            Image(systemName: "camera.fill")
+            RemodexIcon.image(systemName: "camera.fill")
                 .font(.system(size: 48))
                 .foregroundStyle(.secondary)
 

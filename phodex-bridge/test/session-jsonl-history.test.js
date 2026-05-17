@@ -4,6 +4,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
+  parseSessionJsonlTurns,
   readThreadTurnsListPageFromSessionJsonl,
 } = require("../src/session-jsonl-history");
 
@@ -176,4 +177,85 @@ test("readThreadTurnsListPageFromSessionJsonl skips cursor requests", () => {
   });
 
   assert.equal(page, null);
+});
+
+test("parseSessionJsonlTurns hides subagent orchestration transcript internals", () => {
+  const content = [
+    JSON.stringify({
+      timestamp: "2026-05-15T07:53:52.418Z",
+      type: "event_msg",
+      payload: {
+        type: "task_started",
+        turn_id: "turn-subagents",
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-15T07:53:53.000Z",
+      type: "event_msg",
+      payload: {
+        type: "user_message",
+        turn_id: "turn-subagents",
+        message: "Compare these codebases",
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-15T07:53:54.000Z",
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "spawn_agent",
+        call_id: "call-spawn",
+        arguments: "{}",
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-15T07:53:55.000Z",
+      type: "response_item",
+      payload: {
+        type: "function_call_output",
+        call_id: "call-spawn",
+        output: "agent id",
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-15T07:53:56.000Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [{
+          type: "input_text",
+          text: "<subagent_notification>\n{\"status\":{\"completed\":\"done\"}}",
+        }],
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-15T07:53:57.000Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Final synthesis" }],
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-15T07:53:58.000Z",
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+        turn_id: "turn-subagents",
+      },
+    }),
+  ].join("\n");
+
+  const turns = parseSessionJsonlTurns(content, { threadId: "thread-subagents" });
+
+  assert.equal(turns.length, 1);
+  assert.deepEqual(
+    turns[0].items.map((item) => [item.type, item.role, item.name, item.text || item.content?.[0]?.text]),
+    [
+      ["user_message", "user", undefined, "Compare these codebases"],
+      ["message", "assistant", undefined, "Final synthesis"],
+    ]
+  );
 });

@@ -128,7 +128,7 @@ struct StructuredUserInputCardView: View {
                 Spacer(minLength: 0)
 
                 if isSelected {
-                    Image(systemName: "checkmark")
+                    RemodexIcon.image(systemName: "checkmark")
                         .font(AppFont.system(size: 12, weight: .semibold))
                         .foregroundStyle(Color(.plan))
                         .transition(.scale.combined(with: .opacity))
@@ -252,7 +252,7 @@ struct StructuredUserInputCardView: View {
                     }
                 } label: {
                     HStack(spacing: 4) {
-                        Image(systemName: "chevron.left")
+                        RemodexIcon.image(systemName: "chevron.left")
                             .font(AppFont.system(size: 11, weight: .semibold))
                         Text("Back")
                             .font(AppFont.subheadline(weight: .medium))
@@ -309,7 +309,7 @@ struct StructuredUserInputCardView: View {
             HStack(spacing: 4) {
                 Text("Next")
                     .font(AppFont.subheadline(weight: .medium))
-                Image(systemName: "chevron.right")
+                RemodexIcon.image(systemName: "chevron.right")
                     .font(AppFont.system(size: 11, weight: .semibold))
             }
             .padding(.horizontal, 16)

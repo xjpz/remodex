@@ -475,15 +475,23 @@ function startBridge({
   });
 
   codex.onClose(() => {
+    const wasShuttingDown = isShuttingDown;
     clearRelayWatchdog();
     bridgeStatusPublisher.stopHeartbeat();
     logConnectionStatus("disconnected");
+    const lastError = wasShuttingDown
+      ? ""
+      : "Codex transport closed unexpectedly.";
     publishBridgeStatus({
-      state: "stopped",
+      state: wasShuttingDown ? "stopped" : "error",
       connectionStatus: "disconnected",
       pid: process.pid,
-      lastError: "",
+      lastError,
     });
+    if (!wasShuttingDown) {
+      console.error(`[remodex] ${lastError}`);
+      process.exitCode = 1;
+    }
     isShuttingDown = true;
     bridgeWakeAssertion.stop();
     clearReconnectTimer();

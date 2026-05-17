@@ -12,13 +12,8 @@ struct TerminalRunningIndicator: View {
         HStack(spacing: 6) {
             glyph
             Text("Remodex is thinking...")
-                .font(AppFont.caption())
-                .foregroundStyle(.secondary)
-                .overlay { ShimmerLabelMask() }
-                .mask(
-                    Text("Remodex is thinking...")
-                        .font(AppFont.caption())
-                )
+                .font(AppFont.body())
+                .foregroundStyle(.tertiary)
         }
         .onAppear {
             withAnimation(.easeInOut(duration: 0.55).repeatForever(autoreverses: true)) {
@@ -32,56 +27,26 @@ struct TerminalRunningIndicator: View {
         HStack(alignment: .bottom, spacing: 1) {
             Text(">")
                 .font(AppFont.mono(.caption2))
-       
-               
+
             RoundedRectangle(cornerRadius: 1, style: .continuous)
-                .fill(Color.secondary)
+                .fill(.tertiary)
                 .frame(width: 4, height: 1)
                 .padding(.bottom, 2)
                 .opacity(cursorOpacity)
                 .offset(x: 0, y: -1)
         }
-        .foregroundStyle(.secondary)
+        .foregroundStyle(.tertiary)
         .frame(width: 12, height: 12)
-               .padding(5)
-               .background(
-                   Circle()
-                       .fill(Color.primary.opacity(0.02))
-                       .overlay(
-                           Circle()
-                               .stroke(Color.primary.opacity(0.06), lineWidth: 1)
-                       )
-               )
-               .contentShape(Circle())
-    }
-}
-
-// Gradient sweep tuned for a compact terminal-running label.
-private struct ShimmerLabelMask: View {
-    @State private var phase: CGFloat = -1
-
-    var body: some View {
-        GeometryReader { geo in
-            let w = geo.size.width
-            LinearGradient(
-                stops: [
-                    .init(color: .clear, location: 0),
-                    .init(color: .white.opacity(0.35), location: 0.4),
-                    .init(color: .white.opacity(0.35), location: 0.6),
-                    .init(color: .clear, location: 1),
-                ],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(width: w * 0.5)
-            .offset(x: phase * w)
-            .onAppear {
-                withAnimation(.easeInOut(duration: 4.0).repeatForever(autoreverses: false)) {
-                    phase = 5
-                }
-            }
-        }
-        .allowsHitTesting(false)
+        .padding(5)
+        .background(
+            Circle()
+                .fill(Color.primary.opacity(0.02))
+                .overlay(
+                    Circle()
+                        .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+                )
+        )
+        .contentShape(Circle())
     }
 }
 

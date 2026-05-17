@@ -1,74 +1,49 @@
 // FILE: SidebarSearchField.swift
-// Purpose: Compact search pill for filtering sidebar threads.
+// Purpose: Liquid glass search capsule for filtering sidebar threads. While
+//          focused (or while there is text) a trailing glass-circle X button
+//          appears that clears the query and dismisses the keyboard.
 // Layer: View Component
 // Exports: SidebarSearchField
+// Depends on: SwiftUI, RemodexIcon, AppFont, AdaptiveGlassModifier
 
 import SwiftUI
 
 struct SidebarSearchField: View {
-    // Mirrors the selected sidebar row so the search field feels like part of the same list system.
-    private let selectedRowCornerRadius: CGFloat = 14
-
     @Binding var text: String
     @Binding var isActive: Bool
     @FocusState private var isFocused: Bool
 
     var body: some View {
-        HStack(spacing: 8) {
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass")
-                    .font(AppFont.subheadline())
-                    .foregroundStyle(.secondary)
+        AdaptiveGlassContainer(spacing: 8) {
+            HStack(spacing: 8) {
+                HStack(spacing: 6) {
+                    RemodexIcon.image(systemName: "magnifyingglass")
+                        .font(AppFont.body())
+                        .foregroundStyle(.secondary)
 
-                TextField("Search conversations", text: $text)
-                    .font(AppFont.subheadline())
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .focused($isFocused)
-                    .submitLabel(.done)
-                    .onSubmit {
-                        isFocused = false
-                    }
-                    .toolbar {
-                        ToolbarItemGroup(placement: .keyboard) {
-                            Spacer()
-                            Button("Done") {
-                                isFocused = false
-                            }
+                    TextField("Search conversations", text: $text)
+                        .font(AppFont.body())
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .focused($isFocused)
+                        .submitLabel(.search)
+                        .onSubmit {
+                            isFocused = false
                         }
-                    }
-
-                if !text.isEmpty {
-                    Button {
-                        text = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(AppFont.subheadline())
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
                 }
-            }
-            .padding(.leading, 10)
-            .padding(.trailing, 16)
-            .padding(.vertical, 8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                Color(.tertiarySystemFill).opacity(0.8),
-                in: RoundedRectangle(cornerRadius: selectedRowCornerRadius, style: .continuous)
-            )
+                .padding(.leading, 12)
+                .padding(.trailing, 16)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .adaptiveGlass(.regular, isInteractive: true, in: Capsule())
 
-            if isFocused {
-                Button("Cancel") {
-                    text = ""
-                    isFocused = false
+                if shouldShowDismissButton {
+                    dismissButton
+                        .transition(.scale.combined(with: .opacity))
                 }
-                .font(AppFont.subheadline())
-                .foregroundStyle(.primary)
-                .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: isFocused)
+        .animation(.easeInOut(duration: 0.2), value: shouldShowDismissButton)
         .onChange(of: isFocused) { _, newValue in
             isActive = newValue
         }
@@ -77,5 +52,27 @@ struct SidebarSearchField: View {
                 isFocused = false
             }
         }
+    }
+
+    private var shouldShowDismissButton: Bool {
+        isFocused || !text.isEmpty
+    }
+
+    // Liquid-glass clear + dismiss control. Clears the query and yields first
+    // responder so the sidebar list animates back without needing a separate
+    // keyboard toolbar "Done" affordance.
+    private var dismissButton: some View {
+        Button {
+            text = ""
+            isFocused = false
+        } label: {
+            RemodexIcon.image(systemName: "xmark", size: 16, weight: .semibold)
+                .foregroundStyle(.primary)
+                .frame(width: 36, height: 36)
+                .adaptiveGlass(.regular, isInteractive: true, in: Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Dismiss search")
     }
 }

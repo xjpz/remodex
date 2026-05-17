@@ -6,7 +6,7 @@
 
 import Foundation
 
-struct CodexTextContentFingerprint: Codable, Hashable, Sendable {
+nonisolated struct CodexTextContentFingerprint: Codable, Hashable, Sendable {
     let byteCount: Int
     let hash: UInt64
 

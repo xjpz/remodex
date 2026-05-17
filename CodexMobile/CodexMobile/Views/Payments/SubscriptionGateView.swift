@@ -120,7 +120,7 @@ struct SubscriptionGateView: View {
                 HStack(spacing: 12) {
                     ForEach(subscriptionGateFeatures) { feature in
                         VStack(alignment: .leading, spacing: 12) {
-                            Image(systemName: feature.icon)
+                            RemodexIcon.image(systemName: feature.icon)
                                 .font(.system(size: 18, weight: .medium))
                                 .foregroundStyle(accentColor)
                                 .frame(width: 36, height: 36)
@@ -298,7 +298,7 @@ struct SubscriptionGateView: View {
                 isPresentingPaywall = true
             } label: {
                 HStack(spacing: 10) {
-                    Image(systemName: "lock.open.fill")
+                    RemodexIcon.image(systemName: "lock.open.fill")
                         .font(.system(size: 15, weight: .semibold))
                     Text("Unlock Now")
                         .font(AppFont.body(weight: .semibold))
@@ -477,7 +477,7 @@ struct SubscriptionBootstrapFailureView: View {
                 Spacer(minLength: 0)
 
                 VStack(spacing: 20) {
-                    Image(systemName: "wifi.exclamationmark")
+                    RemodexIcon.image(systemName: "wifi.exclamationmark")
                         .font(.system(size: 28, weight: .semibold))
                         .foregroundStyle(primaryTextColor)
                         .frame(width: 72, height: 72)

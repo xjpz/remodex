@@ -108,7 +108,7 @@ struct TurnWorktreeHandoffOverlay: View {
             Spacer(minLength: 12)
 
             Button(action: onClose) {
-                Image(systemName: "xmark")
+                RemodexIcon.image(systemName: "xmark")
                     .font(AppFont.system(size: 15, weight: .medium))
                     .foregroundStyle(.secondary)
                     .frame(width: 28, height: 28)

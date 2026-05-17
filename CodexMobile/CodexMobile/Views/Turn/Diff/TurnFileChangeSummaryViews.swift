@@ -38,8 +38,6 @@ struct FileChangeInlineActionRow: View {
 // MARK: - FileChangeSummaryBox
 // Renders turn-end file edits as one compact recap instead of chat-like rows.
 struct FileChangeSummaryBox: View {
-    @Environment(\.colorScheme) private var colorScheme
-
     let entries: [TurnFileChangeSummaryEntry]
     let fallbackText: String
     let detailBodyText: String
@@ -49,6 +47,7 @@ struct FileChangeSummaryBox: View {
     // collapse remains available for long lists or visual decluttering.
     @State private var isExpanded: Bool = true
     @State private var selectedEntry: TurnFileChangeSummaryEntry?
+    @State private var isShowingAllChangesDiff = false
 
     private var canCollapse: Bool {
         !entries.isEmpty || !fallbackText.isEmpty
@@ -60,7 +59,7 @@ struct FileChangeSummaryBox: View {
 
             if isExpanded {
                 if !entries.isEmpty {
-                    Divider()
+                    softDivider
 
                     ForEach(entries.indices, id: \.self) { index in
                         let entry = entries[index]
@@ -90,7 +89,7 @@ struct FileChangeSummaryBox: View {
                         .buttonStyle(.plain)
 
                         if !isLastEntry {
-                            Divider()
+                            softDivider
                                 .padding(.leading, 12)
                         }
                     }
@@ -105,12 +104,12 @@ struct FileChangeSummaryBox: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            UserBubbleColor.default.bubbleBackground(for: colorScheme),
+            .regularMaterial,
             in: RoundedRectangle(cornerRadius: 12, style: .continuous)
         )
         .overlay {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color(.separator).opacity(0.4), lineWidth: 0.5)
+                .stroke(softDividerColor, lineWidth: 0.5)
         }
         .padding(2)
         .sheet(item: $selectedEntry) { entry in
@@ -122,59 +121,90 @@ struct FileChangeSummaryBox: View {
                 restrictToPath: entry.path
             )
         }
+        .sheet(isPresented: $isShowingAllChangesDiff) {
+            TurnDiffSheet(
+                title: "Changes",
+                entries: entries,
+                bodyText: detailBodyText,
+                messageID: messageID
+            )
+        }
     }
 
     @ViewBuilder
     private var header: some View {
-        let content = HStack(spacing: 6) {
-            Image(systemName: "pencil.line")
-                .font(AppFont.footnote(weight: .semibold))
+        HStack(spacing: 6) {
+            Image("changes")
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 16, height: 16)
                 .foregroundStyle(.secondary)
 
-            Text(title)
-                .font(AppFont.footnote(weight: .semibold))
+            Text("File changes")
+                .font(AppFont.footnote(weight: .medium))
                 .foregroundStyle(.secondary)
+
+            if totalAdditions > 0 || totalDeletions > 0 {
+                DiffCountsLabel(additions: totalAdditions, deletions: totalDeletions)
+                    .font(AppFont.mono(.caption))
+            }
 
             Spacer(minLength: 8)
 
-            if canCollapse {
-                Image(systemName: "chevron.down")
-                    .font(AppFont.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .rotationEffect(.degrees(isExpanded ? 0 : -90))
-                    .accessibilityHidden(true)
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.top, 10)
-        .padding(.bottom, isExpanded && !entries.isEmpty ? 8 : 10)
-        .contentShape(Rectangle())
-
-        if canCollapse {
-            Button {
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    isExpanded.toggle()
+            if !entries.isEmpty {
+                Button {
+                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                    isShowingAllChangesDiff = true
+                } label: {
+                    RemodexIcon.image(systemName: "arrow.up.right")
+                        .font(AppFont.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Circle())
                 }
-            } label: {
-                content
+                .buttonStyle(.plain)
+                .accessibilityLabel("Open diff")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(title)
-            .accessibilityHint(isExpanded ? "Collapse list" : "Expand list")
-            .accessibilityAddTraits(.isButton)
-        } else {
-            content
+
+            if canCollapse {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        isExpanded.toggle()
+                    }
+                } label: {
+                    RemodexIcon.image(systemName: "chevron.down")
+                        .font(AppFont.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isExpanded ? 0 : -90))
+                        .frame(width: 24, height: 24)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(isExpanded ? "Collapse file changes" : "Expand file changes")
+            }
         }
+        .padding(.leading, 12)
+        .padding(.trailing, 8)
+        .padding(.top, 6)
+        .padding(.bottom, isExpanded && !entries.isEmpty ? 6 : 8)
     }
 
-    private var title: String {
-        let count = entries.count
-        if count == 0 {
-            return "Files modified"
-        }
-        if count == 1 {
-            return "1 file modified"
-        }
-        return "\(count) files modified"
+    private var totalAdditions: Int {
+        entries.reduce(0) { $0 + $1.additions }
+    }
+
+    private var totalDeletions: Int {
+        entries.reduce(0) { $0 + $1.deletions }
+    }
+
+    private var softDivider: some View {
+        Rectangle()
+            .fill(softDividerColor)
+            .frame(height: 0.5)
+    }
+
+    private var softDividerColor: Color {
+        Color(.separator).opacity(0.6)
     }
 }

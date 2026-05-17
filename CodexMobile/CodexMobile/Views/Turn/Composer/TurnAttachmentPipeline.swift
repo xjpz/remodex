@@ -7,12 +7,12 @@
 import SwiftUI
 import UIKit
 
-struct TurnComposerImageAttachment: Identifiable {
+struct TurnComposerImageAttachment: Identifiable, Codable, Equatable, Sendable {
     let id: String
     var state: TurnComposerImageAttachmentState
 }
 
-enum TurnComposerImageAttachmentState: Equatable {
+enum TurnComposerImageAttachmentState: Codable, Equatable, Sendable {
     case loading
     case ready(CodexImageAttachment)
     case failed

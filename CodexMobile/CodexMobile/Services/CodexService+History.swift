@@ -947,25 +947,25 @@ extension CodexService {
         ].joined(separator: "|")
     }
 
-    private static let historyLargeTextByteLimit = 64_000
-    private static let historySmallWhitespaceScanByteLimit = 512
+    nonisolated private static let historyLargeTextByteLimit = 64_000
+    nonisolated private static let historySmallWhitespaceScanByteLimit = 512
 
     nonisolated static func normalizedMessageText(_ text: String) -> String {
-        guard text.utf8.count <= historyLargeTextByteLimit else {
+        guard text.utf8.count <= Self.historyLargeTextByteLimit else {
             return text
         }
-        text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     nonisolated static func hasMeaningfulHistoryText(_ text: String) -> Bool {
         guard !text.isEmpty else { return false }
-        guard text.utf8.count <= historySmallWhitespaceScanByteLimit else { return true }
+        guard text.utf8.count <= Self.historySmallWhitespaceScanByteLimit else { return true }
         return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     nonisolated static func historyTextsMatch(_ lhs: String, _ rhs: String) -> Bool {
-        guard lhs.utf8.count <= historyLargeTextByteLimit,
-              rhs.utf8.count <= historyLargeTextByteLimit else {
+        guard lhs.utf8.count <= Self.historyLargeTextByteLimit,
+              rhs.utf8.count <= Self.historyLargeTextByteLimit else {
             return lhs == rhs
         }
 
@@ -976,14 +976,14 @@ extension CodexService {
     // full-text digest so pagination overlap does not collapse distinct long rows.
     nonisolated static func historyTextKey(for text: String) -> String {
         let normalized = normalizedMessageText(text)
-        guard normalized.utf8.count > historyLargeTextByteLimit else {
+        guard normalized.utf8.count > Self.historyLargeTextByteLimit else {
             return normalized
         }
         return "large:\(stableHistoryTextFingerprint(for: normalized))"
     }
 
     nonisolated static func stableHistoryTextFingerprint(for text: String) -> String {
-        CodexTextContentFingerprint.cacheKey(for: text)
+        return CodexTextContentFingerprint.cacheKey(for: text)
     }
 
     nonisolated static func normalizedHistoryIdentifier(_ value: String?) -> String? {
@@ -1036,7 +1036,7 @@ extension CodexService {
         message: CodexMessage,
         turnId: String
     ) -> Int? {
-        guard message.text.utf8.count <= historyLargeTextByteLimit else {
+        guard message.text.utf8.count <= Self.historyLargeTextByteLimit else {
             return nil
         }
         let normalizedText = normalizedMessageText(message.text)
@@ -1121,10 +1121,10 @@ extension CodexService {
     }
 
     nonisolated static func normalizedToolActivityLines(from text: String) -> [String] {
-        guard text.utf8.count <= historyLargeTextByteLimit else {
+        guard text.utf8.count <= Self.historyLargeTextByteLimit else {
             return []
         }
-        normalizedMessageText(text)
+        return normalizedMessageText(text)
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
             .filter { !$0.isEmpty }
@@ -1141,8 +1141,8 @@ extension CodexService {
             return existingText
         }
 
-        guard existingText.utf8.count <= historyLargeTextByteLimit,
-              incomingText.utf8.count <= historyLargeTextByteLimit else {
+        guard existingText.utf8.count <= Self.historyLargeTextByteLimit,
+              incomingText.utf8.count <= Self.historyLargeTextByteLimit else {
             return incomingText.utf8.count > existingText.utf8.count ? incomingText : existingText
         }
 
@@ -1185,8 +1185,8 @@ extension CodexService {
             return existingText
         }
 
-        guard existingText.utf8.count <= historyLargeTextByteLimit,
-              incomingText.utf8.count <= historyLargeTextByteLimit else {
+        guard existingText.utf8.count <= Self.historyLargeTextByteLimit,
+              incomingText.utf8.count <= Self.historyLargeTextByteLimit else {
             return existingText
         }
 
@@ -1207,8 +1207,8 @@ extension CodexService {
         _ localMessage: CodexMessage,
         with serverMessage: CodexMessage
     ) -> Bool {
-        guard localMessage.text.utf8.count <= historyLargeTextByteLimit,
-              serverMessage.text.utf8.count <= historyLargeTextByteLimit else {
+        guard localMessage.text.utf8.count <= Self.historyLargeTextByteLimit,
+              serverMessage.text.utf8.count <= Self.historyLargeTextByteLimit else {
             guard hasMeaningfulHistoryText(serverMessage.text) else {
                 return false
             }
@@ -1389,7 +1389,7 @@ extension CodexService {
     }
 
     nonisolated static func normalizedCommandExecutionPreviewKey(from text: String) -> String? {
-        guard text.utf8.count <= historyLargeTextByteLimit else {
+        guard text.utf8.count <= Self.historyLargeTextByteLimit else {
             return nil
         }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1471,7 +1471,7 @@ extension CodexService {
                 attachments: attachments,
                 planState: planState,
                 planPresentation: planPresentation,
-                proposedPlan: role == .assistant && text.utf8.count <= historyLargeTextByteLimit
+                proposedPlan: role == .assistant && text.utf8.count <= Self.historyLargeTextByteLimit
                     ? CodexProposedPlanParser.parse(from: text)
                     : nil,
                 subagentAction: subagentAction
@@ -1500,7 +1500,7 @@ extension CodexService {
             }
 
             let existingText = result[targetIndex].text
-            guard existingText.utf8.count <= historyLargeTextByteLimit else {
+            guard existingText.utf8.count <= Self.historyLargeTextByteLimit else {
                 continue
             }
             let existingImagePaths = Set(AssistantMarkdownImageReferenceParser.references(in: existingText).map(\.path))
@@ -1529,7 +1529,7 @@ extension CodexService {
                     candidate.id != result[index].id
                         && candidate.role == .assistant
                         && candidate.turnId == turnId
-                        && candidate.text.utf8.count <= historyLargeTextByteLimit
+                        && candidate.text.utf8.count <= Self.historyLargeTextByteLimit
                         && !Self.isHistoryGeneratedImageArtifactOnly(candidate.text)
                         && AssistantMarkdownImageReferenceParser.references(in: candidate.text).contains { reference in
                             result[index].text.contains(reference.path)
@@ -1542,7 +1542,7 @@ extension CodexService {
     }
 
     nonisolated static func isHistoryGeneratedImageArtifactOnly(_ text: String) -> Bool {
-        guard text.utf8.count <= historyLargeTextByteLimit else {
+        guard text.utf8.count <= Self.historyLargeTextByteLimit else {
             return false
         }
         let imageReferences = AssistantMarkdownImageReferenceParser.references(in: text)

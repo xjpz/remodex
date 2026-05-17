@@ -554,7 +554,7 @@ struct CommandExecutionCardBody: View {
                 .font(AppFont.caption())
                 .foregroundStyle(accent == .failed ? Color.red : Color.secondary.opacity(0.5))
 
-            Image(systemName: "chevron.right")
+            RemodexIcon.image(systemName: "chevron.right")
                 .font(AppFont.system(size: 8, weight: .semibold))
                 .foregroundStyle(.quaternary)
                 .padding(.leading, 4)
@@ -814,7 +814,7 @@ struct CommandExecutionDetailSheet: View {
 
     private var commandSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("Command", systemImage: "terminal.fill")
+            RemodexIcon.label("Command", systemName: "terminal.fill")
                 .font(AppFont.mono(.caption))
                 .foregroundStyle(commandAccent)
 
@@ -870,7 +870,7 @@ struct CommandExecutionDetailSheet: View {
                 }
             } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: isOutputExpanded ? "chevron.down" : "chevron.right")
+                    RemodexIcon.image(systemName: isOutputExpanded ? "chevron.down" : "chevron.right")
                         .font(AppFont.system(size: 10, weight: .semibold))
                     Text("Output (last \(CommandExecutionDetails.maxOutputLines) lines)")
                         .font(AppFont.mono(.caption))

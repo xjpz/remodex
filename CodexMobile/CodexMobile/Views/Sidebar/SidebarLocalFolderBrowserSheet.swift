@@ -69,7 +69,7 @@ struct SidebarLocalFolderBrowserSheet: View {
 
                 ToolbarItemGroup(placement: .primaryAction) {
                     Button(action: presentNewFolderPrompt) {
-                        Image(systemName: "folder.badge.plus")
+                        RemodexIcon.image(systemName: "folder.badge.plus")
                     }
                     .disabled(currentPath == nil || isCreatingFolder)
 
@@ -379,7 +379,7 @@ private struct SidebarLocalFolderRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: iconSystemName)
+            RemodexIcon.image(systemName: iconSystemName)
                 .font(AppFont.body(weight: .medium))
                 .foregroundStyle(.secondary)
                 .frame(width: 22)

@@ -11,7 +11,7 @@ struct GPTVoiceSetupSheet: View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 18) {
                 HStack(spacing: 12) {
-                    Image(systemName: "mic.fill")
+                    RemodexIcon.image(systemName: "mic.fill")
                         .font(.system(size: 18, weight: .semibold))
                         .foregroundStyle(.primary)
                         .frame(width: 40, height: 40)

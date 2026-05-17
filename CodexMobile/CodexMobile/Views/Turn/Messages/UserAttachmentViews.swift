@@ -57,7 +57,7 @@ private struct UserAttachmentThumbnailView: View {
                 .fill(Color(.secondarySystemFill))
                 .frame(width: side, height: side)
                 .overlay(
-                    Image(systemName: "photo")
+                    RemodexIcon.image(systemName: "photo")
                         .foregroundStyle(.secondary)
                 )
                 .overlay(

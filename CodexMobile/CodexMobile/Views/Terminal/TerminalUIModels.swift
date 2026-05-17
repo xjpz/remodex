@@ -18,12 +18,14 @@ enum TerminalPendingModifier: CaseIterable, Equatable, Hashable {
     case alt
     case ctrl
 
+    // The picker affordance is now rendered as a chevron glyph inside the segment,
+    // so the bare modifier name reads cleanly and stays consistent with the menu.
     var selectorLabel: String {
         switch self {
-        case .cmd: return "cmd ^"
-        case .shift: return "shift ^"
-        case .alt: return "alt ^"
-        case .ctrl: return "ctrl ^"
+        case .cmd: return "cmd"
+        case .shift: return "shift"
+        case .alt: return "alt"
+        case .ctrl: return "ctrl"
         }
     }
 

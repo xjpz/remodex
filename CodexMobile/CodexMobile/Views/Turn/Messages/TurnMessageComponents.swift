@@ -224,7 +224,7 @@ private struct TimelineShowMoreTextButton: View {
             onTap()
         } label: {
             HStack(spacing: 6) {
-                Image(systemName: "chevron.down")
+                RemodexIcon.image(systemName: "chevron.down")
                     .font(AppFont.caption(weight: .semibold))
                 Text("Show more")
                     .font(AppFont.caption(weight: .semibold))
@@ -629,10 +629,6 @@ struct MessageRow: View, Equatable {
                         }
                     }
                 }
-            }
-
-            if !suppressNativeProposedPlanShell && message.isStreaming && showsStreamingAnimations {
-                TypingIndicator()
             }
 
             if !suppressNativeProposedPlanShell,

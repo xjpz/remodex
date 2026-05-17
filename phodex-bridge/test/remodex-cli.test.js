@@ -9,7 +9,7 @@ const assert = require("node:assert/strict");
 const { execFileSync } = require("child_process");
 const path = require("path");
 const { version } = require("../package.json");
-const { main } = require("../bin/remodex");
+const { main, runCli } = require("../bin/remodex");
 
 test("remodex --version prints the package version", () => {
   const cliPath = path.join(__dirname, "..", "bin", "remodex.js");
@@ -99,6 +99,31 @@ test("remodex up shows a startup indicator while waiting for the pairing QR", as
     ["start-service", { waitForPairing: true }],
     ["print-qr", { pairingSession: { pairingPayload: { sessionId: "session-up" } } }],
   ]);
+});
+
+test("runCli prints expected failures without a Node stack trace", async () => {
+  const messages = [];
+  let exitCode = null;
+
+  await runCli({
+    async mainImpl() {
+      throw new Error("No relay URL configured. Run ./run-local-remodex.sh.");
+    },
+    consoleImpl: {
+      error(message) {
+        messages.push(message);
+      },
+    },
+    exitImpl(code) {
+      exitCode = code;
+    },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.deepEqual(messages, [
+    "[remodex] No relay URL configured. Run ./run-local-remodex.sh.",
+  ]);
+  assert.equal(messages.join("\n").includes("at "), false);
 });
 
 test("remodex status --json exposes daemon metadata for companion apps", async () => {

@@ -146,7 +146,7 @@ struct UsageStatusSummaryContent: View {
                     ProgressView()
                         .controlSize(.small)
                 } else {
-                    Image(systemName: "arrow.clockwise")
+                    RemodexIcon.image(systemName: "arrow.clockwise")
                         .font(AppFont.system(size: 12, weight: .semibold))
                 }
 

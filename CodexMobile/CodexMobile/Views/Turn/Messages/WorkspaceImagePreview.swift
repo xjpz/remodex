@@ -82,7 +82,7 @@ struct AssistantMarkdownImagePreviewButton: View {
                         .controlSize(.mini)
                         .tint(Color.accentColor)
                 } else {
-                    Image(systemName: "photo")
+                    RemodexIcon.image(systemName: "photo")
                         .font(AppFont.system(size: 15, weight: .semibold))
                         .foregroundStyle(Color.accentColor)
                 }
@@ -102,7 +102,7 @@ struct AssistantMarkdownImagePreviewButton: View {
 
             Spacer(minLength: 0)
 
-            Image(systemName: "arrow.up.left.and.arrow.down.right")
+            RemodexIcon.image(systemName: "arrow.up.left.and.arrow.down.right")
                 .font(AppFont.system(size: 14, weight: .semibold))
                 .foregroundStyle(.secondary)
         }
@@ -227,7 +227,7 @@ struct AssistantWorkspaceImagePreviewScreen: View {
                         .lineLimit(2)
                         .multilineTextAlignment(.center)
                 } else {
-                    Image(systemName: "photo")
+                    RemodexIcon.image(systemName: "photo")
                         .font(AppFont.system(size: 32, weight: .semibold))
                         .foregroundStyle(.secondary)
                     Text(reference.fileName.isEmpty ? "Image unavailable" : reference.fileName)
@@ -270,7 +270,7 @@ struct AssistantWorkspaceImagePreviewScreen: View {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 onDismiss()
             } label: {
-                Image(systemName: "xmark")
+                RemodexIcon.image(systemName: "xmark")
                     .font(AppFont.system(size: 17, weight: .semibold))
                     .foregroundStyle(.primary)
                     .frame(width: 38, height: 38)

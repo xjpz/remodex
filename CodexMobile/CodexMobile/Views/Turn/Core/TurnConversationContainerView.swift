@@ -274,7 +274,7 @@ private struct AccessoryBackedEmptyState: View {
             Spacer()
 
             VStack(spacing: 14) {
-                Image(systemName: systemImage)
+                RemodexIcon.image(systemName: systemImage)
                     .font(AppFont.system(size: 24, weight: .semibold))
                     .foregroundStyle(tint)
                     .frame(width: 56, height: 56)

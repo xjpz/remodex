@@ -33,7 +33,7 @@ struct TerminalOptionsMenu: View {
             sessionSection
             connectionSection
         } label: {
-            Image(systemName: "ellipsis")
+            RemodexIcon.image(systemName: "ellipsis")
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(Color(hexString: theme.foreground))
                 .frame(width: 36, height: 36)
@@ -85,9 +85,9 @@ struct TerminalOptionsMenu: View {
                 Button {
                     onSelectSession(session.terminalId)
                 } label: {
-                    Label(
+                    RemodexIcon.label(
                         session.displayLabel,
-                        systemImage: session.terminalId == activeTerminalId ? "checkmark" : "terminal"
+                        systemName: session.terminalId == activeTerminalId ? "checkmark" : "terminal"
                     )
                 }
             }
@@ -100,19 +100,21 @@ struct TerminalOptionsMenu: View {
 
     private var connectionSection: some View {
         Section {
-            Button(
-                isRunning ? "Disconnect" : "Connect",
-                systemImage: isRunning ? "xmark" : "terminal",
-                action: onToggleConnection
-            )
+            Button(action: onToggleConnection) {
+                RemodexIcon.label(isRunning ? "Disconnect" : "Connect", systemName: isRunning ? "xmark" : "terminal")
+            }
             .disabled(!hasConnectionConfiguration && !isRunning)
 
-            Button("SSH connection", systemImage: "lock.shield", action: onOpenConnectionEditor)
+            Button(action: onOpenConnectionEditor) {
+                RemodexIcon.label("SSH connection", systemName: "lock.shield")
+            }
 
             Button("Clear", systemImage: "trash", action: onClear)
                 .disabled(!canClear)
 
-            Button("Reset host key", systemImage: "key", action: onResetKnownHost)
+            Button(action: onResetKnownHost) {
+                RemodexIcon.label("Reset host key", systemName: "key")
+            }
                 .disabled(!canResetKnownHost)
         }
     }

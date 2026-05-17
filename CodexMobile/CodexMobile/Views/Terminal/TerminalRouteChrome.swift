@@ -19,7 +19,7 @@ struct TerminalGlassBackButton: View {
             HapticFeedback.shared.triggerImpactFeedback(style: .light)
             action()
         } label: {
-            Image(systemName: "chevron.backward")
+            RemodexIcon.image(systemName: "chevron.backward")
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(Color(hexString: theme.foreground))
                 .frame(width: 36, height: 36)
@@ -125,6 +125,53 @@ struct TerminalRouteAccessoryBar: View {
         .padding(.vertical, 4)
         .frame(minHeight: remodexTerminalAccessoryHeight)
         .background(Color.clear)
+        // Floating pill: shows the user that a modifier is armed for the next
+        // keystroke. The previous design relied on a subtle text-color change
+        // inside the modifier capsule, which was easy to miss.
+        .overlay(alignment: .topLeading) {
+            if let pendingModifier {
+                TerminalArmedModifierBadge(modifier: pendingModifier, theme: theme)
+                    .padding(.leading, 16)
+                    .offset(y: -22)
+                    .transition(
+                        .move(edge: .bottom)
+                            .combined(with: .opacity)
+                            .animation(.spring(response: 0.28, dampingFraction: 0.82))
+                    )
+                    .allowsHitTesting(false)
+            }
+        }
+        .animation(.easeInOut(duration: 0.18), value: pendingModifier)
+    }
+}
+
+// MARK: - Armed modifier badge
+
+private struct TerminalArmedModifierBadge: View {
+    let modifier: TerminalPendingModifier
+    let theme: RemodexTerminalTheme
+
+    private var accent: Color {
+        Color(hexString: theme.palette.indices.contains(10) ? theme.palette[10] : theme.foreground)
+    }
+
+    var body: some View {
+        HStack(spacing: 5) {
+            RemodexIcon.image(systemName: modifier.menuSymbolName)
+                .font(.system(size: 9, weight: .bold))
+            Text("\(modifier.menuTitle.uppercased()) armed")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .tracking(0.4)
+        }
+        .foregroundStyle(Color(hexString: theme.background))
+        .padding(.horizontal, 9)
+        .padding(.vertical, 4)
+        .background(
+            Capsule()
+                .fill(accent)
+                .shadow(color: accent.opacity(0.45), radius: 6, x: 0, y: 2)
+        )
+        .accessibilityHidden(true)
     }
 }
 
@@ -180,8 +227,6 @@ private struct TerminalRouteKeySegment: View {
     let onAction: (TerminalToolbarAction) -> Void
     let onSelectModifier: (TerminalPendingModifier) -> Void
 
-    @State private var isShowingModifierPicker = false
-
     private var activeAccent: Color {
         Color(hexString: theme.palette.indices.contains(10) ? theme.palette[10] : theme.foreground)
     }
@@ -192,6 +237,8 @@ private struct TerminalRouteKeySegment: View {
     }
 
     private var segmentWidth: CGFloat {
+        // Modifiers need extra room for the chevron affordance that signals the picker.
+        if action.isModifier { return 56 }
         if action.label.count <= 1 { return 32 }
         if action.label.count <= 3 { return 40 }
         if action.label.contains(" ") { return 52 }
@@ -199,82 +246,78 @@ private struct TerminalRouteKeySegment: View {
     }
 
     var body: some View {
+        if action.isModifier {
+            modifierSegment
+        } else {
+            sendSegment
+        }
+    }
+
+    // Tap = toggle pending modifier; long-press surfaces the system menu so the
+    // user can switch between cmd/shift/alt/ctrl without remembering a gesture.
+    private var modifierSegment: some View {
+        Menu {
+            Picker(
+                selection: Binding<TerminalPendingModifier>(
+                    get: { action.modifier ?? .ctrl },
+                    set: { newValue in
+                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                        onSelectModifier(newValue)
+                    }
+                ),
+                label: Text("Modifier key")
+            ) {
+                ForEach(TerminalPendingModifier.allCases, id: \.self) { modifier in
+                    RemodexIcon.label(modifier.menuTitle, systemName: modifier.menuSymbolName)
+                        .tag(modifier)
+                }
+            }
+            .pickerStyle(.inline)
+        } label: {
+            segmentLabel
+        } primaryAction: {
+            HapticFeedback.shared.triggerImpactFeedback(style: .light)
+            onAction(action)
+        }
+        .menuOrder(.fixed)
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .accessibilityLabel("\(action.label) modifier")
+        .accessibilityHint("Tap to arm. Long-press to choose between cmd, shift, alt, and ctrl.")
+    }
+
+    private var sendSegment: some View {
         Button {
             HapticFeedback.shared.triggerImpactFeedback(style: .light)
             onAction(action)
         } label: {
-            Text(action.label)
-                .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                .foregroundStyle(textColor)
-                .frame(width: segmentWidth)
-                .frame(maxHeight: .infinity)
-                .padding(.horizontal, 2)
-                .contentShape(Rectangle())
+            segmentLabel
         }
         .buttonStyle(.plain)
         .disabled(!isEnabled)
         .accessibilityLabel(action.label)
-        .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.35)
-                .onEnded { _ in
-                    guard action.modifier != nil, isEnabled else { return }
-                    HapticFeedback.shared.triggerImpactFeedback(style: .medium)
-                    isShowingModifierPicker = true
-                }
-        )
-        .popover(isPresented: $isShowingModifierPicker, attachmentAnchor: .point(.top), arrowEdge: .bottom) {
-            TerminalModifierPicker(
-                selectedModifier: action.modifier ?? .ctrl,
-                theme: theme,
-                onSelect: { modifier in
-                    onSelectModifier(modifier)
-                    isShowingModifierPicker = false
-                }
-            )
-            .presentationCompactAdaptation(.popover)
-        }
     }
-}
 
-private struct TerminalModifierPicker: View {
-    let selectedModifier: TerminalPendingModifier
-    let theme: RemodexTerminalTheme
-    let onSelect: (TerminalPendingModifier) -> Void
-
-    var body: some View {
-        VStack(spacing: 6) {
-            ForEach(TerminalPendingModifier.allCases, id: \.self) { modifier in
-                Button {
-                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                    onSelect(modifier)
-                } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: modifier.menuSymbolName)
-                            .font(.system(size: 16, weight: .semibold))
-                            .frame(width: 24)
-                        Text(modifier.menuTitle)
-                            .font(.system(size: 18, weight: .semibold))
-                            .frame(width: 54, alignment: .trailing)
-                    }
-                    .foregroundStyle(modifier == selectedModifier
-                        ? Color(hexString: theme.foreground)
-                        : Color(hexString: theme.foreground).opacity(0.62))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 9)
-                    .background(
-                        modifier == selectedModifier
-                            ? Color(hexString: theme.palette.indices.contains(10) ? theme.palette[10] : theme.foreground).opacity(0.18)
-                            : Color.clear,
-                        in: Capsule()
-                    )
-                }
-                .buttonStyle(.plain)
+    private var segmentLabel: some View {
+        HStack(spacing: 3) {
+            Text(action.label)
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .foregroundStyle(textColor)
+            if action.isModifier {
+                RemodexIcon.image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 7, weight: .bold))
+                    .foregroundStyle(textColor.opacity(0.75))
             }
         }
-        .padding(10)
-        .frame(width: 190)
-        .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .frame(width: segmentWidth)
+        .frame(maxHeight: .infinity)
+        .padding(.horizontal, 2)
+        .background(
+            Capsule()
+                .fill(isActive ? activeAccent.opacity(0.22) : Color.clear)
+                .padding(.vertical, 4)
+        )
+        .contentShape(Rectangle())
     }
 }
 
@@ -302,7 +345,7 @@ private struct TerminalRouteCircleAction: View {
             HapticFeedback.shared.triggerImpactFeedback(style: .light)
             action()
         } label: {
-            Image(systemName: systemImage)
+            RemodexIcon.image(systemName: systemImage)
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(iconColor)
                 .frame(width: 40, height: 40)
@@ -361,6 +404,10 @@ private enum TerminalDPadDirection {
 }
 
 private struct TerminalRouteDPadControl: View {
+    private static let controlSize: CGFloat = 56
+    private static let deadZoneRadius: CGFloat = 9
+    private static let centerCircleSize: CGFloat = 18
+
     let theme: RemodexTerminalTheme
     let isEnabled: Bool
     let onInput: (String) -> Void
@@ -369,6 +416,7 @@ private struct TerminalRouteDPadControl: View {
     @State private var repeatTask: Task<Void, Never>?
     @State private var pressGeneration = 0
     @State private var joystickOffset: CGSize = .zero
+    @State private var hasMovedOutOfDeadZone = false
 
     private var foregroundColor: Color {
         isEnabled ? Color(hexString: theme.foreground) : Color(hexString: theme.foreground).opacity(0.35)
@@ -393,10 +441,15 @@ private struct TerminalRouteDPadControl: View {
 
                 Circle()
                     .fill(Color(hexString: theme.background).opacity(0.68))
-                    .frame(width: 16, height: 16)
+                    .frame(width: Self.centerCircleSize, height: Self.centerCircleSize)
                     .overlay {
                         Circle()
-                            .stroke(activeDirection == nil ? foregroundColor.opacity(0.22) : activeAccent.opacity(0.72), lineWidth: 1)
+                            .stroke(
+                                activeDirection == nil
+                                    ? foregroundColor.opacity(0.22)
+                                    : activeAccent.opacity(0.72),
+                                lineWidth: 1
+                            )
                     }
                     .offset(joystickOffset)
                     .animation(.interactiveSpring(response: 0.16, dampingFraction: 0.78), value: joystickOffset)
@@ -404,18 +457,24 @@ private struct TerminalRouteDPadControl: View {
             .frame(width: proxy.size.width, height: proxy.size.height)
             .adaptiveGlass(.regular, in: Circle())
             .contentShape(Circle())
+            // `minimumDistance: 0` is what makes single taps on the visible
+            // chevrons actually emit an arrow keystroke. Before, the gesture
+            // required 8pt of drag, so users tapping the icons got silence.
             .gesture(
-                DragGesture(minimumDistance: 8, coordinateSpace: .local)
+                DragGesture(minimumDistance: 0, coordinateSpace: .local)
                     .onChanged { value in
                         guard isEnabled else {
                             endPress()
                             return
                         }
                         guard let direction = direction(for: value.location, in: proxy.size) else {
-                            // Returning to the center dead-zone releases the joystick.
-                            endPress()
+                            // Sliding back to center releases the joystick mid-press.
+                            if hasMovedOutOfDeadZone {
+                                endPress()
+                            }
                             return
                         }
+                        hasMovedOutOfDeadZone = true
                         joystickOffset = offset(for: value.location, in: proxy.size)
                         beginPress(direction)
                     }
@@ -425,9 +484,9 @@ private struct TerminalRouteDPadControl: View {
             )
             .opacity(isEnabled ? 1 : 0.45)
             .accessibilityLabel("Arrow key controller")
-            .accessibilityHint("Drag from the center and hold a direction to send terminal arrow keys")
+            .accessibilityHint("Tap a direction to send one arrow key. Hold to repeat. Drag to switch directions.")
         }
-        .frame(width: 50, height: 50)
+        .frame(width: Self.controlSize, height: Self.controlSize)
         .onDisappear {
             endPress()
         }
@@ -443,7 +502,7 @@ private struct TerminalRouteDPadControl: View {
         let dx = location.x - center.x
         let dy = location.y - center.y
         let distance = hypot(dx, dy)
-        guard distance > 13 else { return nil }
+        guard distance > Self.deadZoneRadius else { return nil }
         if abs(dx) > abs(dy) {
             return dx < 0 ? .left : .right
         }
@@ -455,7 +514,7 @@ private struct TerminalRouteDPadControl: View {
         let dx = location.x - center.x
         let dy = location.y - center.y
         let distance = max(1, hypot(dx, dy))
-        let maxOffset: CGFloat = 9
+        let maxOffset: CGFloat = 10
         let scale = min(maxOffset / distance, 1)
         return CGSize(width: dx * scale, height: dy * scale)
     }
@@ -483,6 +542,7 @@ private struct TerminalRouteDPadControl: View {
         pressGeneration += 1
         repeatTask?.cancel()
         repeatTask = nil
+        hasMovedOutOfDeadZone = false
         withAnimation(.easeOut(duration: 0.12)) {
             activeDirection = nil
             joystickOffset = .zero
@@ -505,10 +565,10 @@ private struct DPadArrows: View {
 
     var body: some View {
         ZStack {
-            arrow(.up).offset(y: -14)
-            arrow(.down).offset(y: 14)
-            arrow(.left).offset(x: -14)
-            arrow(.right).offset(x: 14)
+            arrow(.up).offset(y: -16)
+            arrow(.down).offset(y: 16)
+            arrow(.left).offset(x: -16)
+            arrow(.right).offset(x: 16)
         }
         .font(.system(size: 8, weight: .bold))
     }
@@ -519,7 +579,7 @@ private struct DPadArrows: View {
                 .fill(activeDirection == direction ? accent.opacity(0.72) : Color.white.opacity(0.08))
                 .frame(width: 16, height: 16)
 
-            Image(systemName: direction.symbolName)
+            RemodexIcon.image(systemName: direction.symbolName)
                 .foregroundStyle(activeDirection == direction ? activeForeground : foreground.opacity(0.82))
         }
     }
@@ -535,7 +595,7 @@ struct TerminalRouteUnavailableView: View {
 
     var body: some View {
         VStack(spacing: 12) {
-            Image(systemName: "terminal")
+            RemodexIcon.image(systemName: "terminal")
                 .font(.system(size: 28, weight: .semibold))
                 .foregroundStyle(Color(hexString: theme.foreground))
 

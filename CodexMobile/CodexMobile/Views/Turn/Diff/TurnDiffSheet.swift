@@ -274,7 +274,7 @@ private struct TurnDiffFileCard: View {
             } label: {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        RemodexIcon.image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                             .font(AppFont.system(size: 10, weight: .semibold))
                             .foregroundStyle(.secondary)
                             .frame(width: 10)

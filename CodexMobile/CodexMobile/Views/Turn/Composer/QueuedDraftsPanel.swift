@@ -19,7 +19,7 @@ struct QueuedDraftsPanel: View {
         VStack(alignment: .leading, spacing: 0) {
             ForEach(drafts) { draft in
                 HStack(spacing: 8) {
-                    Image(systemName: "return.right")
+                    RemodexIcon.image(systemName: "return.right")
                         .font(AppFont.system(size: 10, weight: .regular))
                         .foregroundStyle(.tertiary)
 
@@ -36,7 +36,7 @@ struct QueuedDraftsPanel: View {
                         HapticFeedback.shared.triggerImpactFeedback(style: .light)
                         onRestore(draft.id)
                     } label: {
-                        Image(systemName: "arrow.down")
+                        RemodexIcon.image(systemName: "arrow.down")
                             .font(AppFont.system(size: 12, weight: .medium))
                             .foregroundStyle(canRestoreDrafts ? .primary : .tertiary)
                             .frame(width: 24, height: 24)
@@ -74,7 +74,7 @@ struct QueuedDraftsPanel: View {
                         HapticFeedback.shared.triggerImpactFeedback(style: .light)
                         onRemove(draft.id)
                     } label: {
-                        Image(systemName: "trash")
+                        RemodexIcon.image(systemName: "trash")
                             .font(AppFont.system(size: 13, weight: .regular))
                             .foregroundStyle(.secondary)
                             .frame(width: 28, height: 28)

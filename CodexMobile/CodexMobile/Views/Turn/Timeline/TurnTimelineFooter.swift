@@ -43,7 +43,7 @@ struct TurnTimelineFooterContainer<Composer: View>: View {
 
     private func scrollToLatestButton(action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: "arrow.down")
+            RemodexIcon.image(systemName: "arrow.down")
                 .font(AppFont.system(size: 13, weight: .semibold))
                 .foregroundStyle(.primary)
                 .frame(width: 34, height: 34)

@@ -122,7 +122,7 @@ struct ZoomableImagePreviewScreen: View {
             HapticFeedback.shared.triggerImpactFeedback(style: .light)
             action()
         } label: {
-            Image(systemName: systemName)
+            RemodexIcon.image(systemName: systemName)
                 .font(AppFont.system(size: 17, weight: .semibold))
                 .foregroundStyle(.primary)
                 .frame(width: 38, height: 38)

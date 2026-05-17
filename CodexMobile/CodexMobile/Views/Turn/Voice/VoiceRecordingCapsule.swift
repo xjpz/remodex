@@ -87,11 +87,13 @@ struct VoiceRecordingCapsule: View {
 
     private var cancelButton: some View {
         Button(action: onCancel) {
-            Image(systemName: "xmark")
-                .font(AppFont.system(size: 8, weight: .bold))
-                .foregroundStyle(.secondary)
-                .frame(width: 14, height: 14)
-                .background(Color.primary.opacity(0.08), in: Circle())
+            RemodexCircleBadge(
+                systemName: "xmark",
+                foreground: Color.secondary,
+                background: Color.primary.opacity(0.08),
+                diameter: 14,
+                iconSize: 8
+            )
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Cancel voice recording")
@@ -185,7 +187,7 @@ private struct VoiceRecordingCapsulePreview: View {
                     .padding(.bottom, 12)
 
                 HStack(spacing: 12) {
-                    Image(systemName: "plus")
+                    RemodexIcon.image(systemName: "plus")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .frame(width: 22, height: 22)
@@ -203,21 +205,18 @@ private struct VoiceRecordingCapsulePreview: View {
                             isRecording = true
                         }
                     } label: {
-                        Image(systemName: isRecording ? "stop.fill" : "mic.fill")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(Color(.systemBackground))
-                            .frame(width: 32, height: 32)
-                            .background(
-                                isRecording ? Color(.systemRed) : Color(.label),
-                                in: Circle()
-                            )
+                        RemodexCircleBadge(
+                            systemName: isRecording ? "stop.fill" : "mic.fill",
+                            foreground: Color(.systemBackground),
+                            background: isRecording ? Color(.systemRed) : Color(.label)
+                        )
                     }
 
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(Color(.systemBackground))
-                        .frame(width: 32, height: 32)
-                        .background(Color(.label), in: Circle())
+                    RemodexCircleBadge(
+                        systemName: "arrow.up",
+                        foreground: Color(.systemBackground),
+                        background: Color(.label)
+                    )
                 }
                 .padding(.horizontal, 16)
                 .padding(.bottom, 10)

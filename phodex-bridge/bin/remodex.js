@@ -37,10 +37,28 @@ const defaultDeps = {
 };
 
 if (require.main === module) {
-  void main();
+  void runCli();
 }
 
 // ─── ENTRY POINT ─────────────────────────────────────────────
+
+// Runs the CLI process and turns expected configuration failures into readable terminal output.
+async function runCli({
+  mainImpl = main,
+  consoleImpl = console,
+  exitImpl = process.exit,
+} = {}) {
+  try {
+    await mainImpl();
+  } catch (error) {
+    const rawMessage = error && typeof error.message === "string"
+      ? error.message.trim()
+      : String(error || "Command failed");
+    const message = rawMessage || "Command failed";
+    consoleImpl.error(message.startsWith("[remodex]") ? message : `[remodex] ${message}`);
+    exitImpl(1);
+  }
+}
 
 async function main({
   argv = process.argv,
@@ -312,4 +330,5 @@ function isVersionCommand(value) {
 module.exports = {
   isVersionCommand,
   main,
+  runCli,
 };

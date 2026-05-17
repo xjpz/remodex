@@ -105,7 +105,7 @@ struct RevenueCatPaywallView: View {
                         Button {
                             dismiss()
                         } label: {
-                            Image(systemName: "xmark")
+                            RemodexIcon.image(systemName: "xmark")
                                 .font(.system(size: 13, weight: .semibold))
                                 .foregroundStyle(.secondary)
                         }
@@ -183,7 +183,7 @@ struct RevenueCatPaywallView: View {
 
             ForEach(paywallFeatures) { feature in
                 HStack(spacing: 12) {
-                    Image(systemName: feature.icon)
+                    RemodexIcon.image(systemName: feature.icon)
                         .font(.system(size: 16, weight: .medium))
                         .foregroundStyle(accent)
                         .frame(width: 28, height: 28)
@@ -332,7 +332,7 @@ struct RevenueCatPaywallView: View {
             VStack(alignment: .leading, spacing: 6) {
                 // Top row: radio + badge
                 HStack {
-                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    RemodexIcon.image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                         .font(.system(size: 17))
                         .foregroundStyle(isSelected ? (colorScheme == .dark ? .black : .white) : .secondary.opacity(0.4))
 

@@ -14,7 +14,6 @@ struct SidebarThreadListView: View {
     let selectedThread: CodexThread?
     let bottomContentInset: CGFloat
     let timingLabelProvider: (CodexThread) -> String?
-    let diffTotalsByThreadID: [String: TurnSessionDiffTotals]
     let runBadgeStateByThreadID: [String: CodexThreadRunBadgeState]
     let onSelectThread: (CodexThread) -> Void
     let onCreateThreadInProjectGroup: (SidebarThreadGroup) -> Void
@@ -36,31 +35,28 @@ struct SidebarThreadListView: View {
     @State private var revealedProjectGroupIDs: Set<String> = []
 
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
+        LazyVStack(alignment: .leading, spacing: 0) {
 
-                if threads.isEmpty && !isFiltering {
-                    Text(isConnected ? "No conversations" : "Connect to view conversations")
-                        .foregroundStyle(.secondary)
-                        .font(AppFont.subheadline())
-                        .padding(.horizontal, 16)
-                        .padding(.top, 20)
-                } else if groups.flatMap(\.threads).isEmpty && isFiltering {
-                    Text("No matching conversations")
-                        .foregroundStyle(.secondary)
-                        .font(AppFont.subheadline())
-                        .padding(.horizontal, 16)
-                        .padding(.top, 20)
-                } else {
-                    ForEach(groups) { group in
-                        groupSection(group)
-                    }
+            if threads.isEmpty && !isFiltering {
+                Text(isConnected ? "No conversations" : "Connect to view conversations")
+                    .foregroundStyle(.secondary)
+                    .font(AppFont.subheadline())
+                    .padding(.horizontal, 16)
+                    .padding(.top, 20)
+            } else if groups.flatMap(\.threads).isEmpty && isFiltering {
+                Text("No matching conversations")
+                    .foregroundStyle(.secondary)
+                    .font(AppFont.subheadline())
+                    .padding(.horizontal, 16)
+                    .padding(.top, 20)
+            } else {
+                ForEach(groups) { group in
+                    groupSection(group)
                 }
             }
-            // Keeps the last rows reachable above the floating settings control.
-            .padding(.bottom, bottomContentInset)
         }
-        .scrollDismissesKeyboard(.interactively)
+        // Keeps the last rows reachable above the floating settings control.
+        .padding(.bottom, bottomContentInset)
         .task(id: visibleSubagentThreadIDs) {
             await codex.loadSubagentThreadMetadataIfNeeded(threadIds: visibleSubagentThreadIDs)
         }
@@ -110,15 +106,14 @@ struct SidebarThreadListView: View {
                 }
             } label: {
                 HStack(spacing: 8) {
-                    Image(systemName: "pin")
-                        .font(AppFont.body(weight: .medium))
+                    RemodexIcon.image(systemName: "pin", size: 20, weight: .medium)
                         .foregroundStyle(.primary)
                     Text(group.label)
                         .font(AppFont.body(weight: .medium))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                     Spacer()
-                    Image(systemName: "chevron.right")
+                    RemodexIcon.image(systemName: "chevron.right")
                         .font(AppFont.caption(weight: .semibold))
                         .foregroundStyle(.secondary)
                         .rotationEffect(.degrees(isPinnedExpanded ? 90 : 0))
@@ -142,7 +137,6 @@ struct SidebarThreadListView: View {
                         )
                     }
                 }
-                .padding(.leading, -8)
                 .padding(.bottom, 14)
                 .transition(.opacity)
             }
@@ -185,9 +179,10 @@ struct SidebarThreadListView: View {
                     }
                 }
                 .padding(.bottom, 14)
-                .transition(.opacity)
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
+        .animation(.snappy(duration: 0.22), value: expandedProjectGroupIDs.contains(group.id))
     }
 
     private func projectHeader(_ group: SidebarThreadGroup) -> some View {
@@ -203,9 +198,10 @@ struct SidebarThreadListView: View {
                         CodexWorktreeIcon(pointSize: 16, weight: .medium)
                             .foregroundStyle(.primary)
                     } else {
-                        Image(systemName: group.iconSystemName)
+                        RemodexIcon.image(systemName: projectHeaderIconName(for: group, isExpanded: isExpanded))
                             .font(AppFont.body(weight: .medium))
                             .foregroundStyle(.primary)
+                            .contentTransition(.symbolEffect(.replace))
                     }
                     Text(group.label)
                         .font(AppFont.body(weight: .medium))
@@ -222,7 +218,7 @@ struct SidebarThreadListView: View {
                         HapticFeedback.shared.triggerImpactFeedback(style: .light)
                         onArchiveProjectGroup(group)
                     } label: {
-                        Label("Archive Project", systemImage: "archivebox")
+                        RemodexIcon.label("Archive Project", systemName: "archivebox")
                     }
                 }
 
@@ -237,21 +233,13 @@ struct SidebarThreadListView: View {
             }
 
             HStack(spacing: 8) {
-                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                    .font(AppFont.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 14, height: 14)
-                    .animation(.easeInOut(duration: 0.2), value: isExpanded)
-
                 Button {
                     HapticFeedback.shared.triggerImpactFeedback()
                     onCreateThreadInProjectGroup(group)
                 } label: {
-                    Image(systemName: "plus")
-                        .font(AppFont.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.primary)
+                    RemodexIcon.image(systemName: "square.and.pencil", size: 20, weight: .medium)
+                        .foregroundStyle(.secondary)
                         .frame(width: 30, height: 30)
-                        .background(Color.primary.opacity(0.08), in: Circle())
                 }
                 .buttonStyle(.plain)
                 .disabled(!isConnected || isCreatingThread)
@@ -260,6 +248,13 @@ struct SidebarThreadListView: View {
         .padding(.horizontal, 16)
         .padding(.top, 18)
         .padding(.bottom, 10)
+    }
+
+    private func projectHeaderIconName(for group: SidebarThreadGroup, isExpanded: Bool) -> String {
+        if isExpanded, group.iconSystemName == "folder" {
+            return "folder.fill"
+        }
+        return group.iconSystemName
     }
 
     private func archivedGroupSection(_ group: SidebarThreadGroup) -> some View {
@@ -271,7 +266,7 @@ struct SidebarThreadListView: View {
                 }
             } label: {
                 HStack(spacing: 8) {
-                    Image(systemName: "archivebox")
+                    RemodexIcon.image(systemName: "archivebox")
                         .font(AppFont.body(weight: .medium))
                         .foregroundStyle(.primary)
                     Text(group.label)
@@ -279,7 +274,7 @@ struct SidebarThreadListView: View {
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                     Spacer()
-                    Image(systemName: "chevron.right")
+                    RemodexIcon.image(systemName: "chevron.right")
                         .font(AppFont.caption(weight: .semibold))
                         .foregroundStyle(.secondary)
                         .rotationEffect(.degrees(isArchivedExpanded ? 90 : 0))
@@ -359,7 +354,6 @@ struct SidebarThreadListView: View {
             isSelected: isSelected,
             runBadgeState: runBadgeStateByThreadID[thread.id],
             timingLabel: timingLabelProvider(thread),
-            diffTotals: diffTotalsByThreadID[thread.id],
             isPinned: codex.isThreadPinned(thread.id),
             pinnedProjectLabel: isPinnedRow ? thread.projectDisplayName : nil,
             childSubagentCount: childSubagentCount,
@@ -456,20 +450,22 @@ struct SidebarThreadListView: View {
     }
 
     private func toggleProjectGroupExpansion(_ groupID: String) {
-        var persistedCollapsedGroupIDs = SidebarProjectExpansionState.decodePersistedGroupIDs(
-            collapsedProjectGroupIDsStorage
-        )
-        if expandedProjectGroupIDs.contains(groupID) {
-            expandedProjectGroupIDs.remove(groupID)
-            revealedProjectGroupIDs.remove(groupID)
-            persistedCollapsedGroupIDs.insert(groupID)
-        } else {
-            expandedProjectGroupIDs.insert(groupID)
-            persistedCollapsedGroupIDs.remove(groupID)
+        withAnimation(.snappy(duration: 0.22)) {
+            var persistedCollapsedGroupIDs = SidebarProjectExpansionState.decodePersistedGroupIDs(
+                collapsedProjectGroupIDsStorage
+            )
+            if expandedProjectGroupIDs.contains(groupID) {
+                expandedProjectGroupIDs.remove(groupID)
+                revealedProjectGroupIDs.remove(groupID)
+                persistedCollapsedGroupIDs.insert(groupID)
+            } else {
+                expandedProjectGroupIDs.insert(groupID)
+                persistedCollapsedGroupIDs.remove(groupID)
+            }
+            collapsedProjectGroupIDsStorage = SidebarProjectExpansionState.encodePersistedGroupIDs(
+                persistedCollapsedGroupIDs
+            )
         }
-        collapsedProjectGroupIDsStorage = SidebarProjectExpansionState.encodePersistedGroupIDs(
-            persistedCollapsedGroupIDs
-        )
     }
 
     // Keep project sections expanded after regrouping so live updates do not collapse the sidebar.

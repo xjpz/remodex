@@ -19,6 +19,8 @@ struct SidebarTopActionsRow: View {
     let onQuickChat: () -> Void
     let onNewProject: () -> Void
 
+    @ScaledMetric(relativeTo: .body) private var circleSide: CGFloat = 55
+
     private var isBusy: Bool { pendingAction != nil }
 
     var body: some View {
@@ -39,7 +41,7 @@ struct SidebarTopActionsRow: View {
 
             actionButton(
                 action: .newProject,
-                systemName: "folder.badge.plus",
+                systemName: "folder",
                 label: "New Project",
                 tap: onNewProject
             )
@@ -67,15 +69,14 @@ struct SidebarTopActionsRow: View {
                 ZStack {
                     Circle()
                         .fill(Color(.secondarySystemBackground))
-                        .frame(width: 55, height: 55)
+                        .frame(width: circleSide, height: circleSide)
 
                     if isLoading {
                         ProgressView()
                             .tint(.primary)
                             .scaleEffect(0.9)
                     } else {
-                        Image(systemName: systemName)
-                            .font(.system(size: 16, weight: .regular))
+                        RemodexIcon.image(systemName: systemName, size: 22)
                             .foregroundStyle(.primary)
                     }
                 }

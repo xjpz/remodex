@@ -71,7 +71,7 @@ struct WhatsNewSheet: View {
         VStack(alignment: .leading, spacing: 12) {
             ForEach(Array(whatsNewItems.enumerated()), id: \.offset) { _, item in
                 HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: "arrow.right")
+                    RemodexIcon.image(systemName: "arrow.right")
                         .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(.secondary)
                         .padding(.top, 4)

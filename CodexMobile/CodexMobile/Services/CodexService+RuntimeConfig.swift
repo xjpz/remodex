@@ -210,6 +210,31 @@ extension CodexService {
         selectedModelOption(from: availableModels)
     }
 
+    // Composer chrome should not present the canonical fallback as a loaded user choice.
+    func visibleSelectedModelIDForComposer() -> String? {
+        if let selectedModel = selectedModelOption() {
+            return selectedModel.id
+        }
+
+        guard hasPersistedSelectedModelId else {
+            return nil
+        }
+
+        if shouldHidePersistedDefaultWhileRuntimeLoads {
+            return nil
+        }
+
+        return selectedModelId
+    }
+
+    // Keeps the model pill honest while bridge runtime metadata is still in flight.
+    func isRuntimeSelectionLoadingForComposer() -> Bool {
+        guard visibleSelectedModelIDForComposer() == nil else {
+            return false
+        }
+        return isBootstrappingConnectionSync || isLoadingThreads || isLoadingModels
+    }
+
     func selectedGitWriterModelOption() -> CodexModelOption? {
         selectedGitWriterModelOption(from: availableModels)
     }
@@ -453,6 +478,20 @@ extension CodexService {
 }
 
 private extension CodexService {
+    var shouldHidePersistedDefaultWhileRuntimeLoads: Bool {
+        guard availableModels.isEmpty else {
+            return false
+        }
+
+        guard let selectedModelId else {
+            return false
+        }
+
+        let normalizedSelection = selectedModelId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalizedSelection == RuntimeSelectionDefaults.modelId
+            && (isBootstrappingConnectionSync || isLoadingModels)
+    }
+
     // Centralizes thread-override mutation so empty records never linger in storage.
     func mutateThreadRuntimeOverride(
         for threadId: String,

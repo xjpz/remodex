@@ -382,6 +382,8 @@ final class CodexService {
     var queuedTurnDraftsByThread: [String: [QueuedTurnDraft]] = [:]
     // Per-thread queue pause state (active by default when absent).
     var queuePauseStateByThread: [String: QueuePauseState] = [:]
+    // Per-thread unsent composer drafts that survive chat switches and app restarts.
+    var composerDraftsByThreadID: [String: TurnComposerLocalDraft] = [:]
     var messagesByThread: [String: [CodexMessage]] = [:]
     // Monotonic per-thread revision so views can react to message mutations without hashing full transcripts.
     var messageRevisionByThread: [String: Int] = [:]
@@ -657,6 +659,7 @@ final class CodexService {
     let encoder: JSONEncoder
     let decoder: JSONDecoder
     let messagePersistence = CodexMessagePersistence()
+    let composerDraftPersistence = CodexComposerDraftPersistence()
     let aiChangeSetPersistence = AIChangeSetPersistence()
     let defaults: UserDefaults
     let userNotificationCenter: CodexUserNotificationCentering
@@ -705,6 +708,7 @@ final class CodexService {
         }
         CodexMessageOrderCounter.seed(from: loadedMessages)
         self.messagesByThread = loadedMessages
+        self.composerDraftsByThreadID = composerDraftPersistence.load()
         rebuildSubagentIdentityDirectory()
 
         let loadedChangeSets = aiChangeSetPersistence.load()

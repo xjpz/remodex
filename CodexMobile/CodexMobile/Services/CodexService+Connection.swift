@@ -526,10 +526,11 @@ extension CodexService {
 
     // Runs the post-connect sync work that is useful but not required to mark the socket usable.
     func performPostConnectSyncPass(preferredThreadId: String? = nil) async {
-        // Thread metadata drives the visible app shell, so do it before slower runtime option sync.
-        try? await listThreads()
+        // Paint recent chats first; a capped sidebar refresh runs after the shell is usable.
+        await syncThreadsList()
         scheduleRuntimeOptionRefresh()
         if await routePendingNotificationOpenIfPossible(refreshIfNeeded: false) {
+            scheduleCompleteThreadListHydration()
             return
         }
         let resolvedPreferredThreadId = normalizedInterruptIdentifier(preferredThreadId)
@@ -559,6 +560,18 @@ extension CodexService {
                     requestImmediateSync: activeThreadId == threadId
                 )
             }
+        }
+        scheduleCompleteThreadListHydration()
+    }
+
+    // Refreshes capped sidebar metadata without keeping initial reconnect in the loading state.
+    private func scheduleCompleteThreadListHydration() {
+        Task { @MainActor [weak self] in
+            guard let self, self.isConnected, self.isInitialized, !self.isLoadingThreads else {
+                return
+            }
+
+            try? await self.listThreads()
         }
     }
 

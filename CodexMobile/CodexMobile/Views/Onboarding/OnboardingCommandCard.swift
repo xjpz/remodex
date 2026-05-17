@@ -31,7 +31,7 @@ struct OnboardingCommandCard: View {
             } label: {
                 Group {
                     if copied {
-                        Image(systemName: "checkmark")
+                        RemodexIcon.image(systemName: "checkmark")
                             .font(.system(size: 12, weight: .medium))
                     } else {
                         Image("copy")

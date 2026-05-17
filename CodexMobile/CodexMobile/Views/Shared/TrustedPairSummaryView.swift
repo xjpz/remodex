@@ -35,7 +35,7 @@ struct TrustedPairSummaryView: View {
                 .foregroundStyle(.secondary)
 
             HStack(alignment: .center, spacing: 10) {
-                Image(systemName: "desktopcomputer")
+                RemodexIcon.image(systemName: "desktopcomputer")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .frame(width: 28, height: 28)

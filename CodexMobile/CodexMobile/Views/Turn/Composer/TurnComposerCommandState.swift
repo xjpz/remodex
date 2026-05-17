@@ -6,7 +6,7 @@
 
 import Foundation
 
-enum TurnComposerSlashCommand: String, Identifiable, Equatable {
+enum TurnComposerSlashCommand: String, Identifiable, Codable, Equatable, Sendable {
     case codeReview
     case compact
     case feedback
@@ -61,7 +61,7 @@ enum TurnComposerSlashCommand: String, Identifiable, Equatable {
         case .feedback:
             return "envelope"
         case .fork:
-            return "arrow.triangle.branch"
+            return "remodex.fork"
         case .status:
             return "speedometer"
         case .subagents:
@@ -176,7 +176,7 @@ enum TurnComposerForkDestination: String, Identifiable, Equatable {
     }
 }
 
-enum TurnComposerReviewTarget: String, Equatable {
+enum TurnComposerReviewTarget: String, Codable, Equatable, Sendable {
     case uncommittedChanges
     case baseBranch
 
@@ -199,7 +199,7 @@ enum TurnComposerReviewTarget: String, Equatable {
     }
 }
 
-struct TurnComposerReviewSelection: Equatable {
+struct TurnComposerReviewSelection: Codable, Equatable, Sendable {
     let command: TurnComposerSlashCommand
     let target: TurnComposerReviewTarget?
 }

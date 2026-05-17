@@ -84,7 +84,7 @@ struct CommandExecutionStatusCard: View {
                         ProgressView()
                             .controlSize(.small)
                     } else {
-                        Image(systemName: "photo")
+                        RemodexIcon.image(systemName: "photo")
                             .font(AppFont.system(size: 14, weight: .semibold))
                             .foregroundStyle(.secondary)
                     }
@@ -104,7 +104,7 @@ struct CommandExecutionStatusCard: View {
 
                 Spacer(minLength: 0)
 
-                Image(systemName: "chevron.right")
+                RemodexIcon.image(systemName: "chevron.right")
                     .font(AppFont.system(size: 8, weight: .semibold))
                     .foregroundStyle(.quaternary)
             }

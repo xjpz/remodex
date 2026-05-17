@@ -52,7 +52,7 @@ struct SubagentParentAccessoryCard: View {
                     .fill(Color.accentColor.opacity(0.1))
                     .frame(width: 22, height: 22)
 
-                Image(systemName: "arrow.turn.up.left")
+                RemodexIcon.image(systemName: "arrow.turn.up.left")
                     .font(AppFont.system(size: 9, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
             }
@@ -76,7 +76,7 @@ struct SubagentParentAccessoryCard: View {
                 .foregroundStyle(.primary)
                 .lineLimit(1)
         } trailing: {
-            Image(systemName: "chevron.right")
+            RemodexIcon.image(systemName: "chevron.right")
                 .font(AppFont.system(size: 11, weight: .semibold))
                 .foregroundStyle(.tertiary)
         }
@@ -113,11 +113,11 @@ struct RuntimeDebugLogSheet: View {
         NavigationStack {
             Group {
                 if codex.runtimeDebugLogEntries.isEmpty {
-                    ContentUnavailableView(
-                        "No Runtime Logs Yet",
-                        systemImage: "list.bullet.rectangle",
-                        description: Text("Start a Plan Mode turn and the RPC events will appear here.")
-                    )
+                    ContentUnavailableView {
+                        RemodexIcon.label("No Runtime Logs Yet", systemName: "list.bullet.rectangle")
+                    } description: {
+                        Text("Start a Plan Mode turn and the RPC events will appear here.")
+                    }
                 } else {
                     ScrollView {
                         Text(combinedLogText)

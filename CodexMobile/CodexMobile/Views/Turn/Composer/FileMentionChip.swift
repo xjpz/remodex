@@ -15,7 +15,7 @@ struct FileMentionChip: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: "chevron.left.forwardslash.chevron.right")
+            RemodexIcon.image(systemName: "chevron.left.forwardslash.chevron.right")
                 .font(AppFont.system(size: 9, weight: .semibold))
                 .foregroundStyle(Color.blue)
 
@@ -26,7 +26,7 @@ struct FileMentionChip: View {
 
             if let onRemove {
                 Button(action: onRemove) {
-                    Image(systemName: "xmark")
+                    RemodexIcon.image(systemName: "xmark")
                         .font(AppFont.system(size: 8, weight: .bold))
                         .foregroundStyle(Color.blue)
                         .frame(width: 14, height: 14)
@@ -49,7 +49,7 @@ struct SkillMentionChip: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: "square.stack.3d.up")
+            RemodexIcon.image(systemName: "square.stack.3d.up")
                 .font(AppFont.system(size: 9, weight: .semibold))
                 .foregroundStyle(Color.indigo)
 
@@ -60,7 +60,7 @@ struct SkillMentionChip: View {
 
             if let onRemove {
                 Button(action: onRemove) {
-                    Image(systemName: "xmark")
+                    RemodexIcon.image(systemName: "xmark")
                         .font(AppFont.system(size: 8, weight: .bold))
                         .foregroundStyle(Color.indigo)
                         .frame(width: 14, height: 14)
@@ -83,7 +83,7 @@ struct PluginMentionChip: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: "circle.grid.2x2")
+            RemodexIcon.image(systemName: "circle.grid.2x2")
                 .font(AppFont.system(size: 9, weight: .semibold))
                 .foregroundStyle(.blue)
 
@@ -94,7 +94,7 @@ struct PluginMentionChip: View {
 
             if let onRemove {
                 Button(action: onRemove) {
-                    Image(systemName: "xmark")
+                    RemodexIcon.image(systemName: "xmark")
                         .font(AppFont.system(size: 8, weight: .bold))
                         .foregroundStyle(.blue)
                         .frame(width: 14, height: 14)
@@ -120,7 +120,7 @@ struct ComposerActionChip: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: symbolName)
+            RemodexIcon.image(systemName: symbolName)
                 .font(AppFont.system(size: 9, weight: .semibold))
                 .foregroundStyle(tintColor)
 
@@ -131,7 +131,7 @@ struct ComposerActionChip: View {
 
             if let onRemove {
                 Button(action: onRemove) {
-                    Image(systemName: "xmark")
+                    RemodexIcon.image(systemName: "xmark")
                         .font(AppFont.system(size: 8, weight: .bold))
                         .foregroundStyle(tintColor)
                         .frame(width: 14, height: 14)

@@ -1,11 +1,27 @@
 // FILE: TurnComposerView.swift
 // Purpose: Renders the turn composer input, queued-draft actions, attachments, and send/stop controls.
 // Layer: View Component (orchestrator)
-// Exports: TurnComposerView
-// Depends on: SwiftUI, ComposerAttachmentsPreview, FileAutocompletePanel, SkillAutocompletePanel, SlashCommandAutocompletePanel, ComposerBottomBar, QueuedDraftsPanel, FileMentionChip, TurnComposerInputTextView, TurnComposerSecondaryBar
+// Exports: TurnComposerView, TurnComposerInputChangeHandler
+// Depends on: SwiftUI, AdaptiveGlassModifier, ComposerAttachmentsPreview, FileAutocompletePanel, SkillAutocompletePanel, SlashCommandAutocompletePanel, ComposerBottomBar, QueuedDraftsPanel, FileMentionChip, TurnComposerInputTextView, TurnComposerSecondaryBar
 
 import SwiftUI
 import UIKit
+
+// Keeps autocomplete fan-out outside the view body so input editing remains a
+// single UI event from TurnComposerView's perspective.
+struct TurnComposerInputChangeHandler {
+    let handleFileAutocomplete: (String) -> Void
+    let handleSkillAutocomplete: (String) -> Void
+    let handlePluginAutocomplete: (String) -> Void
+    let handleSlashCommandAutocomplete: (String) -> Void
+
+    func callAsFunction(_ text: String) {
+        handleFileAutocomplete(text)
+        handleSkillAutocomplete(text)
+        handlePluginAutocomplete(text)
+        handleSlashCommandAutocomplete(text)
+    }
+}
 
 struct TurnComposerView: View {
     @Binding var input: String
@@ -70,10 +86,7 @@ struct TurnComposerView: View {
     let onSetPlanModeArmed: (Bool) -> Void
     let onRemoveAttachment: (String) -> Void
     let onStopTurn: (String?) -> Void
-    let onInputChangedForFileAutocomplete: (String) -> Void
-    let onInputChangedForSkillAutocomplete: (String) -> Void
-    let onInputChangedForPluginAutocomplete: (String) -> Void
-    let onInputChangedForSlashCommandAutocomplete: (String) -> Void
+    let onInputChanged: TurnComposerInputChangeHandler
     let onSelectFileAutocomplete: (CodexFuzzyFileMatch) -> Void
     let onSelectSkillAutocomplete: (CodexSkillMetadata) -> Void
     let onSelectPluginAutocomplete: (CodexPluginMetadata) -> Void
@@ -97,160 +110,159 @@ struct TurnComposerView: View {
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
     var body: some View {
-        VStack(spacing: 6) {
-            TurnComposerQueuedDraftsSection(
-                drafts: accessoryState.queuedDrafts,
-                canSteerDrafts: accessoryState.canSteerQueuedDrafts,
-                canRestoreDrafts: accessoryState.canRestoreQueuedDrafts,
-                steeringDraftID: accessoryState.steeringDraftID,
-                onRestoreQueuedDraft: onRestoreQueuedDraft,
-                onSteerQueuedDraft: onSteerQueuedDraft,
-                onRemoveQueuedDraft: onRemoveQueuedDraft
-            )
-
-            VStack(spacing: 0) {
-                TurnComposerAccessorySection(
-                    state: accessoryState,
-                    onRemoveAttachment: onRemoveAttachment,
-                    onRemoveMentionedFile: onRemoveMentionedFile,
-                    onRemoveMentionedSkill: onRemoveMentionedSkill,
-                    onRemoveMentionedPlugin: onRemoveMentionedPlugin,
-                    onRemoveComposerReviewSelection: onRemoveComposerReviewSelection,
-                    onRemoveComposerSubagentsSelection: onRemoveComposerSubagentsSelection
+        AdaptiveGlassContainer(spacing: 6) {
+            VStack(spacing: 6) {
+                TurnComposerQueuedDraftsSection(
+                    drafts: accessoryState.queuedDrafts,
+                    canSteerDrafts: accessoryState.canSteerQueuedDrafts,
+                    canRestoreDrafts: accessoryState.canRestoreQueuedDrafts,
+                    steeringDraftID: accessoryState.steeringDraftID,
+                    onRestoreQueuedDraft: onRestoreQueuedDraft,
+                    onSteerQueuedDraft: onSteerQueuedDraft,
+                    onRemoveQueuedDraft: onRemoveQueuedDraft
                 )
 
-                ZStack(alignment: .topLeading) {
-                    if input.isEmpty {
-                        Text(placeholderText)
-                            .font(AppFont.body())
-                            .foregroundStyle(Color(.placeholderText))
-                            .allowsHitTesting(false)
+                VStack(spacing: 0) {
+                    TurnComposerAccessorySection(
+                        state: accessoryState,
+                        onRemoveAttachment: onRemoveAttachment,
+                        onRemoveMentionedFile: onRemoveMentionedFile,
+                        onRemoveMentionedSkill: onRemoveMentionedSkill,
+                        onRemoveMentionedPlugin: onRemoveMentionedPlugin,
+                        onRemoveComposerReviewSelection: onRemoveComposerReviewSelection,
+                        onRemoveComposerSubagentsSelection: onRemoveComposerSubagentsSelection
+                    )
+
+                    ZStack(alignment: .topLeading) {
+                        if input.isEmpty {
+                            Text(placeholderText)
+                                .font(AppFont.body())
+                                .foregroundStyle(Color(.placeholderText))
+                                .allowsHitTesting(false)
+                        }
+
+                        TurnComposerInputTextView(
+                            text: $input,
+                            isFocused: isInputFocused,
+                            isEditable: !isComposerInteractionLocked,
+                            dynamicHeight: $composerInputHeight,
+                            runtimeState: runtimeState,
+                            runtimeActions: runtimeActions,
+                            onPasteImageData: { imageDataItems in
+                                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                                onPasteImageData(imageDataItems)
+                            }
+                        )
+                        .frame(height: max(composerInputHeight, 34))
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.top, accessoryState.topInputPadding + 4)
+                    .padding(.bottom, 8)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        guard !isComposerInteractionLocked else { return }
+                        isInputFocused.wrappedValue = true
+                    }
+                    .onChange(of: input) { _, newValue in
+                        onInputChanged(newValue)
                     }
 
-                    TurnComposerInputTextView(
-                        text: $input,
-                        isFocused: isInputFocused,
-                        isEditable: !isComposerInteractionLocked,
-                        dynamicHeight: $composerInputHeight,
+                    ComposerBottomBar(
+                        orderedModelOptions: orderedModelOptions,
+                        selectedModelID: selectedModelID,
+                        selectedModelTitle: selectedModelTitle,
+                        isLoadingModels: isLoadingModels,
+                        isRuntimeSelectionLoading: isRuntimeSelectionLoading,
                         runtimeState: runtimeState,
                         runtimeActions: runtimeActions,
-                        onPasteImageData: { imageDataItems in
-                            HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                            onPasteImageData(imageDataItems)
-                        }
+                        remainingAttachmentSlots: remainingAttachmentSlots,
+                        isComposerInteractionLocked: isComposerInteractionLocked,
+                        isSendDisabled: isSendDisabled,
+                        isSending: isSending,
+                        isPlanModeArmed: isPlanModeArmed,
+                        queuedCount: queuedCount,
+                        isQueuePaused: isQueuePaused,
+                        activeTurnID: activeTurnID,
+                        isThreadRunning: isThreadRunning,
+                        voiceButtonPresentation: voiceButtonPresentation,
+                        onTapAddImage: onTapAddImage,
+                        onTapTakePhoto: onTapTakePhoto,
+                        onTapVoice: onTapVoice,
+                        onSetPlanModeArmed: onSetPlanModeArmed,
+                        onResumeQueue: onResumeQueue,
+                        onStopTurn: onStopTurn,
+                        onSend: onSend
                     )
-                    .frame(height: max(composerInputHeight, 34))
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 16)
-                .padding(.top, accessoryState.topInputPadding + 4)
-                .padding(.bottom, 8)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    guard !isComposerInteractionLocked else { return }
-                    isInputFocused.wrappedValue = true
-                }
-                .onChange(of: input) { _, newValue in
-                    onInputChangedForFileAutocomplete(newValue)
-                    onInputChangedForSkillAutocomplete(newValue)
-                    onInputChangedForPluginAutocomplete(newValue)
-                    onInputChangedForSlashCommandAutocomplete(newValue)
-                }
+                .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 26))
+                .overlay(alignment: .topLeading) {
+                    Color.clear
+                        .frame(maxWidth: .infinity, maxHeight: 0, alignment: .topLeading)
+                        .overlay(alignment: .bottomLeading) {
+                            // Keep the floating overlay stretched to the composer width so the
+                            // recording capsule can expand all the way toward the trailing controls.
+                            VStack(alignment: .leading, spacing: 6) {
+                                if accessoryState.showsVoiceRecordingCapsule {
+                                    VoiceRecordingCapsule(
+                                        audioLevels: accessoryState.voiceAudioLevels,
+                                        duration: accessoryState.voiceRecordingDuration,
+                                        onCancel: onCancelVoiceRecording
+                                    )
+                                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+                                }
 
-                ComposerBottomBar(
-                    orderedModelOptions: orderedModelOptions,
-                    selectedModelID: selectedModelID,
-                    selectedModelTitle: selectedModelTitle,
-                    isLoadingModels: isLoadingModels,
-                    isRuntimeSelectionLoading: isRuntimeSelectionLoading,
-                    runtimeState: runtimeState,
-                    runtimeActions: runtimeActions,
-                    remainingAttachmentSlots: remainingAttachmentSlots,
-                    isComposerInteractionLocked: isComposerInteractionLocked,
-                    isSendDisabled: isSendDisabled,
-                    isSending: isSending,
-                    isPlanModeArmed: isPlanModeArmed,
-                    queuedCount: queuedCount,
-                    isQueuePaused: isQueuePaused,
-                    activeTurnID: activeTurnID,
-                    isThreadRunning: isThreadRunning,
-                    voiceButtonPresentation: voiceButtonPresentation,
-                    onTapAddImage: onTapAddImage,
-                    onTapTakePhoto: onTapTakePhoto,
-                    onTapVoice: onTapVoice,
-                    onSetPlanModeArmed: onSetPlanModeArmed,
-                    onResumeQueue: onResumeQueue,
-                    onStopTurn: onStopTurn,
-                    onSend: onSend
+                                TurnComposerAutocompletePanels(
+                                    state: autocompleteState,
+                                    onSelectFileAutocomplete: onSelectFileAutocomplete,
+                                    onSelectSkillAutocomplete: onSelectSkillAutocomplete,
+                                    onSelectPluginAutocomplete: onSelectPluginAutocomplete,
+                                    onSelectSlashCommand: onSelectSlashCommand,
+                                    onSelectCodeReviewTarget: onSelectCodeReviewTarget,
+                                    onSelectForkDestination: onSelectForkDestination,
+                                    onCloseSlashCommandPanel: onCloseSlashCommandPanel
+                                )
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .offset(y: -8)
+                }
+                .zIndex(2)
+
+                // Kept as a separate component so the lower meta bar can evolve without reopening this file.
+                TurnComposerSecondaryBar(
+                    isInputFocused: isInputFocused.wrappedValue,
+                    isEmptyThread: isEmptyThread,
+                    hasWorkingDirectory: hasWorkingDirectory,
+                    isWorktreeProject: isWorktreeProject,
+                    selectedAccessMode: selectedAccessMode,
+                    contextWindowUsage: contextWindowUsage,
+                    rateLimitBuckets: rateLimitBuckets,
+                    isLoadingRateLimits: isLoadingRateLimits,
+                    rateLimitsErrorMessage: rateLimitsErrorMessage,
+                    shouldAutoRefreshUsageStatus: shouldAutoRefreshUsageStatus,
+                    showsGitBranchSelector: showsGitBranchSelector,
+                    isGitBranchSelectorEnabled: isGitBranchSelectorEnabled,
+                    availableGitBranchTargets: availableGitBranchTargets,
+                    gitBranchesCheckedOutElsewhere: gitBranchesCheckedOutElsewhere,
+                    gitWorktreePathsByBranch: gitWorktreePathsByBranch,
+                    selectedGitBaseBranch: selectedGitBaseBranch,
+                    currentGitBranch: currentGitBranch,
+                    gitDefaultBranch: gitDefaultBranch,
+                    isLoadingGitBranchTargets: isLoadingGitBranchTargets,
+                    isSwitchingGitBranch: isSwitchingGitBranch,
+                    isCreatingGitWorktree: isCreatingGitWorktree,
+                    onSelectGitBranch: onSelectGitBranch,
+                    onCreateGitBranch: onCreateGitBranch,
+                    onSelectGitBaseBranch: onSelectGitBaseBranch,
+                    onRefreshGitBranches: onRefreshGitBranches,
+                    onRefreshUsageStatus: onRefreshUsageStatus,
+                    onSelectAccessMode: onSelectAccessMode,
+                    canHandOffToWorktree: canHandOffToWorktree,
+                    onTapCreateWorktree: onTapCreateWorktree
                 )
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 26))
-            .overlay(alignment: .topLeading) {
-                Color.clear
-                    .frame(maxWidth: .infinity, maxHeight: 0, alignment: .topLeading)
-                    .overlay(alignment: .bottomLeading) {
-                        // Keep the floating overlay stretched to the composer width so the
-                        // recording capsule can expand all the way toward the trailing controls.
-                        VStack(alignment: .leading, spacing: 6) {
-                            if accessoryState.showsVoiceRecordingCapsule {
-                                VoiceRecordingCapsule(
-                                    audioLevels: accessoryState.voiceAudioLevels,
-                                    duration: accessoryState.voiceRecordingDuration,
-                                    onCancel: onCancelVoiceRecording
-                                )
-                                .transition(.opacity.combined(with: .move(edge: .bottom)))
-                            }
-
-                            TurnComposerAutocompletePanels(
-                                state: autocompleteState,
-                                onSelectFileAutocomplete: onSelectFileAutocomplete,
-                                onSelectSkillAutocomplete: onSelectSkillAutocomplete,
-                                onSelectPluginAutocomplete: onSelectPluginAutocomplete,
-                                onSelectSlashCommand: onSelectSlashCommand,
-                                onSelectCodeReviewTarget: onSelectCodeReviewTarget,
-                                onSelectForkDestination: onSelectForkDestination,
-                                onCloseSlashCommandPanel: onCloseSlashCommandPanel
-                            )
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .offset(y: -8)
-            }
-            .zIndex(2)
-
-            // Kept as a separate component so the lower meta bar can evolve without reopening this file.
-            TurnComposerSecondaryBar(
-                isInputFocused: isInputFocused.wrappedValue,
-                isEmptyThread: isEmptyThread,
-                hasWorkingDirectory: hasWorkingDirectory,
-                isWorktreeProject: isWorktreeProject,
-                selectedAccessMode: selectedAccessMode,
-                contextWindowUsage: contextWindowUsage,
-                rateLimitBuckets: rateLimitBuckets,
-                isLoadingRateLimits: isLoadingRateLimits,
-                rateLimitsErrorMessage: rateLimitsErrorMessage,
-                shouldAutoRefreshUsageStatus: shouldAutoRefreshUsageStatus,
-                showsGitBranchSelector: showsGitBranchSelector,
-                isGitBranchSelectorEnabled: isGitBranchSelectorEnabled,
-                availableGitBranchTargets: availableGitBranchTargets,
-                gitBranchesCheckedOutElsewhere: gitBranchesCheckedOutElsewhere,
-                gitWorktreePathsByBranch: gitWorktreePathsByBranch,
-                selectedGitBaseBranch: selectedGitBaseBranch,
-                currentGitBranch: currentGitBranch,
-                gitDefaultBranch: gitDefaultBranch,
-                isLoadingGitBranchTargets: isLoadingGitBranchTargets,
-                isSwitchingGitBranch: isSwitchingGitBranch,
-                isCreatingGitWorktree: isCreatingGitWorktree,
-                onSelectGitBranch: onSelectGitBranch,
-                onCreateGitBranch: onCreateGitBranch,
-                onSelectGitBaseBranch: onSelectGitBaseBranch,
-                onRefreshGitBranches: onRefreshGitBranches,
-                onRefreshUsageStatus: onRefreshUsageStatus,
-                onSelectAccessMode: onSelectAccessMode,
-                canHandOffToWorktree: canHandOffToWorktree,
-                onTapCreateWorktree: onTapCreateWorktree
-            )
         }
         .padding(.horizontal, 12)
         .padding(.top, 4)
@@ -766,10 +778,12 @@ private struct ComposerPreviewContent: View {
             onSetPlanModeArmed: { _ in },
             onRemoveAttachment: { _ in },
             onStopTurn: { _ in },
-            onInputChangedForFileAutocomplete: { _ in },
-            onInputChangedForSkillAutocomplete: { _ in },
-            onInputChangedForPluginAutocomplete: { _ in },
-            onInputChangedForSlashCommandAutocomplete: { _ in },
+            onInputChanged: TurnComposerInputChangeHandler(
+                handleFileAutocomplete: { _ in },
+                handleSkillAutocomplete: { _ in },
+                handlePluginAutocomplete: { _ in },
+                handleSlashCommandAutocomplete: { _ in }
+            ),
             onSelectFileAutocomplete: { _ in },
             onSelectSkillAutocomplete: { _ in },
             onSelectPluginAutocomplete: { _ in },

@@ -50,7 +50,7 @@ struct OnboardingStepPage: View {
                             )
                             .frame(width: 140, height: 140)
 
-                        Image(systemName: icon)
+                        RemodexIcon.image(systemName: icon)
                             .font(.system(size: 32, weight: .light))
                             .foregroundStyle(.white)
                             .frame(width: 80, height: 80)

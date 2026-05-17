@@ -24,7 +24,7 @@ struct ArchivedChatsView: View {
         Group {
             if archivedThreads.isEmpty {
                 VStack(spacing: 12) {
-                    Image(systemName: "archivebox")
+                    RemodexIcon.image(systemName: "archivebox")
                         .font(.system(size: 36))
                         .foregroundStyle(.tertiary)
                     Text("No archived chats")
@@ -94,7 +94,7 @@ struct ArchivedChatsView: View {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 codex.unarchiveThread(thread.id)
             } label: {
-                Label("Unarchive", systemImage: "tray.and.arrow.up")
+                RemodexIcon.label("Unarchive", systemName: "tray.and.arrow.up")
             }
             .tint(.blue)
         }
@@ -103,7 +103,7 @@ struct ArchivedChatsView: View {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 codex.unarchiveThread(thread.id)
             } label: {
-                Label("Unarchive", systemImage: "tray.and.arrow.up")
+                RemodexIcon.label("Unarchive", systemName: "tray.and.arrow.up")
             }
 
             Button(role: .destructive) {

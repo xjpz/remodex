@@ -11,7 +11,7 @@ import XCTest
 final class CodexServiceThreadListTests: XCTestCase {
     private static var retainedServices: [CodexService] = []
 
-    func testListThreadsRequestsUncappedActiveThreadsAndAppServerSourceKinds() async throws {
+    func testListThreadsRequestsCappedActiveThreadsAndAppServerSourceKinds() async throws {
         let service = makeService()
         service.isConnected = true
         service.isInitialized = true
@@ -46,13 +46,89 @@ final class CodexServiceThreadListTests: XCTestCase {
 
         try await service.listThreads()
 
-        XCTAssertNil(activeRequestParams?["limit"])
-        XCTAssertNil(archivedRequestParams?["limit"])
+        XCTAssertEqual(activeRequestParams?["limit"]?.intValue, 70)
+        XCTAssertEqual(archivedRequestParams?["limit"]?.intValue, 10)
         XCTAssertEqual(archivedRequestParams?["archived"]?.boolValue, true)
         XCTAssertEqual(
             activeRequestParams?["sourceKinds"]?.arrayValue?.compactMap(\.stringValue),
             ["cli", "vscode", "appServer", "exec", "unknown"]
         )
+    }
+
+    func testListThreadsPublishesActiveThreadsBeforeArchivedFetchCompletes() async throws {
+        let service = makeService()
+        service.isConnected = true
+        service.isInitialized = true
+
+        var archivedContinuation: CheckedContinuation<RPCMessage, Error>?
+
+        service.requestTransportOverride = { method, params in
+            guard method == "thread/list" else {
+                return RPCMessage(id: .string(UUID().uuidString), result: .object([:]), includeJSONRPC: false)
+            }
+
+            let isArchived = params?.objectValue?["archived"]?.boolValue ?? false
+            if isArchived {
+                return try await withCheckedThrowingContinuation { continuation in
+                    archivedContinuation = continuation
+                }
+            }
+
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "threads": .array([
+                        .object([
+                            "id": .string("thread-active"),
+                            "title": .string("Active thread"),
+                        ]),
+                    ]),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        let listTask = Task { @MainActor in
+            try await service.listThreads()
+        }
+
+        for _ in 0..<100 where service.threads.first?.id != "thread-active" {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(service.threads.map(\.id), ["thread-active"])
+        XCTAssertTrue(service.isLoadingThreads)
+
+        for _ in 0..<100 where archivedContinuation == nil {
+            await Task.yield()
+        }
+
+        guard let archivedContinuation else {
+            XCTFail("Expected archived thread/list request to be in flight")
+            listTask.cancel()
+            return
+        }
+
+        archivedContinuation.resume(
+            returning: RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "threads": .array([
+                        .object([
+                            "id": .string("thread-archived"),
+                            "title": .string("Archived thread"),
+                        ]),
+                    ]),
+                ]),
+                includeJSONRPC: false
+            )
+        )
+
+        try await listTask.value
+
+        XCTAssertTrue(service.threads.contains(where: { $0.id == "thread-active" }))
+        XCTAssertTrue(service.threads.contains(where: { $0.id == "thread-archived" }))
+        XCTAssertFalse(service.isLoadingThreads)
     }
 
     func testRealtimeSyncKeepsThreadListRequestsCapped() async {

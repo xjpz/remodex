@@ -36,6 +36,7 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
   const turnsById = new Map();
   let activeTurnId = "";
   let sessionThreadId = normalizeString(threadId);
+  const skippedCallIds = new Set();
 
   const lines = String(content || "").split(/\r?\n/);
   for (let index = 0; index < lines.length; index += 1) {
@@ -110,6 +111,9 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
       if (!payload) {
         continue;
       }
+      if (shouldSkipResponseItemForHistory(payload, skippedCallIds)) {
+        continue;
+      }
       const turn = ensureTurn(
         turns,
         turnsById,
@@ -167,6 +171,67 @@ function normalizeResponseItemForHistory(payload, lineNumber) {
   }
 
   return item;
+}
+
+// Filters desktop transcript internals that are stored as response items but are not chat history.
+function shouldSkipResponseItemForHistory(payload, skippedCallIds) {
+  const type = normalizeHistoryItemType(payload.type);
+  const callId = normalizeString(payload.call_id) || normalizeString(payload.callId);
+
+  if (type === "tool_call_output" && callId && skippedCallIds.has(callId)) {
+    return true;
+  }
+
+  if (type === "tool_call" && isSubagentOrchestrationCall(payload)) {
+    if (callId) {
+      skippedCallIds.add(callId);
+    }
+    return true;
+  }
+
+  if (type !== "message") {
+    return false;
+  }
+
+  const role = normalizeString(payload.role).toLowerCase();
+  if (role && role !== "user" && role !== "assistant") {
+    return true;
+  }
+
+  if (role === "user" && isSubagentNotificationMessage(payload)) {
+    return true;
+  }
+
+  return false;
+}
+
+function isSubagentOrchestrationCall(payload) {
+  const name = normalizeString(payload.name).toLowerCase();
+  return name === "spawn_agent"
+    || name === "wait_agent"
+    || name === "send_input"
+    || name === "resume_agent"
+    || name === "close_agent";
+}
+
+function isSubagentNotificationMessage(payload) {
+  const text = responseItemMessageText(payload).trimStart();
+  return text.startsWith("<subagent_notification>");
+}
+
+function responseItemMessageText(payload) {
+  const directText = normalizeString(payload.text) || normalizeString(payload.message);
+  if (directText) {
+    return directText;
+  }
+
+  const content = Array.isArray(payload.content) ? payload.content : [];
+  return content
+    .map((item) => objectValue(item))
+    .filter(Boolean)
+    .map((item) => normalizeString(item.text) || normalizeString(objectValue(item.data)?.text))
+    .filter(Boolean)
+    .join("\n");
 }
 
 function normalizeHistoryItemType(rawType) {

@@ -93,6 +93,36 @@ final class CodexThreadRuntimeOverrideTests: XCTestCase {
         )
     }
 
+    func testComposerShowsLoadingForPersistedDefaultBeforeModelListRefresh() {
+        let suiteName = "CodexThreadRuntimeOverrideTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set("gpt-5.5", forKey: CodexService.selectedModelIdDefaultsKey)
+
+        let service = CodexService(defaults: defaults)
+        Self.retainedServices.append(service)
+        service.isBootstrappingConnectionSync = true
+
+        XCTAssertTrue(service.availableModels.isEmpty)
+        XCTAssertNil(service.visibleSelectedModelIDForComposer())
+        XCTAssertTrue(service.isRuntimeSelectionLoadingForComposer())
+        XCTAssertEqual(service.runtimeModelIdentifierForTurn(), "gpt-5.5")
+    }
+
+    func testComposerKeepsCustomPersistedModelVisibleDuringBootstrap() {
+        let suiteName = "CodexThreadRuntimeOverrideTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set("gpt-5.3-codex", forKey: CodexService.selectedModelIdDefaultsKey)
+
+        let service = CodexService(defaults: defaults)
+        Self.retainedServices.append(service)
+        service.isBootstrappingConnectionSync = true
+
+        XCTAssertEqual(service.visibleSelectedModelIDForComposer(), "gpt-5.3-codex")
+        XCTAssertFalse(service.isRuntimeSelectionLoadingForComposer())
+    }
+
     func testDefaultModelFallbackIsNotPersistedBeforeModelListRefresh() {
         let suiteName = "CodexThreadRuntimeOverrideTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName) ?? .standard

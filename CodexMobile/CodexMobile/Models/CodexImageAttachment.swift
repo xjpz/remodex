@@ -101,12 +101,12 @@ struct CodexImageAttachment: Identifiable, Codable, Hashable, Sendable {
         return id
     }
 
-    private var normalizedPayloadDataURL: String? {
+    nonisolated private var normalizedPayloadDataURL: String? {
         let trimmed = payloadDataURL?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    private var normalizedSourceURL: String? {
+    nonisolated private var normalizedSourceURL: String? {
         let trimmed = sourceURL?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !trimmed.isEmpty, !Self.isInlineImageDataURL(trimmed) else {
             return nil
@@ -114,7 +114,7 @@ struct CodexImageAttachment: Identifiable, Codable, Hashable, Sendable {
         return trimmed
     }
 
-    private static func isInlineImageDataURL(_ value: String) -> Bool {
+    nonisolated private static func isInlineImageDataURL(_ value: String) -> Bool {
         value.lowercased().hasPrefix("data:image")
     }
 }

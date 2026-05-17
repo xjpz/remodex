@@ -157,7 +157,7 @@ private struct TurnTimelineToolBurstView: View {
                     }
                 } label: {
                     HStack(spacing: 6) {
-                        Image(systemName: "chevron.right")
+                        RemodexIcon.image(systemName: "chevron.right")
                             .font(AppFont.system(size: 10, weight: .semibold))
                             .foregroundStyle(.secondary)
                             .rotationEffect(.degrees(isExpanded ? 90 : 0))
@@ -234,7 +234,7 @@ private struct TurnTimelinePreviousMessagesView: View {
                     Text(title)
                         .font(AppFont.body(weight: .regular))
                         .foregroundStyle(.secondary)
-                    Image(systemName: "chevron.right")
+                    RemodexIcon.image(systemName: "chevron.right")
                         .font(AppFont.system(size: 14, weight: .semibold))
                         .foregroundStyle(.secondary)
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))

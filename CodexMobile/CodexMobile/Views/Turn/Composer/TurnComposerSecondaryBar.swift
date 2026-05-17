@@ -2,7 +2,8 @@
 // Purpose: Owns the secondary composer controls shown below the main input card.
 // Layer: View Component
 // Exports: TurnComposerSecondaryBar
-// Depends on: SwiftUI, UIKit, TurnGitBranchSelector, ContextWindowProgressRing, CodexWorktreeIcon
+// Depends on: SwiftUI, UIKit, TurnGitBranchSelector, ContextWindowProgressRing,
+//             CodexWorktreeMenuLabelRow, ComposerPillLabel
 
 import SwiftUI
 import UIKit
@@ -42,13 +43,24 @@ struct TurnComposerSecondaryBar: View {
     let onTapCreateWorktree: () -> Void
 
     private let branchLabelColor = Color(.secondaryLabel)
+    private let accessControlSize: CGFloat = 36
+    // Icona dentro il cerchio access-mode: dimensionata per matchare il rapporto
+    // icon/container dei ComposerPillLabel (~0.55) invece di scalare col font ambient,
+    // altrimenti l'asset central-shield-* (viewBox 24 con padding interno) risulta
+    // visibilmente più piccolo delle icone "Local"/"main".
+    private let accessControlIconSize: CGFloat = 20
     private var branchTextFont: Font { AppFont.subheadline() }
-    private var branchChevronFont: Font { AppFont.system(size: 9, weight: .regular) }
     private var runtimeLabelTitle: String {
         if !hasWorkingDirectory {
             return "Quick Chat"
         }
         return isWorktreeProject ? "Worktree" : "Local"
+    }
+    private var runtimeIconSystemName: String {
+        if !hasWorkingDirectory {
+            return "bubble.left.and.bubble.right"
+        }
+        return isWorktreeProject ? "arrow.triangle.branch" : "laptopcomputer"
     }
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
@@ -105,21 +117,16 @@ struct TurnComposerSecondaryBar: View {
                 }
             }
         } label: {
-            HStack(spacing: 6) {
-                Image(systemName: selectedAccessMode == .fullAccess
-                      ? "hand.thumbsup"
-                      : "hand.raised")
-                    .font(branchTextFont)
-
-                Image(systemName: "chevron.down")
-                    .font(branchChevronFont)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .adaptiveGlass(.regular, in: Capsule())
-            .foregroundStyle(branchLabelColor)
-            .contentShape(Capsule())
+            RemodexIcon.image(
+                systemName: selectedAccessMode == .fullAccess ? "hand.thumbsup" : "hand.raised",
+                size: accessControlIconSize
+            )
+            .frame(width: accessControlSize, height: accessControlSize)
+            .adaptiveGlass(.regular, in: Circle())
+            .foregroundStyle(selectedAccessMode == .fullAccess ? .orange : branchLabelColor)
+            .contentShape(Circle())
         }
+        .menuIndicator(.hidden)
         .tint(branchLabelColor)
     }
 
@@ -132,7 +139,7 @@ struct TurnComposerSecondaryBar: View {
                         UIApplication.shared.open(url)
                     }
                 } label: {
-                    Label("Cloud", systemImage: "cloud")
+                    RemodexIcon.label("Cloud", systemName: "cloud")
                 }
 
                 Button {
@@ -153,36 +160,18 @@ struct TurnComposerSecondaryBar: View {
                     // Returning to Local is intentionally disabled until it can move code + branch safely.
                 } label: {
                     TurnComposerRuntimeMenuRow(title: "Local") {
-                        Image(systemName: "laptopcomputer")
+                        RemodexIcon.image(systemName: "laptopcomputer")
                     }
                 }
                 .disabled(true)
             }
         } label: {
-            HStack(spacing: 6) {
-                if !hasWorkingDirectory {
-                    Image(systemName: "bubble.left.and.bubble.right")
-                        .font(branchTextFont)
-                } else if isWorktreeProject {
-                    CodexWorktreeIcon(pointSize: 12, weight: .regular)
-                } else {
-                    Image(systemName: "laptopcomputer")
-                        .font(branchTextFont)
-                }
-
-                Text(runtimeLabelTitle)
-                    .font(branchTextFont)
-                    .fontWeight(.regular)
-                    .lineLimit(1)
-
-                Image(systemName: "chevron.down")
-                    .font(branchChevronFont)
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .adaptiveGlass(.regular, in: Capsule())
-            .foregroundStyle(branchLabelColor)
-            .contentShape(Capsule())
+            ComposerPillLabel(
+                title: runtimeLabelTitle,
+                iconSystemName: runtimeIconSystemName,
+                foregroundColor: branchLabelColor,
+                titleFont: branchTextFont
+            )
         }
         .tint(branchLabelColor)
     }

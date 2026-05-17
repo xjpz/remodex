@@ -55,7 +55,8 @@ struct TerminalFallbackSurface: View {
 
     private func sendInput() {
         guard !input.isEmpty else { return }
-        onInput("\(input)\n")
+        // Match a real terminal Return key so raw-mode prompts can accept the submitted line.
+        onInput("\(input)\r")
         input = ""
     }
 

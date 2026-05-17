@@ -46,7 +46,7 @@ struct CopyBlockButton: View {
         HStack(spacing: 4) {
             Group {
                 if showCopiedFeedback {
-                    Image(systemName: "checkmark")
+                    RemodexIcon.image(systemName: "checkmark")
                         .font(AppFont.system(size: 11, weight: .medium))
                 } else {
                     Image("copy")

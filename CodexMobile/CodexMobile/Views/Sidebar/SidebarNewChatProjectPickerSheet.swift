@@ -24,7 +24,7 @@ struct SidebarNewChatProjectPickerSheet: View {
                     } label: {
                         projectRow(
                             icon: AnyView(
-                                Image(systemName: "folder.badge.plus")
+                                RemodexIcon.image(systemName: "folder.badge.plus")
                                     .font(AppFont.body(weight: .medium))
                                     .foregroundStyle(.secondary)
                             ),
@@ -53,7 +53,7 @@ struct SidebarNewChatProjectPickerSheet: View {
                                             if choice.iconSystemName == "arrow.triangle.branch" {
                                                 CodexWorktreeIcon(pointSize: 16, weight: .medium)
                                             } else {
-                                                Image(systemName: choice.iconSystemName)
+                                                RemodexIcon.image(systemName: choice.iconSystemName)
                                                     .font(AppFont.body(weight: .medium))
                                             }
                                         }
@@ -94,7 +94,7 @@ struct SidebarNewChatProjectPickerSheet: View {
                     } label: {
                         projectRow(
                             icon: AnyView(
-                                Image(systemName: "bubble.left.and.bubble.right")
+                                RemodexIcon.image(systemName: "bubble.left.and.bubble.right")
                                     .font(AppFont.body(weight: .medium))
                                     .foregroundStyle(.secondary)
                             ),
@@ -143,7 +143,7 @@ struct SidebarNewChatProjectPickerSheet: View {
                 }
             }
 
-            Image(systemName: "chevron.right")
+            RemodexIcon.image(systemName: "chevron.right")
                 .font(AppFont.caption(weight: .semibold))
                 .foregroundStyle(.tertiary)
         }

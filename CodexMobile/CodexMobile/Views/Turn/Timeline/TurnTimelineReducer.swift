@@ -379,7 +379,7 @@ enum TurnTimelineReducer {
         guard message.text.utf8.count <= smallWhitespaceScanByteLimit else {
             return false
         }
-        ThinkingDisclosureParser.normalizedThinkingContent(from: message.text).isEmpty
+        return ThinkingDisclosureParser.normalizedThinkingContent(from: message.text).isEmpty
     }
 
     // Merges streaming/history snapshots only when their visible reasoning content overlaps.

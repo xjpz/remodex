@@ -14,7 +14,7 @@ struct SidebarFloatingSettingsButton: View {
             HapticFeedback.shared.triggerImpactFeedback()
             action()
         }) {
-            Image(systemName: "gearshape.fill")
+            RemodexIcon.image(systemName: "gearshape.fill")
                 .font(AppFont.system(size: 17, weight: .semibold))
                 .foregroundStyle(colorScheme == .dark ? Color.white : Color.black)
                 .frame(width: 44, height: 44)
@@ -35,7 +35,7 @@ struct SidebarFloatingTerminalButton: View {
             HapticFeedback.shared.triggerImpactFeedback()
             action()
         }) {
-            Image(systemName: "terminal.fill")
+            RemodexIcon.image(systemName: "terminal.fill")
                 .font(AppFont.system(size: 17, weight: .semibold))
                 .foregroundStyle(colorScheme == .dark ? Color.white : Color.black)
                 .frame(width: 44, height: 44)

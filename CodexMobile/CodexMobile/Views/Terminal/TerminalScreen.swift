@@ -609,28 +609,37 @@ struct TerminalScreen: View {
         return value
     }
 
+    // Only the first character is modified by Ctrl; the rest of the chunk is
+    // passed through verbatim. Without preserving the tail, a paste or
+    // autocomplete arriving while Ctrl was armed would drop everything past
+    // the first character.
     private static func applyCtrlModifier(_ input: String) -> String {
         guard let firstCharacter = input.first else {
             return input
         }
 
+        let tail = String(input.dropFirst())
+
         let lowerCharacter = Character(firstCharacter.lowercased())
         if let scalar = lowerCharacter.unicodeScalars.first,
            lowerCharacter >= "a",
            lowerCharacter <= "z" {
-            return String(UnicodeScalar(scalar.value - 96) ?? scalar)
+            let modified = String(UnicodeScalar(scalar.value - 96) ?? scalar)
+            return modified + tail
         }
 
+        let modified: String
         switch firstCharacter {
-        case "@": return "\u{0}"
-        case "[": return "\u{1B}"
-        case "\\": return "\u{1C}"
-        case "]": return "\u{1D}"
-        case "^": return "\u{1E}"
-        case "_": return "\u{1F}"
-        case "?": return "\u{7F}"
-            default: return input
+        case "@": modified = "\u{0}"
+        case "[": modified = "\u{1B}"
+        case "\\": modified = "\u{1C}"
+        case "]": modified = "\u{1D}"
+        case "^": modified = "\u{1E}"
+        case "_": modified = "\u{1F}"
+        case "?": modified = "\u{7F}"
+        default: return input
         }
+        return modified + tail
     }
 
     private static func modifiedArrowSequence(_ input: String, modifier: TerminalPendingModifier) -> String? {

@@ -59,7 +59,7 @@ struct OnboardingWelcomePage: View {
                     }
 
                     HStack(spacing: 6) {
-                        Image(systemName: "lock.shield.fill")
+                        RemodexIcon.image(systemName: "lock.shield.fill")
                             .font(.system(size: 11, weight: .medium))
                         Text("End-to-end encrypted")
                             .font(AppFont.caption(weight: .medium))

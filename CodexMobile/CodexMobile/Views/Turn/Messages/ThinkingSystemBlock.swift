@@ -121,7 +121,7 @@ private struct ThinkingDisclosureView: View {
                 }
             } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Image(systemName: "chevron.right")
+                    RemodexIcon.image(systemName: "chevron.right")
                         .font(AppFont.system(size: 10, weight: .semibold))
                         .foregroundStyle(hasDetail ? .secondary : .tertiary)
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
