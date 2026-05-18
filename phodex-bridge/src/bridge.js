@@ -1259,6 +1259,33 @@ function startBridge({
 
     return readBridgePreferences();
   }
+
+  function stopBridge() {
+    if (isShuttingDown) {
+      return;
+    }
+
+    isShuttingDown = true;
+    bridgeWakeAssertion.stop();
+    clearReconnectTimer();
+    clearRelayWatchdog();
+    bridgeStatusPublisher.stopHeartbeat();
+    stopContextUsageWatcher();
+    rolloutLiveMirror?.stopAll();
+    desktopIpcActionFollower?.stopAll();
+    desktopRefresher.handleTransportReset();
+    failBridgeManagedCodexRequests(new Error("Bridge stopped before the request completed."));
+    forwardedRequestMethodsById.clear();
+
+    if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) {
+      socket.close();
+    }
+    codex.shutdown();
+  }
+
+  return {
+    stop: stopBridge,
+  };
 }
 
 // Holds a single macOS idle-sleep assertion for as long as the bridge process stays alive.

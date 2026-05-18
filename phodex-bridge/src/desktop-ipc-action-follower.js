@@ -54,6 +54,7 @@ function createDesktopIpcActionFollower({
     onDisconnect,
   });
   const rawStatesByThreadId = new Map();
+  const assistantMessageTextsByThreadId = new Map();
   const pendingRoutesByRequestId = new Map();
   const activeThreadIds = new Set();
   const recoveringThreadIds = new Set();
@@ -84,6 +85,7 @@ function createDesktopIpcActionFollower({
 
   function stopAll() {
     rawStatesByThreadId.clear();
+    assistantMessageTextsByThreadId.clear();
     pendingRoutesByRequestId.clear();
     activeThreadIds.clear();
     recoveringThreadIds.clear();
@@ -132,11 +134,13 @@ function createDesktopIpcActionFollower({
     }
 
     rawStatesByThreadId.set(threadId, nextState);
+    syncProjectedAssistantDeltas(threadId, previousState, nextState);
     syncProjectedActions(threadId, projectPendingDesktopActions(threadId, nextState));
   }
 
   function onDisconnect() {
     rawStatesByThreadId.clear();
+    assistantMessageTextsByThreadId.clear();
     pendingRoutesByRequestId.clear();
     recoveringThreadIds.clear();
     queuedChangesByThreadId.clear();
@@ -273,7 +277,32 @@ function createDesktopIpcActionFollower({
     }
 
     rawStatesByThreadId.set(threadId, nextState);
+    syncProjectedAssistantDeltas(threadId, baselineState, nextState);
     syncProjectedActions(threadId, projectPendingDesktopActions(threadId, nextState));
+  }
+
+  function syncProjectedAssistantDeltas(threadId, previousState, nextState) {
+    const previousTexts = assistantMessageTextsByThreadId.get(threadId);
+    if (!previousTexts && !previousState) {
+      assistantMessageTextsByThreadId.set(threadId, snapshotAssistantMessageTexts(nextState));
+      return;
+    }
+
+    const notifications = projectDesktopAssistantDeltaNotifications(
+      threadId,
+      previousState,
+      nextState,
+      previousTexts || snapshotAssistantMessageTexts(previousState)
+    );
+    if (notifications.length === 0) {
+      assistantMessageTextsByThreadId.set(threadId, snapshotAssistantMessageTexts(nextState));
+      return;
+    }
+
+    for (const notification of notifications) {
+      sendApplicationResponse(JSON.stringify(notification));
+    }
+    assistantMessageTextsByThreadId.set(threadId, snapshotAssistantMessageTexts(nextState));
   }
 
   return {
@@ -550,6 +579,93 @@ function projectPendingDesktopActions(threadId, conversationState) {
     .filter(Boolean);
 }
 
+// Desktop IPC exposes full conversation snapshots/patches, not app-server assistant delta events.
+// Mirror only suffix growth for assistant rows so phones can render the same live text progression.
+function projectDesktopAssistantDeltaNotifications(
+  threadId,
+  previousState,
+  nextState,
+  previousTexts = snapshotAssistantMessageTexts(previousState)
+) {
+  const nextMessages = collectAssistantMessages(nextState);
+  const notifications = [];
+
+  for (const message of nextMessages) {
+    const previousText = previousTexts.get(message.key) || "";
+    if (!message.text || !message.text.startsWith(previousText) || message.text.length <= previousText.length) {
+      continue;
+    }
+
+    const delta = message.text.slice(previousText.length);
+    notifications.push({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId,
+        turnId: message.turnId,
+        itemId: message.itemId,
+        delta,
+      },
+    });
+  }
+
+  return notifications;
+}
+
+function snapshotAssistantMessageTexts(conversationState) {
+  return new Map(collectAssistantMessages(conversationState).map((message) => [message.key, message.text]));
+}
+
+function collectAssistantMessages(conversationState) {
+  const turns = Array.isArray(conversationState?.turns) ? conversationState.turns : [];
+  const messages = [];
+  for (const turn of turns) {
+    const turnId = readString(turn?.id) || readString(turn?.turnId) || readString(turn?.turn_id);
+    const items = Array.isArray(turn?.items) ? turn.items : [];
+    for (const item of items) {
+      if (!isAssistantMessageItem(item)) {
+        continue;
+      }
+
+      const itemId = readString(item?.id) || readString(item?.itemId) || readString(item?.item_id);
+      const text = assistantMessageText(item);
+      if (!turnId || !itemId) {
+        continue;
+      }
+
+      messages.push({
+        key: `${turnId}:${itemId}`,
+        turnId,
+        itemId,
+        text,
+      });
+    }
+  }
+  return messages;
+}
+
+function isAssistantMessageItem(item) {
+  const type = normalizeToken(item?.type);
+  if (type === "agentmessage" || type === "assistantmessage") {
+    return true;
+  }
+  return type === "message" && normalizeToken(item?.role) === "assistant";
+}
+
+function assistantMessageText(item) {
+  const directText = readString(item?.text) || readString(item?.message);
+  if (directText) {
+    return directText;
+  }
+
+  const content = Array.isArray(item?.content) ? item.content : [];
+  return content
+    .map((entry) => entry && typeof entry === "object" ? entry : null)
+    .filter(Boolean)
+    .map((entry) => readString(entry.text) || readString(entry?.data?.text))
+    .filter(Boolean)
+    .join("");
+}
+
 function projectPendingDesktopAction(threadId, request) {
   const requestId = requestIdKey(request.id);
   const method = readString(request.method);
@@ -674,6 +790,10 @@ function writeFrame(socket, payload, callback) {
 }
 
 function resolveDefaultIpcSocketPath() {
+  if (process.platform === "win32") {
+    return "\\\\.\\pipe\\codex-ipc";
+  }
+
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
   return path.join(os.tmpdir(), "codex-ipc", `ipc-${uid}.sock`);
 }
@@ -699,6 +819,12 @@ function readString(value) {
   return typeof value === "string" && value.trim() ? value.trim() : "";
 }
 
+function normalizeToken(value) {
+  return typeof value === "string"
+    ? value.toLowerCase().replace(/[_-\s]+/g, "")
+    : "";
+}
+
 function cloneJSON(value) {
   return JSON.parse(JSON.stringify(value));
 }
@@ -715,6 +841,7 @@ module.exports = {
   applyConversationStateChange,
   createDesktopIpcActionFollower,
   desktopFollowerPayloadForResponse,
+  projectDesktopAssistantDeltaNotifications,
   projectPendingDesktopActions,
   resolveDefaultIpcSocketPath,
   seedConversationStateFromThreadRead,
