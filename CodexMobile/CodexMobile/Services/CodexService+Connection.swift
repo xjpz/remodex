@@ -683,6 +683,8 @@ extension CodexService {
         postConnectSyncTask?.cancel()
         postConnectSyncTask = nil
         postConnectSyncToken = nil
+        threadListFetchTaskByLimit.values.forEach { $0.task.cancel() }
+        threadListFetchTaskByLimit.removeAll()
         cancelAllPerThreadRefreshWork()
     }
 

@@ -87,13 +87,7 @@ extension CodexService {
 
         let activeLimit = limit ?? recentActiveThreadListLimit
 
-        let activeThreads = try await fetchServerThreads(limit: activeLimit) { _, accumulatedThreads in
-            self.reconcileLocalThreadsWithServer(accumulatedThreads)
-
-            if self.activeThreadId == nil {
-                self.activeThreadId = self.firstLiveThreadID()
-            }
-        }
+        let activeThreads = try await fetchCoalescedServerThreads(limit: activeLimit)
         reconcileLocalThreadsWithServer(activeThreads)
 
         if activeThreadId == nil {
@@ -796,6 +790,26 @@ enum CodexThreadStartProjectBinding {
 }
 
 extension CodexService {
+    // Reuses an in-flight thread/list request for matching caps so launch sync and sidebar refresh share one RPC.
+    func fetchCoalescedServerThreads(limit: Int) async throws -> [CodexThread] {
+        if let existingFetch = threadListFetchTaskByLimit[limit] {
+            return try await existingFetch.task.value
+        }
+
+        let fetchID = UUID()
+        let task = Task { @MainActor in
+            defer {
+                if threadListFetchTaskByLimit[limit]?.id == fetchID {
+                    threadListFetchTaskByLimit[limit] = nil
+                }
+            }
+            return try await fetchServerThreads(limit: limit)
+        }
+        threadListFetchTaskByLimit[limit] = (id: fetchID, task: task)
+
+        return try await task.value
+    }
+
     func fetchServerThreads(
         limit: Int? = nil,
         onPage: ((_ page: [CodexThread], _ accumulatedThreads: [CodexThread]) -> Void)? = nil

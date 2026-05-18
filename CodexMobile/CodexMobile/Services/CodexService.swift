@@ -552,6 +552,8 @@ final class CodexService {
     @ObservationIgnored var canonicalHistoryReconcileTaskByThreadID: [String: Task<Void, Never>] = [:]
     // Tracks delayed retry timers for canonical reconcile so teardown can cancel the backoff too.
     @ObservationIgnored var canonicalHistoryReconcileRetryTaskByThreadID: [String: Task<Void, Never>] = [:]
+    // Coalesces sidebar/bootstrap thread/list refreshes so launch paths do not duplicate the same fetch.
+    @ObservationIgnored var threadListFetchTaskByLimit: [Int: (id: UUID, task: Task<[CodexThread], Error>)] = [:]
     var isAppInForeground = true
     var threadListSyncTask: Task<Void, Never>?
     var activeThreadSyncTask: Task<Void, Never>?
