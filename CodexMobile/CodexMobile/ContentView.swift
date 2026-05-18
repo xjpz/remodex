@@ -22,6 +22,7 @@ private enum RootSheetRoute: Identifiable, Equatable {
 }
 
 enum ContentNavigationRoute: Hashable {
+    case newChatOpening
     case thread(id: String)
     case settings
     case terminal(preferredWorkingDirectory: String?)
@@ -63,6 +64,12 @@ struct ContentView: View {
     @State private var sidebarGestureAutoCommitted = false
     @State private var sidebarSelectionSuppressedUntil: Date?
     @State private var isOpeningNewChatFromSidebar = false
+    // Settings is presented as a `fullScreenCover` instead of being pushed
+    // onto `navigationPath` so the gear button works even when the sidebar
+    // header is hosted inside an iOS 26 `safeAreaBar`, whose Liquid Glass
+    // chrome can interfere with navigation-stack pushes from buttons nested
+    // inside the bar.
+    @State private var isShowingSettingsCover = false
     @AppStorage("codex.hasSeenOnboarding") private var hasSeenOnboarding = false
     @AppStorage("codex.whatsNew.lastPresentedVersion") private var lastPresentedWhatsNewVersion = ""
 
@@ -238,6 +245,27 @@ struct ContentView: View {
             } message: {
                 Text("Paste the pairing code shown in the terminal on your computer or in your phone shell.")
             }
+            // Settings rides on a full-screen cover instead of `navigationPath`
+            // so the gear tap inside the iOS 26 `safeAreaBar` header always
+            // surfaces a destination, even if push routing is being swallowed
+            // by the Liquid Glass bar chrome.
+            .fullScreenCover(isPresented: $isShowingSettingsCover) {
+                settingsCoverContent
+            }
+    }
+
+    private var settingsCoverContent: some View {
+        NavigationStack {
+            SettingsView()
+                .adaptiveNavigationBar()
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Done") {
+                            isShowingSettingsCover = false
+                        }
+                    }
+                }
+        }
     }
 
     private var rootContentWithBannerOverlay: some View {
@@ -454,6 +482,8 @@ struct ContentView: View {
     @ViewBuilder
     private func navigationDestination(for route: ContentNavigationRoute) -> some View {
         switch route {
+        case .newChatOpening:
+            NewChatOpeningStateView()
         case .thread(let threadID):
             nativeThreadDestination(threadID: threadID)
         case .settings:
@@ -487,6 +517,61 @@ struct ContentView: View {
             },
             onOpenThread: { thread in
                 openThreadFromSidebar(thread)
+            },
+            connectionEmptyStatePanel: {
+                sidebarConnectionEmptyStatePanel
+            },
+            connectionEmptyStateFooter: {
+                sidebarConnectionEmptyStateFooter
+            }
+        )
+    }
+
+    // Builds the connect/reconnect/scan-QR card shown inside the sidebar's
+    // empty state. Lives here so all sheet/scanner state stays owned by the
+    // root view; the sidebar just slots the panel into its centered layout.
+    private var sidebarConnectionEmptyStatePanel: some View {
+        SidebarConnectionEmptyStatePanel(
+            connectionPhase: homeConnectionPhase,
+            trustedPairPresentation: codex.trustedPairPresentation,
+            securityLabel: codex.secureConnectionState.statusLabel,
+            hasReconnectCandidate: codex.hasReconnectCandidate,
+            isWakingSavedMacDisplay: isWakingSavedMacDisplay,
+            shouldOfferWakeAction: shouldOfferWakeSavedMacDisplayAction,
+            isPreparingManualScanner: isPreparingManualScanner,
+            isResolvingManualPairingCode: isResolvingManualPairingCode,
+            offlinePrimaryButtonTitle: codex.hasReconnectCandidate ? "Reconnect" : "Scan QR Code",
+            onPrimaryAction: {
+                if homeConnectionPhase == .offline && !codex.hasReconnectCandidate {
+                    presentAutomaticScanner()
+                    return
+                }
+
+                Task {
+                    await viewModel.toggleConnection(codex: codex)
+                }
+            },
+            onScanNewQR: {
+                presentManualScannerAfterStoppingReconnect()
+            },
+            onPairWithCode: {
+                presentManualPairingEntryAfterStoppingReconnect()
+            },
+            onWakeMacDisplay: {
+                wakeSavedMacDisplay()
+            }
+        )
+    }
+
+    // Pinned footer that surfaces the long status message and the Forget Pair
+    // action just above the bottom action bar, keeping the centered panel
+    // focused on the primary reconnect CTA.
+    private var sidebarConnectionEmptyStateFooter: some View {
+        SidebarConnectionEmptyStateFooter(
+            statusMessage: codex.lastErrorMessage,
+            canForgetPair: codex.hasReconnectCandidate && !codex.isConnected,
+            onForgetPair: {
+                codex.forgetReconnectCandidate()
             }
         )
     }
@@ -952,12 +1037,10 @@ struct ContentView: View {
     }
 
     private func openSettingsFromSidebar() {
-        if shouldPresentSidebarAsNavigation {
-            appendNavigationRoute(.settings)
-        } else {
+        if !shouldPresentSidebarAsNavigation {
             closeSidebar()
-            appendNavigationRoute(.settings)
         }
+        isShowingSettingsCover = true
     }
 
     // Prevents a close-swipe release from also activating whichever sidebar row was under the finger.
@@ -974,11 +1057,18 @@ struct ContentView: View {
         return false
     }
 
+    // Pushes a real native route before `thread/start` returns so compact sidebar users see progress immediately.
     private func setNewChatOpeningState(_ isOpening: Bool) {
         isOpeningNewChatFromSidebar = isOpening
         if isOpening {
             selectedThread = nil
             codex.activeThreadId = nil
+            if shouldPresentSidebarAsNavigation {
+                navigationPath = [.newChatOpening]
+            }
+        } else if shouldPresentSidebarAsNavigation,
+                  navigationPath.last == .newChatOpening {
+            navigationPath.removeLast()
         }
     }
 

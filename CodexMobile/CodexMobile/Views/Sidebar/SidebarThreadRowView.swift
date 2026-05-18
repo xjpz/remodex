@@ -11,6 +11,7 @@ struct SidebarThreadRowView: View {
     let isSelected: Bool
     let runBadgeState: CodexThreadRunBadgeState?
     let timingLabel: String?
+    let showsTimestampRefreshIndicator: Bool
     let isPinned: Bool
     let pinnedProjectLabel: String?
     let childSubagentCount: Int
@@ -21,6 +22,17 @@ struct SidebarThreadRowView: View {
     var onPinToggle: (() -> Void)? = nil
     var onArchiveToggle: (() -> Void)? = nil
     var onDelete: (() -> Void)? = nil
+
+    // Read here only so we can re-inject `codex` across the
+    // `UIHostingController` boundary that `.uiKitContextMenu` adds: SwiftUI
+    // environment values do NOT propagate through a representable-built
+    // host, so without this re-injection `SidebarSubagentNameLabel` would
+    // fault on `@Environment(CodexService.self)` inside the wrapped row.
+    // The row body itself never touches any property on `codex`, so the
+    // "no service observation in the parent row" invariant documented on
+    // `SidebarSubagentNameLabel` is preserved (only that nested label
+    // subscribes to `codex.subagentIdentityVersion`).
+    @Environment(CodexService.self) private var codex
 
     @State private var renamePrompt = ThreadRenamePromptState()
 
@@ -34,12 +46,28 @@ struct SidebarThreadRowView: View {
         }
         .background {
             if isSelected {
-                Color(.tertiarySystemFill).opacity(0.8)
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                Color(.tertiarySystemFill).opacity(0.5)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
         }
         .padding(.horizontal, 6)
-        .contextMenu { contextMenuContent }
+        // Re-inject `codex` so `SidebarSubagentNameLabel` (which lives
+        // inside the row body and reads `@Environment(CodexService.self)`)
+        // still resolves the service after `.uiKitContextMenu` wraps the
+        // chain in a `UIHostingController`.
+        .environment(codex)
+        .uiKitContextMenu {
+            SidebarThreadContextMenu(
+                thread: thread,
+                isPinned: isPinned,
+                onCopySessionId: { UIPasteboard.general.string = thread.sessionId },
+                onRename: onRename.map { _ in { renamePrompt.present(currentTitle: thread.displayTitle) } },
+                onArchiveToggle: onArchiveToggle,
+                onPinToggle: onPinToggle,
+                onDelete: onDelete
+            )
+            .uiMenu()
+        }
         .threadRenamePrompt(state: $renamePrompt) { newName in
             onRename?(newName)
         }
@@ -48,55 +76,32 @@ struct SidebarThreadRowView: View {
     // MARK: - Parent row (no CodexService dependency)
 
     private var parentRow: some View {
-        Button(action: { HapticFeedback.shared.triggerImpactFeedback(style: .light); onTap() }) {
+        HapticButton(action: onTap) {
             HStack(alignment: .center, spacing: 8) {
                 // Keep trailing metadata inside the main stack so long titles truncate before it.
-                Group {
-                    if let pinnedProjectLabel, !pinnedProjectLabel.isEmpty {
-                        HStack(spacing: 6) {
-                            if isPinned && !thread.isSubagent {
-                                RemodexIcon.image(systemName: "pin.fill")
-                                    .font(AppFont.system(size: 10, weight: .semibold))
-                                    .foregroundStyle(.secondary)
-                            }
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        // Pinned glyph hidden on the row itself: pinned threads already
+                        // live under the "Pinned" section header, so the per-row badge
+                        // was redundant. Kept the `isPinned` plumbing for the context
+                        // menu / accessibility / future use.
+                        // if isPinned && !thread.isSubagent {
+                        //     SidebarPinIcon(style: .rowBadge)
+                        // }
 
-                            Text(thread.displayTitle)
-                                .font(AppFont.body())
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                                .foregroundStyle(.primary)
+                        Text(thread.displayTitle)
+                            .font(AppFont.body())
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .foregroundStyle(.primary)
+                    }
 
-                            Text(pinnedProjectLabel)
-                                .font(AppFont.footnote())
-                                .foregroundStyle(.tertiary)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                                .layoutPriority(1)
-                        }
-                    } else {
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack(spacing: 6) {
-                                if isPinned && !thread.isSubagent {
-                                    RemodexIcon.image(systemName: "pin.fill")
-                                        .font(AppFont.system(size: 10, weight: .semibold))
-                                        .foregroundStyle(.secondary)
-                                }
-
-                                Text(thread.displayTitle)
-                                    .font(AppFont.body())
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
-                                    .foregroundStyle(.primary)
-                            }
-
-                            if thread.syncState == .archivedLocal {
-                                Text("Stored locally")
-                                    .font(AppFont.footnote())
-                                    .foregroundStyle(.tertiary)
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
-                            }
-                        }
+                    if thread.syncState == .archivedLocal {
+                        Text("Stored locally")
+                            .font(AppFont.footnote())
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -108,8 +113,7 @@ struct SidebarThreadRowView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .padding(.leading, 4)
-        .padding(.trailing, 12)
+        .padding(.horizontal, 12)
         .padding(.vertical, 12)
     }
 
@@ -126,16 +130,24 @@ struct SidebarThreadRowView: View {
 
             expansionToggleButton
 
-            threadStatusIconSlot(pointSize: 12)
+            SidebarThreadStatusIcon(thread: thread, pointSize: 12)
 
-            // Run-state dot supersedes the timestamp so an active/recent run is visible at a glance.
+            if let pinnedProjectLabel, !pinnedProjectLabel.isEmpty {
+                Text(pinnedProjectLabel)
+                    .font(AppFont.footnote())
+                    .foregroundStyle(SidebarForegroundStyle.meta)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+
+            // Snapshot-only pinned rows need an honest metadata hint until opening refreshes them.
             if let runBadgeState {
                 SidebarThreadRunBadgeView(state: runBadgeState)
+                    .frame(width: 28, alignment: .trailing)
+            } else if showsTimestampRefreshIndicator {
+                SidebarTimestampRefreshIndicator(size: .parent)
             } else if let timingLabel {
-                Text(timingLabel)
-                    .font(AppFont.footnote())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                SidebarTimingLabel(text: timingLabel, size: .parent)
             }
         }
     }
@@ -143,7 +155,7 @@ struct SidebarThreadRowView: View {
     // MARK: - Subagent row (CodexService isolated in SubagentNameLabel)
 
     private var subagentRow: some View {
-        Button(action: { HapticFeedback.shared.triggerImpactFeedback(style: .light); onTap() }) {
+        HapticButton(action: onTap) {
             HStack(alignment: .center, spacing: 8) {
                 SidebarSubagentNameLabel(thread: thread)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -155,22 +167,20 @@ struct SidebarThreadRowView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .padding(.leading, 4)
-        .padding(.trailing, 12)
-        .padding(.vertical, 4)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
     }
 
     private var subagentTrailingMeta: some View {
         HStack(spacing: 4) {
             expansionToggleButton
 
-            threadStatusIconSlot(pointSize: 11)
+            SidebarThreadStatusIcon(thread: thread, pointSize: 11)
 
-            if let timingLabel {
-                Text(timingLabel)
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+            if showsTimestampRefreshIndicator {
+                SidebarTimestampRefreshIndicator(size: .subagent)
+            } else if let timingLabel {
+                SidebarTimingLabel(text: timingLabel, size: .subagent)
             }
         }
     }
@@ -180,10 +190,7 @@ struct SidebarThreadRowView: View {
     @ViewBuilder
     private var expansionToggleButton: some View {
         if childSubagentCount > 0, let onToggleSubagents {
-            Button(action: {
-                HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                onToggleSubagents()
-            }) {
+            HapticButton(action: onToggleSubagents) {
                 RemodexIcon.image(systemName: isSubagentExpanded ? "chevron.down" : "chevron.right")
                     .font(AppFont.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
@@ -192,90 +199,6 @@ struct SidebarThreadRowView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel(isSubagentExpanded ? "Collapse subagents" : "Expand subagents")
-        }
-    }
-
-    // Keeps fork ancestry and worktree scope visually distinct in the single metadata icon slot.
-    private func threadStatusIconSlot(pointSize: CGFloat) -> some View {
-        Group {
-            threadStatusIcon(pointSize: pointSize)
-        }
-        .id(threadStatusIconIdentity)
-        .frame(width: pointSize + 2, alignment: .center)
-    }
-
-    // Gives SwiftUI an explicit diff key when the row flips between fork/worktree/no badge.
-    private var threadStatusIconIdentity: String {
-        if thread.isForkedThread {
-            return "fork"
-        }
-        if thread.isManagedWorktreeProject {
-            return "worktree"
-        }
-        return "none"
-    }
-
-    // Keeps fork ancestry and worktree scope visually distinct in the single metadata icon slot.
-    @ViewBuilder
-    private func threadStatusIcon(pointSize: CGFloat) -> some View {
-        if thread.isForkedThread {
-            CodexForkIcon(pointSize: pointSize)
-                .foregroundStyle(.secondary)
-        } else if thread.isManagedWorktreeProject {
-            CodexWorktreeIcon(pointSize: pointSize, weight: .medium)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    @ViewBuilder
-    private var contextMenuContent: some View {
-        Button {
-            HapticFeedback.shared.triggerImpactFeedback(style: .light)
-            UIPasteboard.general.string = thread.sessionId
-        } label: {
-            Label("Copy sessionId", systemImage: "doc.on.doc")
-        }
-
-        if onRename != nil {
-            Button {
-                HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                renamePrompt.present(currentTitle: thread.displayTitle)
-            } label: {
-                Label("Rename", systemImage: "pencil")
-            }
-        }
-
-        if let onArchiveToggle {
-            Button {
-                HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                onArchiveToggle()
-            } label: {
-                RemodexIcon.label(
-                    thread.syncState == .archivedLocal ? "Unarchive" : "Archive",
-                    systemName: thread.syncState == .archivedLocal ? "tray.and.arrow.up" : "archivebox"
-                )
-            }
-        }
-
-        if let onPinToggle, thread.syncState != .archivedLocal, !thread.isSubagent {
-            Button {
-                HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                onPinToggle()
-            } label: {
-                RemodexIcon.label(
-                    isPinned ? "Unpin" : "Pin",
-                    systemName: isPinned ? "pin.slash" : "pin"
-                )
-            }
-        }
-
-        if let onDelete {
-            Button(role: .destructive) {
-                HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                onDelete()
-            } label: {
-                Label("Remove from Phone", systemImage: "trash")
-            }
         }
     }
 }

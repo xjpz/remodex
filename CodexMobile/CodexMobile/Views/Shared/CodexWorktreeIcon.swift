@@ -25,11 +25,13 @@ struct CodexWorktreeIcon: View {
     var body: some View {
         // Native SF Symbol: keeps the worktree icon aligned with the system
         // appearance the rest of the OS uses for branch/worktree affordances.
+        // Rotated 90° so the trunk reads horizontally (handoff direction).
         RemodexIcon.image(
             systemName: "arrow.triangle.branch",
             size: pointSize,
             weight: weight
         )
+        .rotationEffect(.degrees(90))
     }
 
     static func menuImage(pointSize: CGFloat = 13, weight: UIImage.SymbolWeight = .regular) -> UIImage {
@@ -38,7 +40,7 @@ struct CodexWorktreeIcon: View {
             .withRenderingMode(.alwaysTemplate) else {
             return UIImage()
         }
-        return symbol
+        return symbol.rotated(byDegrees: 90) ?? symbol
     }
 }
 
@@ -56,5 +58,32 @@ struct CodexWorktreeMenuLabelRow: View {
                 .frame(width: pointSize, height: pointSize)
             Text(title)
         }
+    }
+}
+
+private extension UIImage {
+    // Bitmap-level rotation so the rotated glyph is baked into the UIImage we
+    // hand off to UIKit menus (UIAction.image / Image(uiImage:)). Applying a
+    // SwiftUI `.rotationEffect` after the fact wouldn't survive the trip
+    // through UIKit menu rendering.
+    func rotated(byDegrees degrees: CGFloat) -> UIImage? {
+        let radians = degrees * .pi / 180
+        let rotatedSize = CGRect(origin: .zero, size: size)
+            .applying(CGAffineTransform(rotationAngle: radians))
+            .integral
+            .size
+        let renderer = UIGraphicsImageRenderer(size: rotatedSize)
+        let rendered = renderer.image { context in
+            let cgContext = context.cgContext
+            cgContext.translateBy(x: rotatedSize.width / 2, y: rotatedSize.height / 2)
+            cgContext.rotate(by: radians)
+            draw(in: CGRect(
+                x: -size.width / 2,
+                y: -size.height / 2,
+                width: size.width,
+                height: size.height
+            ))
+        }
+        return rendered.withRenderingMode(renderingMode)
     }
 }

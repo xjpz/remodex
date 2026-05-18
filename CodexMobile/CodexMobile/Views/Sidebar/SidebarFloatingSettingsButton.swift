@@ -10,12 +10,8 @@ struct SidebarFloatingSettingsButton: View {
     let action: () -> Void
 
     var body: some View {
-        Button(action: {
-            HapticFeedback.shared.triggerImpactFeedback()
-            action()
-        }) {
-            RemodexIcon.image(systemName: "gearshape.fill")
-                .font(AppFont.system(size: 17, weight: .semibold))
+        HapticButton(hapticStyle: .medium, action: action) {
+            RemodexIcon.image(systemName: "gearshape.fill", size: 17, weight: .semibold)
                 .foregroundStyle(colorScheme == .dark ? Color.white : Color.black)
                 .frame(width: 44, height: 44)
                 .adaptiveGlass(.regular, in: Circle())
@@ -31,12 +27,8 @@ struct SidebarFloatingTerminalButton: View {
     let action: () -> Void
 
     var body: some View {
-        Button(action: {
-            HapticFeedback.shared.triggerImpactFeedback()
-            action()
-        }) {
-            RemodexIcon.image(systemName: "terminal.fill")
-                .font(AppFont.system(size: 17, weight: .semibold))
+        HapticButton(hapticStyle: .medium, action: action) {
+            RemodexIcon.image(systemName: "terminal.fill", size: 17, weight: .semibold)
                 .foregroundStyle(colorScheme == .dark ? Color.white : Color.black)
                 .frame(width: 44, height: 44)
                 .adaptiveGlass(.regular, in: Circle())

@@ -5,9 +5,11 @@
 //          share one visual treatment.
 // Layer: View Component
 // Exports: SidebarHeaderView, SidebarOverflowMenuActions
-// Depends on: SwiftUI, SidebarToolbarIconButton, RemodexIcon, AdaptiveGlassModifier
+// Depends on: SwiftUI, UIKit, SidebarToolbarIconButton, RemodexIcon,
+//             AdaptiveGlassModifier, UIKitMenuButton, HapticFeedback
 
 import SwiftUI
+import UIKit
 
 struct SidebarOverflowMenuActions {
     var isEnabled: Bool
@@ -29,20 +31,20 @@ struct SidebarHeaderView: View {
             HStack(spacing: 10) {
                 appLogo
                 Text("Remodex")
-                    .font(AppFont.system(size: 28, weight: .medium))
+                    .font(AppFont.title3(weight: .medium))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.75)
 
                 Spacer(minLength: 0)
 
+                overflowMenuButton
+
                 SidebarToolbarIconButton(
                     icon: .systemImage("gearshape.fill"),
                     accessibilityLabel: "Settings",
                     action: overflowActions.onOpenSettings
                 )
-
-                overflowMenuButton
 
                 if showsCloseButton {
                     hamburgerButton
@@ -55,11 +57,12 @@ struct SidebarHeaderView: View {
     }
 
     private var appLogo: some View {
-        Image("AppLogo")
-            .resizable()
-            .scaledToFit()
-            .frame(width: 26, height: 26)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        // Custom SF Symbol so the glyph picks up the same font-driven
+        // scaling SwiftUI gives native symbols; semibold has its own asset
+        // because interpolated weights are too subtle for this custom mark.
+        Image("remodex_symbol_semibold")
+            .font(.system(size: 20))
+            .foregroundStyle(.primary)
     }
 
     // Close affordance kept inside the sidebar so both drawer and full-width
@@ -73,49 +76,56 @@ struct SidebarHeaderView: View {
     }
 
     private var overflowMenuButton: some View {
-        Menu {
-            Section {
-                Button {
-                    overflowActions.onNewChat()
-                } label: {
-                    overflowMenuLabel("New Chat", systemName: "square.and.pencil")
-                }
-
-                Button {
-                    overflowActions.onQuickChat()
-                } label: {
-                    overflowMenuLabel("Quick Chat", systemName: "message")
-                }
-
-                Button {
-                    overflowActions.onNewProject()
-                } label: {
-                    overflowMenuLabel("New Project", systemName: "folder.badge.plus")
-                }
-            }
-        } label: {
-            // Reuses the same toolbar button shell so the ellipsis trigger
-            // matches the surrounding settings + hamburger glyphs exactly.
-            SidebarToolbarIconButton(
-                icon: .systemImage("ellipsis"),
-                accessibilityLabel: "More actions",
-                action: {}
-            )
-            .allowsHitTesting(false)
-        }
+        // Routed through `UIKitMenuButton` so the leading glyphs render
+        // through `RemodexIcon.menuUIImage` at the SF Symbol menu glyph
+        // metric, matching the rest of the sidebar's UIKit-rendered menus.
+        UIKitMenuButton(
+            label: {
+                // Reuses the same toolbar button shell so the ellipsis trigger
+                // matches the surrounding settings + hamburger glyphs exactly.
+                SidebarToolbarIconButton(
+                    icon: .systemImage("ellipsis"),
+                    accessibilityLabel: "More actions",
+                    action: {}
+                )
+                .allowsHitTesting(false)
+            },
+            menu: { buildOverflowMenu() }
+        )
         .disabled(!overflowActions.isEnabled)
         .opacity(overflowActions.isEnabled ? 1 : 0.4)
         .accessibilityLabel("More actions")
     }
 
-    // UIKit-backed Menu rows cannot host arbitrary SwiftUI icon views reliably;
-    // pass the mapped asset name directly so custom central-* icons render.
-    @ViewBuilder
-    private func overflowMenuLabel(_ title: String, systemName: String) -> some View {
-        if let assetName = RemodexIcon.assetName(for: systemName) {
-            Label(title, image: assetName)
-        } else {
-            Label(title, systemImage: systemName)
+    private func buildOverflowMenu() -> UIMenu {
+        UIMenu(
+            title: "",
+            options: [.displayInline],
+            children: [
+                overflowAction(title: "New Chat", systemName: "square.and.pencil") {
+                    overflowActions.onNewChat()
+                },
+                overflowAction(title: "Quick Chat", systemName: "message") {
+                    overflowActions.onQuickChat()
+                },
+                overflowAction(title: "New Project", systemName: "folder.badge.plus") {
+                    overflowActions.onNewProject()
+                },
+            ]
+        )
+    }
+
+    private func overflowAction(
+        title: String,
+        systemName: String,
+        handler: @escaping () -> Void
+    ) -> UIAction {
+        UIAction(
+            title: title,
+            image: RemodexIcon.menuUIImage(systemName: systemName)
+        ) { _ in
+            HapticFeedback.shared.triggerImpactFeedback(style: .light)
+            handler()
         }
     }
 }

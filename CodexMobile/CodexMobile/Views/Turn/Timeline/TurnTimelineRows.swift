@@ -34,6 +34,17 @@ struct AssistantBlockAccessoryState: Equatable {
         )
     }
 
+    func mergingRehomedAccessoryState(_ state: AssistantBlockAccessoryState) -> AssistantBlockAccessoryState {
+        AssistantBlockAccessoryState(
+            copyText: copyText ?? state.copyText,
+            showsRunningIndicator: showsRunningIndicator || state.showsRunningIndicator,
+            blockDiffText: blockDiffText ?? state.blockDiffText,
+            blockDiffEntries: blockDiffEntries ?? state.blockDiffEntries,
+            blockRevertPresentation: blockRevertPresentation ?? state.blockRevertPresentation,
+            blockRevertMessage: blockRevertMessage ?? state.blockRevertMessage
+        )
+    }
+
     private static func blockRevertMessageSignature(_ message: CodexMessage?) -> AssistantBlockRevertMessageSignature? {
         guard let message else { return nil }
         return AssistantBlockRevertMessageSignature(message)
@@ -130,7 +141,7 @@ private struct TurnTimelineToolBurstView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 14) {
             ForEach(group.pinnedMessages) { message in
                 TurnTimelineMessageRow(
                     message: message,
@@ -299,7 +310,7 @@ struct TurnTimelineRowsSection: View {
     let onLoadEarlierMessages: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 14) {
             if shouldWarmRecentTailProgressively {
                 HStack(spacing: 8) {
                     ProgressView()

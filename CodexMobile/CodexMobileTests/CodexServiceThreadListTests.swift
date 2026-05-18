@@ -17,7 +17,7 @@ final class CodexServiceThreadListTests: XCTestCase {
         service.isInitialized = true
 
         var activeRequestParams: RPCObject?
-        var archivedRequestParams: RPCObject?
+        var requestCount = 0
 
         service.requestTransportOverride = { method, params in
             guard method == "thread/list" else {
@@ -28,12 +28,8 @@ final class CodexServiceThreadListTests: XCTestCase {
                 )
             }
 
-            let isArchived = params?.objectValue?["archived"]?.boolValue ?? false
-            if isArchived {
-                archivedRequestParams = params?.objectValue
-            } else {
-                activeRequestParams = params?.objectValue
-            }
+            requestCount += 1
+            activeRequestParams = params?.objectValue
 
             return RPCMessage(
                 id: .string(UUID().uuidString),
@@ -47,32 +43,25 @@ final class CodexServiceThreadListTests: XCTestCase {
         try await service.listThreads()
 
         XCTAssertEqual(activeRequestParams?["limit"]?.intValue, 70)
-        XCTAssertEqual(archivedRequestParams?["limit"]?.intValue, 10)
-        XCTAssertEqual(archivedRequestParams?["archived"]?.boolValue, true)
+        XCTAssertNil(activeRequestParams?["archived"])
+        XCTAssertEqual(requestCount, 1)
         XCTAssertEqual(
             activeRequestParams?["sourceKinds"]?.arrayValue?.compactMap(\.stringValue),
             ["cli", "vscode", "appServer", "exec", "unknown"]
         )
     }
 
-    func testListThreadsPublishesActiveThreadsBeforeArchivedFetchCompletes() async throws {
+    func testListThreadsPublishesActiveThreadsFromSingleFetch() async throws {
         let service = makeService()
         service.isConnected = true
         service.isInitialized = true
-
-        var archivedContinuation: CheckedContinuation<RPCMessage, Error>?
 
         service.requestTransportOverride = { method, params in
             guard method == "thread/list" else {
                 return RPCMessage(id: .string(UUID().uuidString), result: .object([:]), includeJSONRPC: false)
             }
 
-            let isArchived = params?.objectValue?["archived"]?.boolValue ?? false
-            if isArchived {
-                return try await withCheckedThrowingContinuation { continuation in
-                    archivedContinuation = continuation
-                }
-            }
+            XCTAssertNil(params?.objectValue?["archived"])
 
             return RPCMessage(
                 id: .string(UUID().uuidString),
@@ -88,46 +77,8 @@ final class CodexServiceThreadListTests: XCTestCase {
             )
         }
 
-        let listTask = Task { @MainActor in
-            try await service.listThreads()
-        }
-
-        for _ in 0..<100 where service.threads.first?.id != "thread-active" {
-            await Task.yield()
-        }
-
+        try await service.listThreads()
         XCTAssertEqual(service.threads.map(\.id), ["thread-active"])
-        XCTAssertTrue(service.isLoadingThreads)
-
-        for _ in 0..<100 where archivedContinuation == nil {
-            await Task.yield()
-        }
-
-        guard let archivedContinuation else {
-            XCTFail("Expected archived thread/list request to be in flight")
-            listTask.cancel()
-            return
-        }
-
-        archivedContinuation.resume(
-            returning: RPCMessage(
-                id: .string(UUID().uuidString),
-                result: .object([
-                    "threads": .array([
-                        .object([
-                            "id": .string("thread-archived"),
-                            "title": .string("Archived thread"),
-                        ]),
-                    ]),
-                ]),
-                includeJSONRPC: false
-            )
-        )
-
-        try await listTask.value
-
-        XCTAssertTrue(service.threads.contains(where: { $0.id == "thread-active" }))
-        XCTAssertTrue(service.threads.contains(where: { $0.id == "thread-archived" }))
         XCTAssertFalse(service.isLoadingThreads)
     }
 
@@ -137,19 +88,15 @@ final class CodexServiceThreadListTests: XCTestCase {
         service.isInitialized = true
 
         var activeRequestParams: RPCObject?
-        var archivedRequestParams: RPCObject?
+        var requestCount = 0
 
         service.requestTransportOverride = { method, params in
             guard method == "thread/list" else {
                 return RPCMessage(id: .string(UUID().uuidString), result: .object([:]), includeJSONRPC: false)
             }
 
-            let isArchived = params?.objectValue?["archived"]?.boolValue ?? false
-            if isArchived {
-                archivedRequestParams = params?.objectValue
-            } else {
-                activeRequestParams = params?.objectValue
-            }
+            requestCount += 1
+            activeRequestParams = params?.objectValue
 
             return RPCMessage(
                 id: .string(UUID().uuidString),
@@ -161,7 +108,8 @@ final class CodexServiceThreadListTests: XCTestCase {
         await service.syncThreadsList()
 
         XCTAssertEqual(activeRequestParams?["limit"]?.intValue, 70)
-        XCTAssertEqual(archivedRequestParams?["limit"]?.intValue, 10)
+        XCTAssertNil(activeRequestParams?["archived"])
+        XCTAssertEqual(requestCount, 1)
     }
 
     func testSortThreadsUsesUpdatedAtBeforeCreatedAtFallback() {
@@ -188,6 +136,36 @@ final class CodexServiceThreadListTests: XCTestCase {
             sorted.map(\.id),
             ["later-by-updated-at", "later-by-created-at", "oldest-thread"]
         )
+    }
+
+    func testUserRenameSurvivesStaleThreadListRefreshForPinnedThread() {
+        let service = makeService()
+        service.threads = [
+            CodexThread(
+                id: "pinned-thread",
+                title: "Original server title",
+                name: "Original server title",
+                createdAt: Date(timeIntervalSince1970: 10),
+                updatedAt: Date(timeIntervalSince1970: 20),
+                cwd: "/Users/dev/project"
+            ),
+        ]
+        service.pinThread("pinned-thread")
+
+        service.renameThread("pinned-thread", name: "Renamed locally")
+        service.reconcileLocalThreadsWithServer([
+            CodexThread(
+                id: "pinned-thread",
+                title: "Original server title",
+                name: "Original server title",
+                createdAt: Date(timeIntervalSince1970: 10),
+                updatedAt: Date(timeIntervalSince1970: 30),
+                cwd: "/Users/dev/project"
+            ),
+        ])
+
+        XCTAssertEqual(service.thread(for: "pinned-thread")?.displayTitle, "Renamed locally")
+        XCTAssertEqual(service.pinnedThreadSnapshotsByRootID["pinned-thread"]?.first?.displayTitle, "Renamed locally")
     }
 
     private func makeService() -> CodexService {

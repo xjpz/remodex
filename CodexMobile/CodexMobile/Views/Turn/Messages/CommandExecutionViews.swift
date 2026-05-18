@@ -538,11 +538,11 @@ struct CommandExecutionCardBody: View {
         HStack(spacing: 0) {
             (
                 Text(display.verb)
-                    .font(AppFont.subheadline(weight: .medium))
+                    .font(AppFont.body(weight: .regular))
                     .foregroundStyle(.secondary)
                 +
                 Text(" " + display.target)
-                    .font(AppFont.subheadline())
+                    .font(AppFont.body(weight: .regular))
                     .foregroundStyle(.tertiary)
             )
             .lineLimit(1)
@@ -551,7 +551,7 @@ struct CommandExecutionCardBody: View {
             Spacer(minLength: 6)
 
             Text(statusLabel)
-                .font(AppFont.caption())
+                .font(AppFont.body(weight: .regular))
                 .foregroundStyle(accent == .failed ? Color.red : Color.secondary.opacity(0.5))
 
             RemodexIcon.image(systemName: "chevron.right")

@@ -17,6 +17,8 @@ enum RemodexIcon {
         "arrow.up.right.square": "central-fork-code",
         "at": "central-at",
         "bell.badge": "central-bell-2",
+        "bolt": "central-lightning",
+        "bolt.fill": "central-lightning",
         "brain": "central-brain",
         "bubble.left.and.bubble.right": "central-bubble-5",
         "camera.fill": "central-camera-1",
@@ -27,10 +29,11 @@ enum RemodexIcon {
         "command": "central-cmd",
         "control": "central-control-key-left",
         "cube": "central-3d-box-top",
-        "desktopcomputer": "central-macbook-air",
-        "ellipsis": "central-dot-grid-1x3-horizontal",
+        "desktopcomputer": "central-imac",
+        "doc.on.doc": "copy",
         "doc.text": "central-page-text",
         "doc.text.magnifyingglass": "central-page-search-lines",
+        "ellipsis": "central-dot-grid-1x3-horizontal",
         "envelope": "central-email-1",
         "exclamationmark.circle": "central-exclamation-circle",
         "exclamationmark.circle.fill": "central-exclamation-circle-bold",
@@ -81,7 +84,7 @@ enum RemodexIcon {
         "speedometer": "central-dashboard-fast",
         "remodex.fork": "central-fork-code",
         "remodex.git-branch": "git-branch",
-        "square.and.pencil": "central-edit-big",
+        "square.and.pencil": "central-compose-pencil",
         "square.stack.3d.up": "central-layers-three",
         "square.stack.3d.up.slash": "central-layers-behind",
         "terminal": "central-console",
@@ -120,6 +123,20 @@ enum RemodexIcon {
         }
     }
 
+    // SwiftUI Menu / contextMenu strip Label's `icon:` closure and only render
+    // the title when given the closure-based initializer. The `Label(_, image:)`
+    // and `Label(_, systemImage:)` initializers ARE respected, so this helper
+    // routes through whichever one preserves the Central asset (or SF Symbol).
+    // Use this whenever a Label is the direct child of a Menu / Picker / contextMenu.
+    @ViewBuilder
+    static func menuLabel(_ title: String, systemName: String) -> some View {
+        if let assetName = assetName(for: systemName) {
+            Label(title, image: assetName)
+        } else {
+            Label(title, systemImage: systemName)
+        }
+    }
+
     static func uiImage(systemName: String, withConfiguration configuration: UIImage.Configuration? = nil) -> UIImage? {
         guard let assetName = assetName(for: systemName) else {
             return UIImage(systemName: systemName, withConfiguration: configuration)
@@ -129,6 +146,48 @@ enum RemodexIcon {
             return image
         }
         return image?.withConfiguration(configuration)
+    }
+
+    /// Returns a UIImage suitable for `UIAction(image:)` / `UIMenu(image:)`
+    /// rows so Central artwork visually matches the SF Symbol "menu glyph"
+    /// metric that UIKit applies to native symbols inside menus.
+    ///
+    /// Why this exists:
+    /// - SF Symbols rendered via `UIImage(systemName:)` get a built-in menu
+    ///   glyph treatment from UIKit (~17pt body-equivalent, regular weight).
+    /// - `UIImage(named:)` for our Central SVG assets does NOT get that
+    ///   treatment: UIMenu draws them at their intrinsic asset size (24pt)
+    ///   so they read visibly larger than the SF Symbols in the same row.
+    /// - Pre-rendering the Central asset to `menuGlyphPointSize` × that size
+    ///   as a template image makes the menu row draw it at the matching
+    ///   metric, restoring visual parity row-to-row.
+    ///
+    /// Dynamic Type is honored via `UIFontMetrics`, mirroring how SF Symbols
+    /// in menus scale with the user's preferred content size.
+    static func menuUIImage(systemName: String) -> UIImage? {
+        guard let assetName = assetName(for: systemName) else {
+            return UIImage(systemName: systemName)
+        }
+        guard let base = UIImage(named: assetName) else { return nil }
+        let pointSize = menuGlyphPointSize
+        let size = CGSize(width: pointSize, height: pointSize)
+        let format = UIGraphicsImageRendererFormat.default()
+        format.opaque = false
+        let renderer = UIGraphicsImageRenderer(size: size, format: format)
+        let resized = renderer.image { _ in
+            base.draw(in: CGRect(origin: .zero, size: size))
+        }
+        return resized.withRenderingMode(.alwaysTemplate)
+    }
+
+    // Larger than the ~17pt body-equivalent SF Symbol menu glyph: the
+    // Central artwork's thin stroke reads visually smaller than an SF Symbol
+    // at the same point size, so bumping to 20pt gives the custom glyphs
+    // the "a little bolder than native" feel the design calls for without
+    // going back to the original 24pt mismatch this helper was introduced
+    // to fix.
+    private static var menuGlyphPointSize: CGFloat {
+        UIFontMetrics.default.scaledValue(for: 20)
     }
 }
 

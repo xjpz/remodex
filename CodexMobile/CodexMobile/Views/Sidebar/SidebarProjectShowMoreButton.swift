@@ -2,7 +2,7 @@
 // Purpose: Localizes "show more" project-section button UI and animation state.
 // Layer: Sidebar UI component
 // Exports: SidebarProjectShowMoreButton
-// Depends on: SwiftUI, HapticFeedback
+// Depends on: SwiftUI, HapticButton
 
 import SwiftUI
 
@@ -13,13 +13,12 @@ struct SidebarProjectShowMoreButton: View {
     @State private var chevronRotated = false
 
     var body: some View {
-        Button {
-            HapticFeedback.shared.triggerImpactFeedback(style: .light)
+        HapticButton(action: {
             withAnimation(.easeInOut(duration: 0.2)) {
                 chevronRotated = true
                 reveal()
             }
-        } label: {
+        }) {
             HStack(spacing: 6) {
                 Text(hiddenCount > 0 ? "Show \(hiddenCount) more" : "Show more")
                 RemodexIcon.image(systemName: "chevron.down")

@@ -268,7 +268,7 @@ private struct TerminalRouteKeySegment: View {
                 label: Text("Modifier key")
             ) {
                 ForEach(TerminalPendingModifier.allCases, id: \.self) { modifier in
-                    RemodexIcon.label(modifier.menuTitle, systemName: modifier.menuSymbolName)
+                    RemodexIcon.menuLabel(modifier.menuTitle, systemName: modifier.menuSymbolName)
                         .tag(modifier)
                 }
             }

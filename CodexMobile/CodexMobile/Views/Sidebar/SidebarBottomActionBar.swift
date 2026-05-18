@@ -1,13 +1,13 @@
 // FILE: SidebarBottomActionBar.swift
 // Purpose: Bottom-anchored sidebar bar. Hosts the Terminal pill on the leading
-//          edge (same visual capsule used by the composer branch / runtime
-//          pills via `ComposerPillLabel`) and the primary Chat FAB on the
-//          trailing edge. iOS 26 routes through the shared adaptive glass API;
-//          iOS 18 keeps the accent pill fallback.
+//          edge and the primary Chat pill on the trailing edge. Both pills are
+//          built from the same reusable `SidebarActionPill` component so they
+//          share font, icon size, padding and capsule shape — only the style
+//          differs. iOS 26 wraps the pair in `AdaptiveGlassContainer` so the
+//          Terminal pill participates in the Liquid Glass sampling region.
 // Layer: View Component
 // Exports: SidebarBottomActionBar
-// Depends on: SwiftUI, ComposerPillLabel, RemodexIcon, AppFont,
-//             AdaptiveGlassModifier
+// Depends on: SwiftUI, SidebarActionPill, AdaptiveGlassModifier
 
 import SwiftUI
 
@@ -32,105 +32,52 @@ struct SidebarBottomActionBar: View {
         .padding(.bottom, 4)
     }
 
-    // MARK: - Terminal pill (shared visual with composer secondary bar)
+    // MARK: - Pills (built from the shared SidebarActionPill component)
 
-    // Reuses ComposerPillLabel so the Terminal entry point reads exactly like
-    // the runtime ("Local") and git branch ("main") pills under the chat
-    // input — same capsule, padding, mono subheadline font and glass surface.
-    private var terminalPill: some View {
-        Button {
-            HapticFeedback.shared.triggerImpactFeedback(style: .light)
-            onTapTerminal()
-        } label: {
-            ComposerPillLabel(
-                title: "Terminal",
-                iconSystemName: "terminal.fill",
-                titleFont: AppFont.mono(.subheadline),
-                titleWeight: .medium,
-                showsTrailingChevron: false
-            )
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Terminal")
+    private var terminalPill: SidebarActionPill {
+        SidebarActionPill(
+            title: "Terminal",
+            iconSystemName: "terminal.fill",
+            style: .glass,
+            hapticStyle: .light,
+            accessibilityLabel: "Terminal",
+            onTap: onTapTerminal
+        )
     }
 
-    // MARK: - iOS 26 (Liquid Glass)
+    private var chatPill: SidebarActionPill {
+        SidebarActionPill(
+            title: "Chat",
+            iconSystemName: "square.and.pencil",
+            style: .accent,
+            isEnabled: isChatEnabled,
+            isLoading: isCreatingThread,
+            accessibilityLabel: "New chat",
+            onTap: onTapChat
+        )
+    }
+
+    // MARK: - Layouts
 
     private var iOS26LiquidGlassLayout: some View {
-        // Groups the Terminal pill and Chat FAB in the same native Liquid
-        // Glass sampling region when the runtime and user preference allow it.
+        // Groups the Terminal pill and Chat pill in the same native Liquid
+        // Glass sampling region so Terminal's glass background stays
+        // consistent with the surrounding sidebar surface.
         AdaptiveGlassContainer(spacing: 10) {
-            HStack(spacing: 10) {
-                terminalPill
-                Spacer(minLength: 0)
-                chatGlassFAB
-            }
+            pillRow
         }
     }
-
-    private var chatGlassFAB: some View {
-        // No explicit .frame on the label: prominent glass button styling +
-        // `.controlSize(.large)` produce the canonical iOS 26 FAB size with
-        // the right glass padding around the glyph.
-        Button {
-            HapticFeedback.shared.triggerImpactFeedback()
-            onTapChat()
-        } label: {
-            if isCreatingThread {
-                ProgressView()
-                    .controlSize(.small)
-                    .tint(.white)
-            } else {
-                RemodexIcon.image(systemName: "square.and.pencil", size: 22, weight: .semibold)
-            }
-        }
-        .adaptiveGlassButtonStyle(.prominent)
-        .controlSize(.large)
-        .tint(.accentColor)
-        .disabled(!isChatEnabled || isCreatingThread)
-        .accessibilityLabel("New chat")
-    }
-
-    // MARK: - iOS 18 fallback (no Liquid Glass)
 
     private var iOS18FallbackLayout: some View {
+        pillRow
+    }
+
+    private var pillRow: some View {
         HStack(spacing: 10) {
             terminalPill
             Spacer(minLength: 0)
-            iOS18ChatPill
+            chatPill
         }
-    }
-
-    private var iOS18ChatPill: some View {
-        Button {
-            HapticFeedback.shared.triggerImpactFeedback()
-            onTapChat()
-        } label: {
-            HStack(spacing: 8) {
-                if isCreatingThread {
-                    ProgressView()
-                        .controlSize(.small)
-                        .tint(.white)
-                } else {
-                    RemodexIcon.image(systemName: "square.and.pencil", size: 18, weight: .semibold)
-                }
-
-                Text("Chat")
-                    .font(AppFont.subheadline(weight: .semibold))
-                    .lineLimit(1)
-            }
-            .foregroundStyle(Color.white)
-            .padding(.horizontal, 18)
-            .padding(.vertical, 12)
-            .background(
-                Capsule()
-                    .fill(isChatEnabled ? Color.accentColor : Color.accentColor.opacity(0.4))
-            )
-            .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .disabled(!isChatEnabled || isCreatingThread)
-        .accessibilityLabel("New chat")
     }
 }
 

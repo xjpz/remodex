@@ -184,6 +184,35 @@ extension TurnTimelineView {
         return updated
     }
 
+    static func rehomeHiddenAccessoryStates(
+        _ statesByMessageID: [String: AssistantBlockAccessoryState],
+        messages: [CodexMessage],
+        renderItems: [TurnTimelineRenderItem]
+    ) -> [String: AssistantBlockAccessoryState] {
+        let hostIDs = accessoryHostMessageIDs(in: renderItems)
+        guard !hostIDs.isEmpty else {
+            return statesByMessageID
+        }
+
+        var updated = statesByMessageID
+        for index in messages.indices {
+            let message = messages[index]
+            guard let hiddenState = updated[message.id],
+                  !hostIDs.contains(message.id),
+                  let targetID = nearestAccessoryHostID(
+                    before: index,
+                    messages: messages,
+                    hostIDs: hostIDs
+                  ) else {
+                continue
+            }
+
+            updated[message.id] = nil
+            updated[targetID] = updated[targetID]?.mergingRehomedAccessoryState(hiddenState) ?? hiddenState
+        }
+        return updated
+    }
+
     // Assistant rows can copy from their full action text; keep accessory copy state small.
     private static func rehomedFinalCopyText(for text: String) -> String? {
         guard hasMeaningfulBlockText(text),
@@ -223,6 +252,44 @@ extension TurnTimelineView {
             }
             if let state = statesByMessageID[candidate.id] {
                 return state
+            }
+        }
+        return nil
+    }
+
+    // Keeps running/copy accessories visible when projection hides the raw block end
+    // (for example an empty thinking placeholder or collapsed tool overflow).
+    private static func accessoryHostMessageIDs(in renderItems: [TurnTimelineRenderItem]) -> Set<String> {
+        var ids = Set<String>()
+        for item in renderItems {
+            switch item {
+            case .message(let message):
+                ids.insert(message.id)
+            case .toolBurst(let group):
+                ids.formUnion(group.pinnedMessages.map(\.id))
+            case .previousMessages:
+                break
+            }
+        }
+        return ids
+    }
+
+    private static func nearestAccessoryHostID(
+        before index: Int,
+        messages: [CodexMessage],
+        hostIDs: Set<String>
+    ) -> String? {
+        guard index > messages.startIndex else {
+            return nil
+        }
+
+        for candidateIndex in stride(from: index - 1, through: messages.startIndex, by: -1) {
+            let candidate = messages[candidateIndex]
+            if candidate.role == .user {
+                return nil
+            }
+            if hostIDs.contains(candidate.id) {
+                return candidate.id
             }
         }
         return nil

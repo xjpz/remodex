@@ -10,7 +10,7 @@
 import SwiftUI
 import UIKit
 
-// Keep Textual selection out of the scrolling timeline. This is shared by both
+// Keep RemodexTextKit selection out of the scrolling timeline. This is shared by both
 // plain markdown rows and Mermaid-interleaved markdown segments.
 let enablesInlineMarkdownSelectionInTimeline = false
 
@@ -533,7 +533,7 @@ struct MessageRow: View, Equatable {
             }
             return trailingAssistantImageReferences.isEmpty ? assistantBlockAccessoryState?.copyText : nil
         }()
-        return VStack(alignment: .leading, spacing: 8) {
+        return VStack(alignment: .leading, spacing: 4) {
             if let commentContent, commentContent.hasFindings {
                 VStack(alignment: .leading, spacing: 10) {
                     ForEach(commentContent.findings) { finding in
@@ -605,7 +605,8 @@ struct MessageRow: View, Equatable {
                         StreamingAssistantMarkdownTextView(
                             text: visibleAssistantTextWithoutImageSyntax,
                             enablesSelection: enablesInlineMarkdownSelectionInTimeline,
-                            constrainsToAvailableWidth: true
+                            constrainsToAvailableWidth: true,
+                            animatesReveal: showsStreamingAnimations
                         )
                     }
                 } else {
@@ -689,7 +690,7 @@ struct MessageRow: View, Equatable {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 UIPasteboard.general.string = selectableText
             } label: {
-                Label("Copy", systemImage: "doc.on.doc")
+                RemodexIcon.menuLabel("Copy", systemName: "doc.on.doc")
             }
         }
     }

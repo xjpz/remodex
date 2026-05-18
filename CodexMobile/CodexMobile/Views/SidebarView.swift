@@ -1,16 +1,25 @@
 // FILE: SidebarView.swift
 // Purpose: Orchestrates the sidebar experience with modular presentation components.
-//          Top: brand toolbar. Body: native scroll with search + project / chat list.
-//          Bottom: SidebarBottomActionBar with the primary Chat FAB (glass on
-//          iOS 26, accent pill on iOS 18).
+//          Top: brand toolbar hosted via `adaptiveTopBar` so the list scrolls
+//          beneath it. On iOS 26 this resolves to `safeAreaBar(edge:.top)`,
+//          which gives the bar the native Liquid Glass material + scroll-edge
+//          handoff used by the chat's system navigation bar. On iOS 18 it
+//          falls back to `safeAreaInset(edge:.top)` with an opaque header
+//          fill so nothing regresses. Body: native scroll with search +
+//          project / chat list, swapped for a centered connect/reconnect/scan-QR
+//          card when the relay is offline and no cached chats exist. The
+//          Projects/Chats scope picker routes rootless chats separately from
+//          project groups. Bottom: SidebarBottomActionBar with the primary Chat
+//          FAB (glass on iOS 26, accent pill on iOS 18).
 // Layer: View
 // Exports: SidebarView
 // Depends on: CodexService, SidebarHeaderView, SidebarThreadListView,
-//             SidebarBottomActionBar, SidebarSearchField
+//             SidebarBottomActionBar, SidebarSearchField,
+//             SidebarConnectionEmptyStatePanel, SidebarConnectionEmptyStateFooter
 
 import SwiftUI
 
-struct SidebarView: View {
+struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: View>: View {
     @Environment(CodexService.self) private var codex
 
     @Binding var selectedThread: CodexThread?
@@ -23,8 +32,16 @@ struct SidebarView: View {
     let onOpenTerminal: () -> Void
     let onNewChatCreationStateChange: (Bool) -> Void
     let onOpenThread: (CodexThread) -> Void
+    // Centered connect/reconnect card shown when the relay is offline and the
+    // sidebar has no cached chats. ContentView owns the underlying connection
+    // state and actions; the sidebar just slots the panel into the empty area.
+    @ViewBuilder let connectionEmptyStatePanel: () -> ConnectionEmptyStatePanel
+    // Status message + Forget Pair, pinned just above the bottom action bar
+    // during the connect/reconnect empty state. ContentView owns the actions.
+    @ViewBuilder let connectionEmptyStateFooter: () -> ConnectionEmptyStateFooter
 
     @State private var searchText = ""
+    @State private var selectedContentScope: SidebarContentScope = .projects
     @State private var isCreatingThread = false
     @State private var pendingTopAction: SidebarTopAction? = nil
     @State private var groupedThreads: [SidebarThreadGroup] = []
@@ -36,138 +53,145 @@ struct SidebarView: View {
     @State private var cachedRunBadges: [String: CodexThreadRunBadgeState] = [:]
     @State private var lastGroupedThreadsFingerprint: Int = 0
     @State private var lastBadgeFingerprint: Int = 0
+    @State private var projectlessChatRootPaths: [String] = []
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            SidebarHeaderView(
-                showsCloseButton: showsInlineCloseButton,
-                onClose: onClose,
-                overflowActions: overflowMenuActions
-            )
+        // The header is hosted via `adaptiveTopBar` — `safeAreaBar(edge:.top)`
+        // on iOS 26 (system-rendered Liquid Glass bar, same look as the chat
+        // navigation bar) and `safeAreaInset(edge:.top)` with an opaque
+        // fallback fill on iOS 18 (no Liquid Glass available). Both branches
+        // let scrolled rows extend behind the bar, and the inner ScrollView's
+        // `adaptiveSoftScrollEdge(for: .top)` adds the iOS 26 soft fade so
+        // content gracefully blurs out under the bar's bottom edge.
+        threadListWithBottomBar
+            .frame(maxHeight: .infinity)
+            .background(Color(.systemBackground))
+            .adaptiveTopBar {
+                SidebarHeaderView(
+                    showsCloseButton: showsInlineCloseButton,
+                    onClose: onClose,
+                    overflowActions: overflowMenuActions
+                )
+                .modifier(SidebarHeaderBackdropModifier())
+            }
+            .task {
+                debugSidebarLog("task start visible=\(isVisible) threadCount=\(codex.threads.count)")
+                rebuildGroupedThreads()
+                rebuildCachedSidebarState()
+                await refreshProjectlessChatRoots()
+                if codex.isConnected, codex.threads.isEmpty {
+                    await refreshThreads()
+                }
+            }
+            .onChange(of: codex.threads) { _, _ in
+                debugSidebarLog(
+                    "threads changed while \(isVisible ? "visible" : "hidden-prewarmed") "
+                        + "threadCount=\(codex.threads.count)"
+                )
+                rebuildGroupedThreads()
+                rebuildCachedSidebarState()
+            }
+            .onChange(of: searchText) { _, _ in
+                debugSidebarLog("search changed queryLength=\(searchText.count)")
+                rebuildGroupedThreads()
+            }
+            .onChange(of: selectedContentScope) { _, scope in
+                debugSidebarLog("content scope changed scope=\(scope.rawValue)")
+                rebuildGroupedThreads()
+            }
+            .onChange(of: codex.pinnedThreadIDs) { _, _ in
+                debugSidebarLog("pinned threads changed count=\(codex.pinnedThreadIDs.count)")
+                rebuildGroupedThreads()
+            }
+            .onChange(of: codex.isConnected) { _, isConnected in
+                guard isConnected else { return }
+                Task { @MainActor in await refreshProjectlessChatRoots() }
+            }
+            // Deferred to the next runloop tick so rebuilding the cache `@State`
+            // does not trigger another body re-evaluation inside the same frame
+            // (which previously cascaded with iOS 26 `safeAreaBar`'s internal
+            // OnScrollGeometryChange and logged "tried to update multiple times
+            // per frame" warnings).
+            .onChange(of: badgeFingerprint) { _, _ in
+                debugSidebarLog("badge fingerprint changed visible=\(isVisible)")
+                Task { @MainActor in rebuildCachedRunBadges() }
+            }
+            .onChange(of: isVisible) { _, visible in
+                debugSidebarLog("visibility changed visible=\(visible)")
+            }
+            .overlay {
+                if SidebarThreadsLoadingPresentation.shouldShowOverlay(
+                    isLoadingThreads: codex.isLoadingThreads,
+                    threadCount: codex.threads.count
+                ) {
+                    ProgressView()
+                        .padding()
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                }
+            }
+            .sheet(item: $activeSidebarSheet) { sheet in
+                sidebarSheetContent(sheet)
+            }
+            .modifier(sidebarPromptsModifier)
+    }
 
-            threadListWithBottomBar
-        }
-        .frame(maxHeight: .infinity)
-        .background(Color(.systemBackground))
-        .task {
-            debugSidebarLog("task start visible=\(isVisible) threadCount=\(codex.threads.count)")
-            rebuildGroupedThreads()
-            rebuildCachedSidebarState()
-            if codex.isConnected, codex.threads.isEmpty {
-                await refreshThreads()
-            }
-        }
-        .onChange(of: codex.threads) { _, _ in
-            debugSidebarLog(
-                "threads changed while \(isVisible ? "visible" : "hidden-prewarmed") "
-                    + "threadCount=\(codex.threads.count)"
-            )
-            rebuildGroupedThreads()
-            rebuildCachedSidebarState()
-        }
-        .onChange(of: searchText) { _, _ in
-            debugSidebarLog("search changed queryLength=\(searchText.count)")
-            rebuildGroupedThreads()
-        }
-        .onChange(of: codex.pinnedThreadIDs) { _, _ in
-            debugSidebarLog("pinned threads changed count=\(codex.pinnedThreadIDs.count)")
-            rebuildGroupedThreads()
-        }
-        // Deferred to the next runloop tick so rebuilding the cache `@State`
-        // does not trigger another body re-evaluation inside the same frame
-        // (which previously cascaded with iOS 26 `safeAreaBar`'s internal
-        // OnScrollGeometryChange and logged "tried to update multiple times
-        // per frame" warnings).
-        .onChange(of: badgeFingerprint) { _, _ in
-            debugSidebarLog("badge fingerprint changed visible=\(isVisible)")
-            Task { @MainActor in rebuildCachedRunBadges() }
-        }
-        .onChange(of: isVisible) { _, visible in
-            debugSidebarLog("visibility changed visible=\(visible)")
-        }
-        .overlay {
-            if SidebarThreadsLoadingPresentation.shouldShowOverlay(
-                isLoadingThreads: codex.isLoadingThreads,
-                threadCount: codex.threads.count
-            ) {
-                ProgressView()
-                    .padding()
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-            }
-        }
-        .sheet(item: $activeSidebarSheet) { sheet in
-            sidebarSheetContent(sheet)
-        }
-        .confirmationDialog(
-            "Archive \"\(projectGroupPendingArchive?.label ?? "project")\"?",
-            isPresented: Binding(
-                get: { projectGroupPendingArchive != nil },
-                set: { if !$0 { projectGroupPendingArchive = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("Archive Project") {
-                archivePendingProjectGroup()
-            }
-            Button("Cancel", role: .cancel) {
-                projectGroupPendingArchive = nil
-            }
-        } message: {
-            Text("All active chats in this project will be archived.")
-        }
-        .alert(
-            "Remove \"\(projectGroupPendingDeletion?.label ?? "project")\" from this phone?",
-            isPresented: Binding(
-                get: { projectGroupPendingDeletion != nil },
-                set: { if !$0 { projectGroupPendingDeletion = nil } }
-            )
-        ) {
-            Button("Remove from Phone", role: .destructive) {
-                deletePendingProjectGroupLocally()
-            }
-            Button("Cancel", role: .cancel) {
-                projectGroupPendingDeletion = nil
-            }
-        } message: {
-            Text("Chats for this project will be deleted only from Remodex on this phone. Nothing is removed from your computer or Codex observer.")
-        }
-        .alert(
-            "Remove \"\(threadPendingDeletion?.displayTitle ?? "conversation")\" from this phone?",
-            isPresented: Binding(
-                get: { threadPendingDeletion != nil },
-                set: { if !$0 { threadPendingDeletion = nil } }
-            )
-        ) {
-            Button("Remove from Phone", role: .destructive) {
-                if let thread = threadPendingDeletion {
-                    if selectedThread?.id == thread.id {
-                        selectedThread = nil
-                    }
-                    codex.deleteThreadLocally(thread.id)
-                }
-                threadPendingDeletion = nil
-            }
-            Button("Cancel", role: .cancel) {
-                threadPendingDeletion = nil
-            }
-        } message: {
-            Text("This only removes the chat from Remodex on this phone. Nothing is removed from your computer or Codex observer.")
-        }
-        .alert(
-            "Action failed",
-            isPresented: Binding(
-                get: { createThreadErrorMessage != nil },
-                set: { if !$0 { createThreadErrorMessage = nil } }
-            ),
-            actions: {
-                Button("OK", role: .cancel) {
-                    createThreadErrorMessage = nil
-                }
-            },
-            message: {
-                Text(createThreadErrorMessage ?? "Please try again.")
-            }
+    // Bundles the four destructive/confirmation dialogs into a single modifier so
+    // the body's modifier chain stays short enough for the Swift type-checker.
+    private var sidebarPromptsModifier: SidebarPromptsModifier {
+        SidebarPromptsModifier(
+            projectArchiveTitle: projectGroupPendingArchive?.label ?? "project",
+            projectArchivePresented: archivePromptPresented,
+            confirmArchiveProjectGroup: archivePendingProjectGroup,
+            cancelArchiveProjectGroup: { projectGroupPendingArchive = nil },
+            projectDeleteTitle: projectGroupPendingDeletion?.label ?? "project",
+            projectDeletePresented: deleteProjectPromptPresented,
+            confirmDeleteProjectGroup: deletePendingProjectGroupLocally,
+            cancelDeleteProjectGroup: { projectGroupPendingDeletion = nil },
+            threadDeleteTitle: threadPendingDeletion?.displayTitle ?? "conversation",
+            threadDeletePresented: deleteThreadPromptPresented,
+            confirmDeleteThread: confirmDeletePendingThread,
+            cancelDeleteThread: { threadPendingDeletion = nil },
+            errorMessage: createThreadErrorMessage ?? "Please try again.",
+            errorPresented: errorAlertPresented,
+            dismissError: { createThreadErrorMessage = nil }
         )
+    }
+
+    private var archivePromptPresented: Binding<Bool> {
+        Binding(
+            get: { projectGroupPendingArchive != nil },
+            set: { if !$0 { projectGroupPendingArchive = nil } }
+        )
+    }
+
+    private var deleteProjectPromptPresented: Binding<Bool> {
+        Binding(
+            get: { projectGroupPendingDeletion != nil },
+            set: { if !$0 { projectGroupPendingDeletion = nil } }
+        )
+    }
+
+    private var deleteThreadPromptPresented: Binding<Bool> {
+        Binding(
+            get: { threadPendingDeletion != nil },
+            set: { if !$0 { threadPendingDeletion = nil } }
+        )
+    }
+
+    private var errorAlertPresented: Binding<Bool> {
+        Binding(
+            get: { createThreadErrorMessage != nil },
+            set: { if !$0 { createThreadErrorMessage = nil } }
+        )
+    }
+
+    private func confirmDeletePendingThread() {
+        guard let thread = threadPendingDeletion else { return }
+        if selectedThread?.id == thread.id {
+            selectedThread = nil
+        }
+        codex.deleteThreadLocally(thread.id)
+        threadPendingDeletion = nil
     }
 
     // MARK: - Actions
@@ -191,9 +215,29 @@ struct SidebarView: View {
         }
     }
 
-    // Shows a native sheet so folder names and full paths stay readable on small screens.
+    private func refreshProjectlessChatRoots() async {
+        guard codex.isConnected else { return }
+
+        do {
+            let roots = try await codex.fetchProjectlessChatRoots().roots
+            guard roots != projectlessChatRootPaths else { return }
+            projectlessChatRootPaths = roots
+            rebuildGroupedThreads()
+        } catch {
+            // Path-pattern fallbacks still classify current Desktop defaults if the bridge is older.
+            debugSidebarLog("projectless roots unavailable error=\(error.localizedDescription)")
+        }
+    }
+
+    // Routes the primary Chat button through the active sidebar scope.
     private func handleNewChatButtonTap() {
-        activeSidebarSheet = .newChatProjectPicker
+        switch selectedContentScope {
+        case .projects:
+            // Shows a native sheet so folder names and full paths stay readable on small screens.
+            activeSidebarSheet = .newChatProjectPicker
+        case .chats:
+            handleNewChatTap(preferredProjectPath: nil)
+        }
     }
 
     // Starts a chat without a working directory (cwd == nil) directly from the sidebar row.
@@ -214,8 +258,8 @@ struct SidebarView: View {
     private func handleNewChatTap(preferredProjectPath: String?) {
         createThreadErrorMessage = nil
         isCreatingThread = true
-        onNewChatCreationStateChange(true)
         prepareSidebarForChatNavigation()
+        onNewChatCreationStateChange(true)
         Task { @MainActor in
             defer {
                 isCreatingThread = false
@@ -240,8 +284,8 @@ struct SidebarView: View {
     private func handleNewWorktreeChatTap(preferredProjectPath: String) {
         createThreadErrorMessage = nil
         isCreatingThread = true
-        onNewChatCreationStateChange(true)
         prepareSidebarForChatNavigation()
+        onNewChatCreationStateChange(true)
         Task { @MainActor in
             defer {
                 isCreatingThread = false
@@ -346,16 +390,24 @@ struct SidebarView: View {
         let fingerprint = groupingFingerprint(query: query, source: source)
         guard fingerprint != lastGroupedThreadsFingerprint else { return }
         lastGroupedThreadsFingerprint = fingerprint
-        groupedThreads = SidebarThreadGrouping.makeGroups(from: source, pinnedThreadIDs: codex.pinnedThreadIDs)
+        groupedThreads = SidebarThreadGrouping.makeGroups(
+            from: source,
+            pinnedThreadIDs: codex.pinnedThreadIDs,
+            scope: sidebarGroupingScope,
+            projectlessRootPaths: projectlessChatRootPaths
+        )
         debugSidebarLog(
             "rebuildGroupedThreads durationMs=\(Int(Date().timeIntervalSince(startedAt) * 1000)) "
-                + "queryLength=\(query.count) sourceCount=\(source.count) groupCount=\(groupedThreads.count)"
+                + "queryLength=\(query.count) scope=\(selectedContentScope.rawValue) "
+                + "sourceCount=\(source.count) groupCount=\(groupedThreads.count)"
         )
     }
 
     private func groupingFingerprint(query: String, source: [CodexThread]) -> Int {
         var hasher = Hasher()
         hasher.combine(query)
+        hasher.combine(selectedContentScope)
+        hasher.combine(projectlessChatRootPaths)
         hasher.combine(codex.pinnedThreadIDs)
         for thread in source {
             hasher.combine(thread)
@@ -405,7 +457,45 @@ struct SidebarView: View {
 
     // Keeps the chooser in sync with the same project buckets shown in the sidebar.
     private var newChatProjectChoices: [SidebarProjectChoice] {
-        SidebarThreadGrouping.makeProjectChoices(from: codex.threads)
+        SidebarThreadGrouping.makeProjectChoices(
+            from: codex.threads,
+            projectlessRootPaths: projectlessChatRootPaths
+        )
+    }
+
+    private var sidebarGroupingScope: SidebarThreadGroupingScope {
+        switch selectedContentScope {
+        case .projects:
+            return .projects
+        case .chats:
+            return .chats
+        }
+    }
+
+    private var scopedSidebarThreads: [CodexThread] {
+        SidebarThreadGrouping.threadsForScope(
+            sidebarGroupingScope,
+            from: codex.threads,
+            projectlessRootPaths: projectlessChatRootPaths
+        )
+    }
+
+    private var emptySidebarTitle: String {
+        switch selectedContentScope {
+        case .projects:
+            return "No project chats"
+        case .chats:
+            return "No chats"
+        }
+    }
+
+    private var emptySidebarFilterTitle: String {
+        switch selectedContentScope {
+        case .projects:
+            return "No matching projects"
+        case .chats:
+            return "No matching chats"
+        }
     }
 
     private var canCreateThread: Bool {
@@ -417,30 +507,80 @@ struct SidebarView: View {
     // iOS 26 bar while dropping taps from the Terminal pill inside the drawer.
     @ViewBuilder
     private var threadListWithBottomBar: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                SidebarSearchField(text: $searchText, isActive: $isSearchActive)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 12)
-                    .padding(.bottom, 8)
+        if shouldShowConnectionEmptyState {
+            // Stacked safe-area insets: the inner inset hosts the footer (status
+            // message + Forget Pair) and ends up directly above the bottom
+            // action bar, which is added by the outer inset. SwiftUI lays insets
+            // bottom-up in the order they're declared.
+            connectionEmptyStateLayout
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    connectionEmptyStateFooter()
+                }
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    bottomActionBar
+                }
+        } else {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    SidebarSearchField(text: $searchText, isActive: $isSearchActive)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 12)
+                        .padding(.bottom, 12)
 
-                if SidebarThreadsLoadingPresentation.shouldShowInlineStatus(
-                    isLoadingThreads: codex.isLoadingThreads,
-                    threadCount: codex.threads.count
-                ) {
-                    SidebarThreadsInlineLoadingView()
+                    SidebarContentScopePicker(selection: $selectedContentScope)
                         .padding(.horizontal, 16)
                         .padding(.bottom, 8)
-                        .transition(.opacity)
-                }
 
-                threadList
+                    if SidebarThreadsLoadingPresentation.shouldShowInlineStatus(
+                        isLoadingThreads: codex.isLoadingThreads,
+                        threadCount: codex.threads.count
+                    ) {
+                        SidebarThreadsInlineLoadingView()
+                            .padding(.horizontal, 16)
+                            .padding(.bottom, 8)
+                            .transition(.opacity)
+                    }
+
+                    threadList
+                }
             }
+            .scrollDismissesKeyboard(.interactively)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                bottomActionBar
+            }
+            .adaptiveSoftScrollEdge(for: .top)
         }
-        .scrollDismissesKeyboard(.interactively)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            bottomActionBar
+    }
+
+    // Keeps the search field at the top so the user can return to a filtered
+    // list as soon as chats sync, while centering the connect panel between
+    // the header and the safe-area footer.
+    private var connectionEmptyStateLayout: some View {
+        VStack(spacing: 0) {
+            SidebarSearchField(text: $searchText, isActive: $isSearchActive)
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+                .padding(.bottom, 12)
+
+            Spacer(minLength: 0)
+
+            connectionEmptyStatePanel()
+                .frame(maxWidth: .infinity)
+
+            Spacer(minLength: 0)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // Only swap to the centered connect card on a true cold start: no cached
+    // chats, no live search, and no relay session. Users with cached chats
+    // keep the regular list so they can still tap through to a thread.
+    private var shouldShowConnectionEmptyState: Bool {
+        guard !codex.isConnected else { return false }
+        guard codex.threads.isEmpty else { return false }
+        guard !isSearchActive else { return false }
+        let trimmedQuery = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedQuery.isEmpty
     }
 
     private var threadList: some View {
@@ -448,11 +588,15 @@ struct SidebarView: View {
             isFiltering: !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
             isConnected: codex.isConnected,
             isCreatingThread: isCreatingThread,
-            threads: codex.threads,
+            threads: scopedSidebarThreads,
             groups: groupedThreads,
             selectedThread: selectedThread,
             bottomContentInset: 0,
+            emptyStateTitle: emptySidebarTitle,
+            emptyFilterTitle: emptySidebarFilterTitle,
+            projectlessRootPaths: projectlessChatRootPaths,
             timingLabelProvider: { SidebarRelativeTimeFormatter.compactLabel(for: $0) },
+            showsTimestampRefreshIndicator: { codex.snapshotOnlyPinnedThreadIDs.contains($0.id) },
             runBadgeStateByThreadID: cachedRunBadges,
             onSelectThread: selectThread,
             onCreateThreadInProjectGroup: { group in
@@ -542,6 +686,7 @@ private extension SidebarView {
         case .newChatProjectPicker:
             SidebarNewChatProjectPickerSheet(
                 choices: newChatProjectChoices,
+                showsWithoutProjectOption: false,
                 onSelectProject: { projectPath in
                     activeSidebarSheet = nil
                     handleNewChatTap(preferredProjectPath: projectPath)
@@ -579,6 +724,22 @@ enum SidebarThreadsLoadingPresentation {
     }
 }
 
+// Paints the iOS 18 fallback fill for the sidebar header. On iOS 26 the
+// outer `adaptiveTopBar` uses `safeAreaBar(edge:.top)`, which renders the
+// proper Liquid Glass material itself — adding another `glassEffect` here
+// would stack two layers of glass and paint a visible card-like surface.
+// On iOS 18 (no `safeAreaBar`, no Liquid Glass) we paint an opaque
+// `systemBackground` fill so scrolled rows don't bleed under the header.
+private struct SidebarHeaderBackdropModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26, *) {
+            content
+        } else {
+            content.background(Color(.systemBackground))
+        }
+    }
+}
+
 private struct SidebarThreadsInlineLoadingView: View {
     var body: some View {
         HStack(spacing: 8) {
@@ -598,3 +759,64 @@ private struct SidebarThreadsInlineLoadingView: View {
 // SidebarNewChatProjectPickerSheet has moved to
 // Views/Sidebar/SidebarNewChatProjectPickerSheet.swift so it can carry its own
 // SwiftUI #Preview without dragging in the rest of the sidebar.
+
+// Hosts the four sidebar destructive/error prompts as a single ViewModifier so
+// SidebarView's body keeps a short modifier chain the Swift type-checker can
+// resolve quickly. Pass plain values + Binding<Bool>; keep no @State here.
+private struct SidebarPromptsModifier: ViewModifier {
+    let projectArchiveTitle: String
+    let projectArchivePresented: Binding<Bool>
+    let confirmArchiveProjectGroup: () -> Void
+    let cancelArchiveProjectGroup: () -> Void
+
+    let projectDeleteTitle: String
+    let projectDeletePresented: Binding<Bool>
+    let confirmDeleteProjectGroup: () -> Void
+    let cancelDeleteProjectGroup: () -> Void
+
+    let threadDeleteTitle: String
+    let threadDeletePresented: Binding<Bool>
+    let confirmDeleteThread: () -> Void
+    let cancelDeleteThread: () -> Void
+
+    let errorMessage: String
+    let errorPresented: Binding<Bool>
+    let dismissError: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .confirmationDialog(
+                "Archive \"\(projectArchiveTitle)\"?",
+                isPresented: projectArchivePresented,
+                titleVisibility: .visible
+            ) {
+                Button("Archive Project", action: confirmArchiveProjectGroup)
+                Button("Cancel", role: .cancel, action: cancelArchiveProjectGroup)
+            } message: {
+                Text("All active chats in this project will be archived.")
+            }
+            .alert(
+                "Remove \"\(projectDeleteTitle)\" from this phone?",
+                isPresented: projectDeletePresented
+            ) {
+                Button("Remove from Phone", role: .destructive, action: confirmDeleteProjectGroup)
+                Button("Cancel", role: .cancel, action: cancelDeleteProjectGroup)
+            } message: {
+                Text("Chats for this project will be deleted only from Remodex on this phone. Nothing is removed from your computer or Codex observer.")
+            }
+            .alert(
+                "Remove \"\(threadDeleteTitle)\" from this phone?",
+                isPresented: threadDeletePresented
+            ) {
+                Button("Remove from Phone", role: .destructive, action: confirmDeleteThread)
+                Button("Cancel", role: .cancel, action: cancelDeleteThread)
+            } message: {
+                Text("This only removes the chat from Remodex on this phone. Nothing is removed from your computer or Codex observer.")
+            }
+            .alert("Action failed", isPresented: errorPresented) {
+                Button("OK", role: .cancel, action: dismissError)
+            } message: {
+                Text(errorMessage)
+            }
+    }
+}

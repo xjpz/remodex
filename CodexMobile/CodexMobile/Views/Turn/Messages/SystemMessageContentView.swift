@@ -217,7 +217,7 @@ struct SystemMessageContentView: View {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 UIPasteboard.general.string = selectableText
             } label: {
-                Label("Copy", systemImage: "doc.on.doc")
+                RemodexIcon.menuLabel("Copy", systemName: "doc.on.doc")
             }
         }
     }

@@ -17,7 +17,7 @@ struct CommandExecutionStatusCard: View {
     @State private var unavailableImagePreviewPaths: Set<String> = []
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 12) {
             CommandExecutionCardBody(
                 command: status.command,
                 statusLabel: status.statusLabel,

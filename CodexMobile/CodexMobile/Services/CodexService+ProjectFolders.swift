@@ -25,6 +25,13 @@ struct CodexProjectDirectoryListing: Equatable, Sendable {
     let entries: [CodexProjectDirectoryEntry]
 }
 
+struct CodexProjectlessChatRoots: Equatable, Sendable {
+    let roots: [String]
+    let codexHome: String?
+    let documentedThreadsRoot: String?
+    let desktopDocumentsRoot: String?
+}
+
 extension CodexService {
     // Loads Mac-local shortcut folders through the bridge instead of the Codex runtime.
     func fetchProjectQuickLocations() async throws -> [CodexProjectLocation] {
@@ -34,6 +41,22 @@ extension CodexService {
         }
 
         return locations.compactMap(Self.decodeProjectLocation)
+    }
+
+    // Reads host-side Codex chat roots so projectless classification survives custom CODEX_HOME.
+    func fetchProjectlessChatRoots() async throws -> CodexProjectlessChatRoots {
+        let response = try await sendRequest(method: "project/projectlessRoots", params: .object([:]))
+        guard let object = response.result?.objectValue else {
+            throw CodexServiceError.invalidResponse("project/projectlessRoots response missing payload")
+        }
+
+        let roots = object["roots"]?.arrayValue?.compactMap(\.stringValue) ?? []
+        return CodexProjectlessChatRoots(
+            roots: roots,
+            codexHome: object["codexHome"]?.stringValue,
+            documentedThreadsRoot: object["documentedThreadsRoot"]?.stringValue,
+            desktopDocumentsRoot: object["desktopDocumentsRoot"]?.stringValue
+        )
     }
 
     // Lists only child directories for the phone-side project picker.

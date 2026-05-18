@@ -44,12 +44,12 @@ struct TurnTimelineFooterContainer<Composer: View>: View {
     private func scrollToLatestButton(action: @escaping () -> Void) -> some View {
         Button(action: action) {
             RemodexIcon.image(systemName: "arrow.down")
-                .font(AppFont.system(size: 13, weight: .semibold))
+                .font(AppFont.system(size: 15, weight: .semibold))
                 .foregroundStyle(.primary)
-                .frame(width: 34, height: 34)
+                .frame(width: 35, height: 35)
                 .adaptiveGlass(.regular, in: Circle())
         }
-        .frame(width: 44, height: 44)
+        .frame(width: 45, height: 45)
         .buttonStyle(TurnFloatingButtonPressStyle())
         .contentShape(Circle())
         .accessibilityLabel("Scroll to latest message")

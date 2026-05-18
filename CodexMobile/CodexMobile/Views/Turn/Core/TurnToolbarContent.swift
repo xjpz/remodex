@@ -40,7 +40,6 @@ struct TurnToolbarContent: ToolbarContent {
     @Binding var isShowingPathSheet: Bool
 
     var body: some ToolbarContent {
-        let hasTrailingCluster = showsGitActions
         let isThreadActionLoading = isHandingOffToMac || isStartingNewChat
         let canTapMacHandoff = onTapMacHandoff != nil && !isThreadActionLoading
         let canTapWorktreeHandoff = onTapWorktreeHandoff != nil
@@ -50,29 +49,43 @@ struct TurnToolbarContent: ToolbarContent {
         let canTapNewChat = onTapNewChat != nil && !isThreadActionLoading
         let canTapTerminal = onTapTerminal != nil
 
-        ToolbarItem(placement: .principal) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(displayTitle)
-                    .font(AppFont.subheadline(weight: .medium))
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                if let context = navigationContext {
-                    Button {
-                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                        isShowingPathSheet = true
-                    } label: {
-                        Text(context.subtitle)
-                            .font(AppFont.caption(weight: .regular))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .buttonStyle(.plain)
-                }
+        // Keep title + path as one leading-aligned control. Splitting them into
+        // iOS 26 `.title` / `.subtitle` placements lets the system align each
+        // row independently, which makes the stack look offset.
+        if #available(iOS 26.0, *) {
+            ToolbarItem(placement: .title) {
+                titleTapTarget
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            ToolbarItem(placement: .principal) {
+                titleTapTarget
+            }
+        }
+
+        // Order: git actions sit closest to the title, the ellipsis thread-
+        // actions menu trails after them. Spacer goes between when both are
+        // shown so the system glass capsules don't merge into one shape.
+        if showsGitActions {
+            ToolbarItem(placement: .topBarTrailing) {
+                TurnGitActionsToolbarButton(
+                    isEnabled: isGitActionEnabled,
+                    disabledActions: disabledGitActions,
+                    isRunningAction: isRunningGitAction,
+                    loadingTitle: gitActionLoadingTitle,
+                    showsDiscardRuntimeChangesAndSync: showsDiscardRuntimeChangesAndSync,
+                    gitSyncState: gitSyncState,
+                    repoDiffTotals: repoDiffTotals,
+                    isLoadingRepoDiff: isLoadingRepoDiff,
+                    onTapRepoDiff: onTapRepoDiff,
+                    onSelect: onGitAction
+                )
+            }
+        }
+
+        if showsGitActions, showsThreadActions {
+            if #available(iOS 26.0, *) {
+                ToolbarSpacer(.fixed, placement: .topBarTrailing)
+            }
         }
 
         if showsThreadActions {
@@ -85,7 +98,7 @@ struct TurnToolbarContent: ToolbarContent {
                     } label: {
                         HStack(spacing: 10) {
                             ResizableThreadActionSymbol(systemName: "arrow.left.arrow.right", pointSize: 13)
-                            Text("Continue on Desktop App")
+                            Text("Hand off to Desktop")
                         }
                     }
                     .disabled(!canTapMacHandoff)
@@ -107,7 +120,10 @@ struct TurnToolbarContent: ToolbarContent {
                         onTapNewChat?()
                     } label: {
                         HStack(spacing: 10) {
-                            ResizableThreadActionSymbol(systemName: "plus.app", pointSize: 13)
+                            // `square.and.pencil` resolves to `central-compose-pencil`
+                            // via RemodexIcon, matching the sidebar's "New Chat"
+                            // affordance instead of using a different SF Symbol.
+                            ResizableThreadActionSymbol(systemName: "square.and.pencil", pointSize: 13)
                             Text("New chat")
                         }
                     }
@@ -129,29 +145,50 @@ struct TurnToolbarContent: ToolbarContent {
                 .accessibilityLabel("Thread actions")
             }
         }
+    }
 
-        if showsThreadActions, hasTrailingCluster {
-            if #available(iOS 26.0, *) {
-                ToolbarSpacer(.fixed, placement: .topBarTrailing)
+    @ViewBuilder
+    private var titleTapTarget: some View {
+        if let context = navigationContext {
+            Button {
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                isShowingPathSheet = true
+            } label: {
+                titleSubtitleBlock(context: context)
             }
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .accessibilityLabel("\(displayTitle), \(context.subtitle)")
+            .accessibilityHint("Opens thread location")
+        } else {
+            titleLabel
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
 
-        if showsGitActions {
-            ToolbarItem(placement: .topBarTrailing) {
-                TurnGitActionsToolbarButton(
-                    isEnabled: isGitActionEnabled,
-                    disabledActions: disabledGitActions,
-                    isRunningAction: isRunningGitAction,
-                    loadingTitle: gitActionLoadingTitle,
-                    showsDiscardRuntimeChangesAndSync: showsDiscardRuntimeChangesAndSync,
-                    gitSyncState: gitSyncState,
-                    repoDiffTotals: repoDiffTotals,
-                    isLoadingRepoDiff: isLoadingRepoDiff,
-                    onTapRepoDiff: onTapRepoDiff,
-                    onSelect: onGitAction
-                )
-            }
+    private func titleSubtitleBlock(context: TurnThreadNavigationContext) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            titleLabel
+            subtitleLabel(for: context)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .multilineTextAlignment(.leading)
+    }
+
+    private var titleLabel: some View {
+        Text(displayTitle)
+            .font(AppFont.subheadline(weight: .medium))
+            .lineLimit(1)
+            .truncationMode(.tail)
+    }
+
+    private func subtitleLabel(for context: TurnThreadNavigationContext) -> some View {
+        Text(context.subtitle)
+            .font(AppFont.caption(weight: .regular))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .truncationMode(.middle)
     }
 }
 
@@ -163,11 +200,13 @@ private struct TurnMacHandoffToolbarLabel: View {
             if isLoading {
                 ProgressView()
                     .controlSize(.small)
-                    .frame(width: 24, height: 24)
             } else {
-                ResizableThreadActionSymbol(systemName: "arrow.trianglehead.branch", pointSize: 14)
+                // Let the system toolbar render the ellipsis at its native
+                // size; sizing it through `ResizableThreadActionSymbol` (which
+                // force-fits into a square via `scaledToFit`) crushed the
+                // dots because the SF `ellipsis` glyph is wide and short.
+                Image(systemName: "ellipsis")
                     .foregroundStyle(.primary)
-                    .frame(width: 24, height: 24)
             }
         }
         .contentShape(Circle())
@@ -272,7 +311,6 @@ struct TurnThreadPathSheet: View {
                                             .renderingMode(.template)
                                             .resizable()
                                             .scaledToFit()
-                                            .scaleEffect(x: -1, y: 1)
                                     }
                                 }
                                 .frame(width: 16, height: 16)

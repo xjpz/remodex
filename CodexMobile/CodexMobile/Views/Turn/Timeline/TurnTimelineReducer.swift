@@ -162,14 +162,22 @@ enum TurnTimelineReducer {
             return true
         }
 
-        // Check pattern: activity → assistant → activity (system activity on both sides).
+        // Check for activity after an already-visible assistant row. Preserving command/tool
+        // chronology avoids a second jump when the assistant flips from streaming to complete.
         let ordered = turnMessages.sorted { $0.orderIndex < $1.orderIndex }
         var hasActivityBeforeAssistant = false
         var seenAssistant = false
+        var seenStreamingAssistant = false
         for message in ordered {
             if message.role == .assistant {
                 seenAssistant = true
+                if message.isStreaming {
+                    seenStreamingAssistant = true
+                }
             } else if isInterleavableSystemActivity(message) {
+                if seenStreamingAssistant || (seenAssistant && isPostAssistantStatusActivity(message)) {
+                    return true
+                }
                 if !seenAssistant {
                     hasActivityBeforeAssistant = true
                 } else if hasActivityBeforeAssistant {
@@ -178,6 +186,19 @@ enum TurnTimelineReducer {
             }
         }
         return false
+    }
+
+    private static func isPostAssistantStatusActivity(_ message: CodexMessage) -> Bool {
+        guard message.role == .system else {
+            return false
+        }
+
+        switch message.kind {
+        case .toolActivity, .commandExecution:
+            return true
+        case .thinking, .chat, .plan, .userInputPrompt, .fileChange, .subagentAction:
+            return false
+        }
     }
 
     // Mac-started rollout mirrors can interleave many assistant/tool rows before the

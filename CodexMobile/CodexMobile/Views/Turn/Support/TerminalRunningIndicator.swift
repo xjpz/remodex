@@ -6,47 +6,11 @@
 import SwiftUI
 
 struct TerminalRunningIndicator: View {
-    @State private var cursorOpacity: Double = 1
-
     var body: some View {
-        HStack(spacing: 6) {
-            glyph
-            Text("Remodex is thinking...")
-                .font(AppFont.body())
-                .foregroundStyle(.tertiary)
-        }
-        .onAppear {
-            withAnimation(.easeInOut(duration: 0.55).repeatForever(autoreverses: true)) {
-                cursorOpacity = 0.18
-            }
-        }
+        Text("Remodex is thinking...")
+            .font(AppFont.body())
+            .foregroundStyle(.tertiary)
         .accessibilityLabel("Remodex is thinking")
-    }
-
-    private var glyph: some View {
-        HStack(alignment: .bottom, spacing: 1) {
-            Text(">")
-                .font(AppFont.mono(.caption2))
-
-            RoundedRectangle(cornerRadius: 1, style: .continuous)
-                .fill(.tertiary)
-                .frame(width: 4, height: 1)
-                .padding(.bottom, 2)
-                .opacity(cursorOpacity)
-                .offset(x: 0, y: -1)
-        }
-        .foregroundStyle(.tertiary)
-        .frame(width: 12, height: 12)
-        .padding(5)
-        .background(
-            Circle()
-                .fill(Color.primary.opacity(0.02))
-                .overlay(
-                    Circle()
-                        .stroke(Color.primary.opacity(0.06), lineWidth: 1)
-                )
-        )
-        .contentShape(Circle())
     }
 }
 

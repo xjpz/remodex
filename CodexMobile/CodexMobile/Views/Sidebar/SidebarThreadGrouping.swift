@@ -1,14 +1,38 @@
 // FILE: SidebarThreadGrouping.swift
-// Purpose: Produces sidebar thread groups by project path (`cwd`) and keeps archived chats separate.
+// Purpose: Produces sidebar thread groups by project path (`cwd`) or rootless
+//          chat scope while excluding archived chats.
 // Layer: View Helper
-// Exports: SidebarThreadGroupKind, SidebarThreadGroup, SidebarThreadGrouping
+// Exports: SidebarThreadGroupKind, SidebarContentScope, SidebarThreadGroup,
+//          SidebarThreadGrouping
 
 import Foundation
 
 enum SidebarThreadGroupKind: Equatable {
     case pinned
     case project
-    case archived
+    case chat
+}
+
+enum SidebarContentScope: String, CaseIterable, Hashable, Identifiable {
+    case projects
+    case chats
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .projects:
+            return "Projects"
+        case .chats:
+            return "Chats"
+        }
+    }
+}
+
+enum SidebarThreadGroupingScope {
+    case all
+    case projects
+    case chats
 }
 
 struct SidebarProjectChoice: Identifiable, Equatable {
@@ -33,8 +57,8 @@ struct SidebarThreadGroup: Identifiable {
             return "pin"
         case .project:
             return CodexThread.projectIconSystemName(for: projectPath)
-        case .archived:
-            return "archivebox"
+        case .chat:
+            return "bubble.left.and.bubble.right"
         }
     }
 
@@ -47,19 +71,15 @@ enum SidebarThreadGrouping {
     static func makeGroups(
         from threads: [CodexThread],
         pinnedThreadIDs: [String] = [],
+        scope: SidebarThreadGroupingScope = .all,
+        projectlessRootPaths: [String] = [],
         now _: Date = Date(),
         calendar _: Calendar = .current
     ) -> [SidebarThreadGroup] {
         var groups: [SidebarThreadGroup] = []
-        var archivedThreads: [CodexThread] = []
-        let pinnedThreads = collectPinnedThreads(from: threads, pinnedRootThreadIDs: pinnedThreadIDs)
+        let scopedThreads = threadsForScope(scope, from: threads, projectlessRootPaths: projectlessRootPaths)
+        let pinnedThreads = collectPinnedThreads(from: scopedThreads, pinnedRootThreadIDs: pinnedThreadIDs)
         let pinnedThreadIDSet = Set(pinnedThreads.map(\.id))
-
-        for thread in threads {
-            if thread.syncState == .archivedLocal {
-                archivedThreads.append(thread)
-            }
-        }
 
         if let firstPinned = pinnedThreads.first {
             groups.append(
@@ -74,28 +94,57 @@ enum SidebarThreadGrouping {
             )
         }
 
-        groups.append(contentsOf: makeProjectGroups(from: threads, excludingPinnedThreadIDs: pinnedThreadIDSet))
-
-        let sortedArchived = sortThreadsByRecentActivity(archivedThreads)
-        if let firstArchived = sortedArchived.first {
-            groups.append(
-                SidebarThreadGroup(
-                    id: "archived",
-                    label: "Archived (\(sortedArchived.count))",
-                    kind: .archived,
-                    sortDate: firstArchived.updatedAt ?? firstArchived.createdAt ?? .distantPast,
-                    projectPath: nil,
-                    threads: sortedArchived
-                )
-            )
+        switch scope {
+        case .all:
+            groups.append(contentsOf: makeProjectGroups(from: scopedThreads, excludingPinnedThreadIDs: pinnedThreadIDSet))
+        case .projects:
+            groups.append(contentsOf: makeProjectGroups(from: scopedThreads, excludingPinnedThreadIDs: pinnedThreadIDSet))
+        case .chats:
+            if let chatGroup = makeRootlessChatGroup(from: scopedThreads, excludingPinnedThreadIDs: pinnedThreadIDSet) {
+                groups.append(chatGroup)
+            }
         }
 
         return groups
     }
 
+    // Keeps the UI picker from leaking project chats into rootless Chats and vice versa.
+    static func threadsForScope(
+        _ scope: SidebarThreadGroupingScope,
+        from threads: [CodexThread],
+        projectlessRootPaths: [String] = []
+    ) -> [CodexThread] {
+        switch scope {
+        case .all:
+            return threads
+        case .projects:
+            return threads.filter { !isRootlessChatThread($0, projectlessRootPaths: projectlessRootPaths) }
+        case .chats:
+            return threads.filter { isRootlessChatThread($0, projectlessRootPaths: projectlessRootPaths) }
+        }
+    }
+
+    // Projectless chats still receive generated host-side working directories,
+    // so rootless detection cannot rely on cwd == nil alone.
+    static func isRootlessChatThread(
+        _ thread: CodexThread,
+        projectlessRootPaths: [String] = []
+    ) -> Bool {
+        thread.normalizedProjectPath == nil
+            || isUnderProjectlessRoot(thread.normalizedProjectPath, roots: projectlessRootPaths)
+            || isGeneratedCodexProjectlessPath(thread.normalizedProjectPath)
+    }
+
     // Reuses the sidebar project grouping rules for places like the New Chat chooser.
-    static func makeProjectChoices(from threads: [CodexThread]) -> [SidebarProjectChoice] {
-        makeProjectGroups(from: threads).compactMap { group in
+    static func makeProjectChoices(
+        from threads: [CodexThread],
+        projectlessRootPaths: [String] = []
+    ) -> [SidebarProjectChoice] {
+        makeProjectGroups(from: threadsForScope(
+            .projects,
+            from: threads,
+            projectlessRootPaths: projectlessRootPaths
+        )).compactMap { group in
             guard let projectPath = group.projectPath else {
                 return nil
             }
@@ -148,6 +197,118 @@ enum SidebarThreadGrouping {
             projectPath: representativeThread?.normalizedProjectPath,
             threads: sortedThreads
         )
+    }
+
+    private static func makeRootlessChatGroup(
+        from threads: [CodexThread],
+        excludingPinnedThreadIDs pinnedThreadIDs: Set<String>
+    ) -> SidebarThreadGroup? {
+        let liveThreads = threads.filter {
+            $0.syncState != .archivedLocal && !pinnedThreadIDs.contains($0.id)
+        }
+        let sortedThreads = sortThreadsByRecentActivity(liveThreads)
+        guard let firstThread = sortedThreads.first else {
+            return nil
+        }
+
+        return SidebarThreadGroup(
+            id: "chats:rootless",
+            label: "Chats",
+            kind: .chat,
+            sortDate: firstThread.updatedAt ?? firstThread.createdAt ?? .distantPast,
+            projectPath: nil,
+            threads: sortedThreads
+        )
+    }
+
+    private static func isUnderProjectlessRoot(_ rawPath: String?, roots: [String]) -> Bool {
+        guard let normalizedPath = CodexThread.normalizedFilesystemProjectPath(rawPath) else {
+            return false
+        }
+        let pathComponents = projectPathComponents(normalizedPath)
+        guard !pathComponents.isEmpty else {
+            return false
+        }
+
+        return roots.contains { root in
+            guard let normalizedRoot = CodexThread.normalizedFilesystemProjectPath(root) else {
+                return false
+            }
+            let rootComponents = projectPathComponents(normalizedRoot)
+            guard !rootComponents.isEmpty, pathComponents.count >= rootComponents.count else {
+                return false
+            }
+
+            return pathComponents.prefix(rootComponents.count).elementsEqual(rootComponents) {
+                $0.localizedCaseInsensitiveCompare($1) == .orderedSame
+            }
+        }
+    }
+
+    private static func isGeneratedCodexProjectlessPath(_ rawPath: String?) -> Bool {
+        guard let normalizedPath = CodexThread.normalizedFilesystemProjectPath(rawPath) else {
+            return false
+        }
+
+        let pathComponents = projectPathComponents(normalizedPath)
+        return isGeneratedDocumentsCodexPath(pathComponents)
+            || isCodexHomeThreadsPath(pathComponents)
+    }
+
+    private static func isGeneratedDocumentsCodexPath(_ components: [String]) -> Bool {
+        for index in components.indices {
+            let dateIndex = index + 2
+            let slugIndex = index + 3
+            guard components[index] == "Documents",
+                  components.indices.contains(dateIndex),
+                  components.indices.contains(slugIndex),
+                  components[index + 1] == "Codex",
+                  isISODateFolderName(components[dateIndex]),
+                  !components[slugIndex].isEmpty else {
+                continue
+            }
+            return true
+        }
+
+        return false
+    }
+
+    private static func isCodexHomeThreadsPath(_ components: [String]) -> Bool {
+        for index in components.indices {
+            let childIndex = index + 2
+            guard components[index] == ".codex",
+                  components.indices.contains(childIndex),
+                  components[index + 1] == "threads",
+                  !components[childIndex].isEmpty else {
+                continue
+            }
+            return true
+        }
+
+        return false
+    }
+
+    private static func projectPathComponents(_ path: String) -> [String] {
+        path
+            .replacingOccurrences(of: "\\", with: "/")
+            .split(separator: "/")
+            .map(String.init)
+    }
+
+    private static func isISODateFolderName(_ value: String) -> Bool {
+        let scalars = Array(value.unicodeScalars)
+        guard scalars.count == 10,
+              scalars[4].value == 45,
+              scalars[7].value == 45 else {
+            return false
+        }
+
+        return scalars.enumerated().allSatisfy { index, scalar in
+            if index == 4 || index == 7 {
+                return true
+            }
+            return CharacterSet.decimalDigits.contains(scalar)
+        }
     }
 
     // Keeps project-derived UI consistent by centralizing the live-thread → project bucket mapping.

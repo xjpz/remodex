@@ -32,7 +32,7 @@
 - When complete, record final metrics and validation evidence in both places.
 
 ## Progress Notes
-- 2026-05-11 20:31: Extracted markdown parser/rendering/formatter logic into `TurnMarkdownTextRendering.swift` and workspace image preview/cache/downsampling logic into `WorkspaceImagePreview.swift`; removed now-unused Textual/UIKit/ImageIO imports from this file.
+- 2026-05-11 20:31: Extracted markdown parser/rendering/formatter logic into `TurnMarkdownTextRendering.swift` and workspace image preview/cache/downsampling logic into `WorkspaceImagePreview.swift`; removed now-unused markdown/UIKit/ImageIO imports from this file.
 - 2026-05-11 20:24: Removed unused `ShimmerMask` after repository-wide call-site search found no usages.
 - 2026-05-11 20:23: Extracted `CodeCommentFindingCard` into its own focused row-component file.
 - 2026-05-11 20:22: Extracted user attachment thumbnail strip and preview resolver into `UserAttachmentViews.swift`; added a small thumbnail image cache to avoid repeated Base64 decode during timeline redraws.

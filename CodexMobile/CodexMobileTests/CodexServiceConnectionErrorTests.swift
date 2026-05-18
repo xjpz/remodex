@@ -101,6 +101,106 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         }
     }
 
+    func testWebSocketKeepAlivePingsWhileForegrounded() async {
+        let service = CodexService()
+        var pingCount = 0
+        service.isConnected = true
+        service.isInitialized = true
+        service.isAppInForeground = true
+        service.webSocketKeepAliveIntervalOverrideNanoseconds = 1
+        service.webSocketKeepAlivePingOverride = {
+            pingCount += 1
+            service.stopWebSocketKeepAliveLoop()
+        }
+
+        service.startWebSocketKeepAliveLoop()
+
+        for _ in 0..<1_000 {
+            if pingCount > 0 { break }
+            await Task.yield()
+        }
+
+        XCTAssertEqual(pingCount, 1)
+        XCTAssertNil(service.webSocketKeepAliveTask)
+    }
+
+    func testWebSocketKeepAliveDoesNotStartWhileBackgrounded() async {
+        let service = CodexService()
+        var pingCount = 0
+        service.isConnected = true
+        service.isInitialized = true
+        service.isAppInForeground = false
+        service.webSocketKeepAliveIntervalOverrideNanoseconds = 1
+        service.webSocketKeepAlivePingOverride = {
+            pingCount += 1
+        }
+
+        service.startWebSocketKeepAliveLoop()
+        await Task.yield()
+
+        XCTAssertEqual(pingCount, 0)
+        XCTAssertNil(service.webSocketKeepAliveTask)
+    }
+
+    func testForegroundStateStopsAndRestartsWebSocketKeepAlive() {
+        let service = CodexService()
+        service.syncRealtimeEnabled = false
+        service.isConnected = true
+        service.isInitialized = true
+        service.isAppInForeground = true
+        service.webSocketKeepAlivePingOverride = {}
+
+        service.startWebSocketKeepAliveLoop()
+        XCTAssertNotNil(service.webSocketKeepAliveTask)
+
+        service.setForegroundState(false)
+        XCTAssertNil(service.webSocketKeepAliveTask)
+
+        service.setForegroundState(true)
+        XCTAssertNotNil(service.webSocketKeepAliveTask)
+        service.stopWebSocketKeepAliveLoop()
+    }
+
+    func testDisconnectStopsWebSocketKeepAlive() async {
+        let service = CodexService()
+        service.isConnected = true
+        service.isInitialized = true
+        service.isAppInForeground = true
+        service.webSocketKeepAlivePingOverride = {}
+
+        service.startWebSocketKeepAliveLoop()
+        XCTAssertNotNil(service.webSocketKeepAliveTask)
+
+        await service.disconnect()
+
+        XCTAssertNil(service.webSocketKeepAliveTask)
+        XCTAssertFalse(service.isConnected)
+    }
+
+    func testWebSocketKeepAliveFailureArmsReconnect() async {
+        let service = CodexService()
+        service.isConnected = true
+        service.isInitialized = true
+        service.isAppInForeground = true
+        service.webSocketKeepAliveIntervalOverrideNanoseconds = 1
+        service.webSocketKeepAlivePingOverride = {
+            throw NWError.posix(.ECONNRESET)
+        }
+
+        service.startWebSocketKeepAliveLoop()
+
+        for _ in 0..<1_000 {
+            if service.webSocketKeepAliveTask == nil { break }
+            await Task.yield()
+        }
+
+        XCTAssertNil(service.webSocketKeepAliveTask)
+        XCTAssertFalse(service.isConnected)
+        XCTAssertTrue(service.shouldAutoReconnectOnForeground)
+        XCTAssertEqual(service.connectionRecoveryState, .retrying(attempt: 0, message: "Reconnecting..."))
+        XCTAssertNil(service.lastErrorMessage)
+    }
+
     func testBenignDisconnectStaysSilentWhileAutoReconnectIsRunning() {
         let service = CodexService()
         let error = CodexServiceError.disconnected

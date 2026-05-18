@@ -18,7 +18,6 @@ private enum ThreadListHydrationPolicy {
 extension CodexService {
     // Sidebar loads stay capped so reconnect/bootstrap cannot pull an entire local history at once.
     var recentActiveThreadListLimit: Int { 70 }
-    var recentArchivedThreadListLimit: Int { 10 }
 
     // Encodes manual approval replies using the app-server decision object shape.
     func approvalDecisionResult(_ decision: String) -> JSONValue {
@@ -87,10 +86,6 @@ extension CodexService {
         defer { isLoadingThreads = false }
 
         let activeLimit = limit ?? recentActiveThreadListLimit
-        let archivedLimit = limit ?? recentArchivedThreadListLimit
-
-        // Sidebar metadata paints as active chats arrive, while archived sync stays a small side fetch.
-        async let archivedThreadsFetch = fetchServerThreads(limit: archivedLimit, archived: true)
 
         let activeThreads = try await fetchServerThreads(limit: activeLimit) { _, accumulatedThreads in
             self.reconcileLocalThreadsWithServer(accumulatedThreads)
@@ -100,20 +95,6 @@ extension CodexService {
             }
         }
         reconcileLocalThreadsWithServer(activeThreads)
-
-        if activeThreadId == nil {
-            activeThreadId = firstLiveThreadID()
-        }
-
-        let archivedThreads: [CodexThread]
-        do {
-            archivedThreads = try await archivedThreadsFetch
-        } catch {
-            debugSyncLog("thread/list archived fetch failed (non-fatal): \(error.localizedDescription)")
-            archivedThreads = []
-        }
-
-        reconcileLocalThreadsWithServer(activeThreads, serverArchivedThreads: archivedThreads)
 
         if activeThreadId == nil {
             activeThreadId = firstLiveThreadID()
@@ -817,7 +798,6 @@ enum CodexThreadStartProjectBinding {
 extension CodexService {
     func fetchServerThreads(
         limit: Int? = nil,
-        archived: Bool = false,
         onPage: ((_ page: [CodexThread], _ accumulatedThreads: [CodexThread]) -> Void)? = nil
     ) async throws -> [CodexThread] {
         var allThreads: [CodexThread] = []
@@ -833,9 +813,6 @@ extension CodexService {
             ]
             if let limit {
                 params["limit"] = .integer(limit)
-            }
-            if archived {
-                params["archived"] = .bool(true)
             }
 
             let response = try await sendRequest(

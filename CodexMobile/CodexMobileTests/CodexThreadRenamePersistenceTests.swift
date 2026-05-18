@@ -260,11 +260,39 @@ final class CodexThreadRenamePersistenceTests: XCTestCase {
         service.pinThread("thread-1")
 
         let reloadedService = CodexService(defaults: defaults)
-        reloadedService.reconcileLocalThreadsWithServer([], serverArchivedThreads: [])
+        reloadedService.reconcileLocalThreadsWithServer([])
 
         XCTAssertEqual(reloadedService.pinnedThreadIDs, ["thread-1"])
         XCTAssertEqual(reloadedService.threads.map(\.id), ["thread-1"])
         XCTAssertEqual(reloadedService.thread(for: "thread-1")?.displayTitle, "Pinned Thread")
+    }
+
+    func testPinnedSnapshotRehydrateKeepsPersistedRename() {
+        let suiteName = "CodexThreadRenamePersistenceTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Expected isolated UserDefaults suite")
+            return
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let service = CodexService(defaults: defaults)
+        service.threads = [
+            CodexThread(
+                id: "thread-1",
+                title: "Original Pinned Thread",
+                preview: "Saved locally",
+                updatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                cwd: "/tmp/remodex"
+            ),
+        ]
+        service.pinThread("thread-1")
+        service.renameThread("thread-1", name: "Phone Rename")
+
+        let reloadedService = CodexService(defaults: defaults)
+        reloadedService.reconcileLocalThreadsWithServer([])
+
+        XCTAssertEqual(reloadedService.thread(for: "thread-1")?.displayTitle, "Phone Rename")
+        XCTAssertEqual(reloadedService.thread(for: "thread-1")?.name, "Phone Rename")
     }
 
     func testArchivingPinnedChildDoesNotClearPinnedRoot() {

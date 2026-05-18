@@ -85,7 +85,7 @@ struct TerminalOptionsMenu: View {
                 Button {
                     onSelectSession(session.terminalId)
                 } label: {
-                    RemodexIcon.label(
+                    RemodexIcon.menuLabel(
                         session.displayLabel,
                         systemName: session.terminalId == activeTerminalId ? "checkmark" : "terminal"
                     )
@@ -101,19 +101,19 @@ struct TerminalOptionsMenu: View {
     private var connectionSection: some View {
         Section {
             Button(action: onToggleConnection) {
-                RemodexIcon.label(isRunning ? "Disconnect" : "Connect", systemName: isRunning ? "xmark" : "terminal")
+                RemodexIcon.menuLabel(isRunning ? "Disconnect" : "Connect", systemName: isRunning ? "xmark" : "terminal")
             }
             .disabled(!hasConnectionConfiguration && !isRunning)
 
             Button(action: onOpenConnectionEditor) {
-                RemodexIcon.label("SSH connection", systemName: "lock.shield")
+                RemodexIcon.menuLabel("SSH connection", systemName: "lock.shield")
             }
 
             Button("Clear", systemImage: "trash", action: onClear)
                 .disabled(!canClear)
 
             Button(action: onResetKnownHost) {
-                RemodexIcon.label("Reset host key", systemName: "key")
+                RemodexIcon.menuLabel("Reset host key", systemName: "key")
             }
                 .disabled(!canResetKnownHost)
         }

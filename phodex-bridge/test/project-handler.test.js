@@ -14,6 +14,7 @@ const {
   handleProjectMethod,
   projectCreateDirectory,
   projectListDirectory,
+  projectProjectlessRoots,
   projectSearchDirectories,
   projectValidatePath,
 } = require("../src/project-handler");
@@ -32,6 +33,20 @@ test("project/quickLocations only returns existing allowed folders", async () =>
     result.locations.map((location) => location.id),
     ["home", "developer"]
   );
+});
+
+test("project/projectlessRoots returns host-side Codex chat roots", async () => {
+  const homeDir = makeTempHome();
+  const codexHome = path.join(homeDir, ".custom-codex");
+  const result = await projectProjectlessRoots({ homeDir, codexHome });
+
+  assert.equal(result.codexHome, codexHome);
+  assert.equal(result.documentedThreadsRoot, path.join(codexHome, "threads"));
+  assert.equal(result.desktopDocumentsRoot, path.join(homeDir, "Documents", "Codex"));
+  assert.deepEqual(result.roots, [
+    path.join(codexHome, "threads"),
+    path.join(homeDir, "Documents", "Codex"),
+  ]);
 });
 
 test("project/listDirectory returns sorted child folders and skips files or hidden folders by default", async () => {

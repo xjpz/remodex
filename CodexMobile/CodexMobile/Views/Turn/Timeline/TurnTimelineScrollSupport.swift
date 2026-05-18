@@ -1,8 +1,9 @@
 // FILE: TurnTimelineScrollSupport.swift
 // Purpose: Provides scroll geometry batching and UIKit axis clamping for the timeline.
 // Layer: View Support
-// Exports: ScrollBottomGeometry, TurnTimelineRenderItemsCacheSignature, VerticalScrollAxisGuard, ScrollGeometryCoalescer
-// Depends on: SwiftUI, UIKit
+// Exports: ScrollBottomGeometry, TurnTimelineRenderItemsCacheSignature, TurnTimelineRenderItemsCache,
+//   VerticalScrollAxisGuard, ScrollGeometryCoalescer
+// Depends on: SwiftUI, UIKit, CodexMessage, TurnTimelineRenderProjection
 
 import SwiftUI
 import UIKit
@@ -40,6 +41,34 @@ struct TurnTimelineRenderItemsCacheSignature: Equatable {
     let firstMessageID: String?
     let lastMessageID: String?
     let completedTurnIDsHash: Int
+}
+
+// Shares projection results between the body read and lifecycle handlers so
+// streaming updates do not rebuild timeline render items twice per signature.
+final class TurnTimelineRenderItemsCache {
+    private var cachedSignature: TurnTimelineRenderItemsCacheSignature?
+    private var cachedItems: [TurnTimelineRenderItem] = []
+
+    func items(
+        for signature: TurnTimelineRenderItemsCacheSignature,
+        messages: ArraySlice<CodexMessage>,
+        completedTurnIDs: Set<String>,
+        projector: (([CodexMessage], Set<String>) -> [TurnTimelineRenderItem])? = nil
+    ) -> [TurnTimelineRenderItem] {
+        if signature == cachedSignature {
+            return cachedItems
+        }
+
+        let sourceMessages = Array(messages)
+        let projectedItems = projector.map { $0(sourceMessages, completedTurnIDs) }
+            ?? TurnTimelineRenderProjection.project(
+                messages: sourceMessages,
+                completedTurnIDs: completedTurnIDs
+            )
+        cachedSignature = signature
+        cachedItems = projectedItems
+        return projectedItems
+    }
 }
 
 // Pins SwiftUI's backing UIScrollView to the vertical axis when an oversized row

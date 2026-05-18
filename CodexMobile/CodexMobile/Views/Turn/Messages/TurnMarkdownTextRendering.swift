@@ -2,11 +2,11 @@
 // Purpose: Renders and formats markdown text used by turn timeline rows.
 // Layer: Turn UI rendering
 // Exports: MarkdownTextView, StreamingAssistantMarkdownTextView, MarkdownTextFormatter
-// Depends on: Foundation, SwiftUI, Textual, TurnMessageCaches, TurnMessageRegexCache
+// Depends on: Foundation, SwiftUI, RemodexTextKit, TurnMessageCaches, TurnMessageRegexCache
 
 import Foundation
+import RemodexTextKit
 import SwiftUI
-import Textual
 
 /// Resets the in-memory AttributedString cache that backs ``MarkdownTextView``.
 /// Kept for explicit memory recovery without forcing cold parses on every thread switch.
@@ -15,7 +15,7 @@ enum MarkdownParseCacheReset {
     static func reset() { CachingMarkdownParser.reset() }
 }
 
-// Wraps the default Textual markdown parser with a bounded AttributedString
+// Wraps the default RemodexTextKit markdown parser with a bounded AttributedString
 // cache so Foundation's markdown parser is not re-run during timeline redraws
 // or when a future lazy container recycles a row on upward scroll.
 @MainActor
@@ -65,13 +65,29 @@ struct MarkdownTextView: View {
         let parser: any MarkupParser = usesCaches
             ? CachingMarkdownParser.shared
             : UncachedMarkdownParser.shared
-        // Keep prose on the app font, but let Textual own markdown/code layout to avoid block sizing regressions.
+        // Keep prose on the app font, but let RemodexTextKit own markdown/code layout to avoid block sizing regressions.
+        // RemodexTextKit intentionally keeps the `.textual` namespace for its SwiftUI modifiers.
         // Force code-block overflow to wrap instead of scroll so horizontal ScrollViews
         // inside the timeline do not compete with the sidebar swipe gesture or let
         // the chat feel like a pannable canvas.
         let baseView = StructuredText(transformed, parser: parser)
             .font(AppFont.body())
-            .textual.structuredTextStyle(.gitHub)
+            .textual.codeBlockStyle(
+                .default(
+                    actionIcons: .init(
+                        copy: .custom {
+                            Image("copy", bundle: .main)
+                                .renderingMode(.template)
+                                .resizable()
+                                .scaledToFit()
+                        },
+                        copied: .custom {
+                            RemodexIcon.image(systemName: "checkmark")
+                        }
+                    )
+                )
+            )
+            .textual.structuredTextStyle(.default)
             .textual.overflowMode(.wrap)
 
         let renderedContent = Group {
@@ -98,20 +114,30 @@ struct StreamingAssistantMarkdownTextView: View {
     let text: String
     var enablesSelection: Bool = false
     var constrainsToAvailableWidth: Bool = false
+    // Lets the parent disable the typewriter reveal when the row isn't the active
+    // follow-bottom row (off-screen / older streaming messages snap instead).
+    var animatesReveal: Bool = true
 
-    @State private var displayedText = ""
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    @State private var displayedText: String
     @State private var displayedSegments: StreamingMarkdownBlockSegments
+    @State private var targetText: String
+    @State private var revealTask: Task<Void, Never>?
 
     init(
         text: String,
         enablesSelection: Bool = false,
-        constrainsToAvailableWidth: Bool = false
+        constrainsToAvailableWidth: Bool = false,
+        animatesReveal: Bool = true
     ) {
         self.text = text
         self.enablesSelection = enablesSelection
         self.constrainsToAvailableWidth = constrainsToAvailableWidth
+        self.animatesReveal = animatesReveal
         _displayedText = State(initialValue: text)
         _displayedSegments = State(initialValue: StreamingMarkdownBlockSplitter.split(text))
+        _targetText = State(initialValue: text)
     }
 
     var body: some View {
@@ -124,10 +150,19 @@ struct StreamingAssistantMarkdownTextView: View {
             }
         }
         .onAppear {
-            reconcileDisplayedText(with: text)
+            // Snap on first appear so historical/recovered text doesn't drip in.
+            adoptText(text, animated: false)
         }
         .onChange(of: text) { _, nextText in
-            reconcileDisplayedText(with: nextText)
+            adoptText(nextText, animated: animatesReveal && !reduceMotion)
+        }
+        .onChange(of: animatesReveal) { _, isAnimating in
+            if !isAnimating {
+                snapToTarget()
+            }
+        }
+        .onDisappear {
+            cancelReveal()
         }
     }
 
@@ -155,23 +190,84 @@ struct StreamingAssistantMarkdownTextView: View {
         }
     }
 
-    // Keep streaming append-oriented while promoting completed blocks to cached markdown.
-    private func reconcileDisplayedText(with nextText: String) {
-        guard !nextText.isEmpty else {
-            guard !displayedText.isEmpty else { return }
-            displayedText = ""
-            displayedSegments = StreamingMarkdownBlockSplitter.split("")
+    // Smoothly reveals appended text instead of dropping in throttled bursts.
+    // Snaps for non-append updates (initial render, edits, prefix changes).
+    private func adoptText(_ nextText: String, animated: Bool) {
+        targetText = nextText
+
+        if nextText.isEmpty {
+            cancelReveal()
+            if !displayedText.isEmpty {
+                displayedText = ""
+                displayedSegments = StreamingMarkdownBlockSplitter.split("")
+            }
             return
         }
-        if nextText.hasPrefix(displayedText) {
-            let appended = String(nextText.dropFirst(displayedText.count))
-            guard !appended.isEmpty else { return }
-            displayedText.append(appended)
-        } else {
+
+        if !animated || !nextText.hasPrefix(displayedText) {
+            cancelReveal()
             guard displayedText != nextText else { return }
             displayedText = nextText
+            displayedSegments = StreamingMarkdownBlockSplitter.split(nextText)
+            return
         }
-        displayedSegments = StreamingMarkdownBlockSplitter.split(displayedText)
+
+        if displayedText == nextText { return }
+        startRevealIfNeeded()
+    }
+
+    private func snapToTarget() {
+        cancelReveal()
+        guard displayedText != targetText else { return }
+        displayedText = targetText
+        displayedSegments = StreamingMarkdownBlockSplitter.split(targetText)
+    }
+
+    private func cancelReveal() {
+        revealTask?.cancel()
+        revealTask = nil
+    }
+
+    private func startRevealIfNeeded() {
+        guard revealTask == nil else { return }
+        revealTask = Task { @MainActor in
+            await runReveal()
+            revealTask = nil
+        }
+    }
+
+    // Ticks displayedText forward at ~30fps, advancing more characters when the
+    // backlog is large so bursts catch up quickly while trickle streams drip smoothly.
+    private func runReveal() async {
+        let frameInterval: UInt64 = 33_000_000
+
+        while !Task.isCancelled {
+            let target = targetText
+            let current = displayedText
+
+            if !target.hasPrefix(current) {
+                if displayedText != target {
+                    displayedText = target
+                    displayedSegments = StreamingMarkdownBlockSplitter.split(target)
+                }
+                return
+            }
+
+            let targetCount = target.count
+            let displayedCount = current.count
+            if displayedCount >= targetCount { return }
+
+            let remaining = targetCount - displayedCount
+            let advance = max(2, min(remaining / 3, 80))
+            let take = min(remaining, advance)
+            let endIndex = target.index(target.startIndex, offsetBy: displayedCount + take)
+            let advanced = String(target[..<endIndex])
+            displayedText = advanced
+            displayedSegments = StreamingMarkdownBlockSplitter.split(advanced)
+
+            if advanced.count >= targetCount { return }
+            try? await Task.sleep(nanoseconds: frameInterval)
+        }
     }
 }
 
@@ -228,7 +324,7 @@ private enum StreamingMarkdownBlockSplitter {
         )
     }
 
-    // Keep the newest chunk intact so Textual can apply native paragraph/list/code spacing
+    // Keep the newest chunk intact so RemodexTextKit can apply native paragraph/list/code spacing
     // while old chunks stop reparsing during long streaming responses.
     private static func shouldSealChunk(in text: String, from start: String.Index, to boundary: String.Index) -> Bool {
         guard boundary < text.endIndex else { return false }

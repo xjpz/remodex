@@ -73,6 +73,17 @@ struct TurnComposerAccessoryState {
         isVoiceRecording
     }
 
+    // Tracks composer content that can make a follow-up send meaningful while a turn is running.
+    func hasSendableContent(input: String) -> Bool {
+        !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !composerAttachments.isEmpty
+            || !composerMentionedFiles.isEmpty
+            || !composerMentionedSkills.isEmpty
+            || !composerMentionedPlugins.isEmpty
+            || composerReviewSelection != nil
+            || isSubagentsSelectionArmed
+    }
+
     var topInputPadding: CGFloat {
         showsComposerAttachments || showsMentionedFiles || showsMentionedSkills || showsMentionedPlugins || showsSubagentsSelection || showsVoiceRecordingCapsule || reviewTarget != nil ? 6 : 10
     }

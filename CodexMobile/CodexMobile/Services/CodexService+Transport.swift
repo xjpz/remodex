@@ -14,6 +14,10 @@ import Security
 // reopening a chat, so the limit needs enough headroom for background `thread/read` catches too.
 let codexWebSocketMaximumMessageSizeBytes = 16 * 1024 * 1024
 
+private enum CodexWebSocketKeepAlivePolicy {
+    static let intervalNanoseconds: UInt64 = 25_000_000_000
+}
+
 private enum CodexRelayTransportPreference {
     case manualTCP
     case networkWebSocket
@@ -307,6 +311,98 @@ extension CodexService {
 
     func startReceiveLoop(with task: URLSessionWebSocketTask) {
         receiveNextMessage(on: task)
+    }
+
+    func startWebSocketKeepAliveLoop() {
+        guard isConnected, isInitialized, isAppInForeground else {
+            stopWebSocketKeepAliveLoop()
+            return
+        }
+        guard webSocketKeepAliveTask == nil else {
+            return
+        }
+        guard webSocketKeepAlivePingOverride != nil || webSocketConnection != nil || webSocketTask != nil else {
+            return
+        }
+
+        webSocketKeepAliveTask = Task { @MainActor [weak self] in
+            while let self, !Task.isCancelled {
+                let interval = self.webSocketKeepAliveIntervalOverrideNanoseconds
+                    ?? CodexWebSocketKeepAlivePolicy.intervalNanoseconds
+                try? await Task.sleep(nanoseconds: interval)
+                guard !Task.isCancelled else {
+                    return
+                }
+                guard self.isConnected, self.isInitialized, self.isAppInForeground else {
+                    self.stopWebSocketKeepAliveLoop()
+                    return
+                }
+
+                do {
+                    try await self.sendWebSocketKeepAlivePing()
+                } catch {
+                    guard !Task.isCancelled else {
+                        return
+                    }
+                    self.handleReceiveError(error)
+                    return
+                }
+            }
+        }
+    }
+
+    func stopWebSocketKeepAliveLoop() {
+        webSocketKeepAliveTask?.cancel()
+        webSocketKeepAliveTask = nil
+    }
+
+    func sendWebSocketKeepAlivePing() async throws {
+        if let webSocketKeepAlivePingOverride {
+            try await webSocketKeepAlivePingOverride()
+            return
+        }
+
+        if usesManualWebSocketTransport {
+            guard let connection = webSocketConnection else {
+                throw CodexServiceError.disconnected
+            }
+            try await sendManualWebSocketFrame(opcode: 0x9, payload: Data(), on: connection)
+            return
+        }
+
+        if let task = webSocketTask {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                task.sendPing { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume(returning: ())
+                    }
+                }
+            }
+            return
+        }
+
+        guard let connection = webSocketConnection else {
+            throw CodexServiceError.disconnected
+        }
+
+        let metadata = NWProtocolWebSocket.Metadata(opcode: .ping)
+        let context = NWConnection.ContentContext(identifier: "codex-keepalive-ping", metadata: [metadata])
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            connection.send(
+                content: Data(),
+                contentContext: context,
+                isComplete: true,
+                completion: .contentProcessed { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume(returning: ())
+                    }
+                }
+            )
+        }
     }
 
     // Reads raw TCP bytes and drains manual websocket frames for the relay LAN fallback.

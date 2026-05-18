@@ -139,7 +139,7 @@ struct TurnComposerSecondaryBar: View {
                         UIApplication.shared.open(url)
                     }
                 } label: {
-                    RemodexIcon.label("Cloud", systemName: "cloud")
+                    RemodexIcon.menuLabel("Cloud", systemName: "cloud")
                 }
 
                 Button {
@@ -170,9 +170,11 @@ struct TurnComposerSecondaryBar: View {
                 title: runtimeLabelTitle,
                 iconSystemName: runtimeIconSystemName,
                 foregroundColor: branchLabelColor,
-                titleFont: branchTextFont
+                titleFont: branchTextFont,
+                showsTrailingChevron: false
             )
         }
+        .menuIndicator(.hidden)
         .tint(branchLabelColor)
     }
 

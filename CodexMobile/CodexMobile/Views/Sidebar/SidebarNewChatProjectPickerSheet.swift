@@ -1,5 +1,6 @@
 // FILE: SidebarNewChatProjectPickerSheet.swift
-// Purpose: Minimal "Start new chat" sheet that lets the user pick a project, worktree, or Quick Chat.
+// Purpose: Minimal "Start new chat" sheet that lets the user pick a project,
+//          worktree, and optionally Quick Chat.
 // Layer: View
 // Exports: SidebarNewChatProjectPickerSheet
 // Depends on: SidebarProjectChoice, AppFont, CodexWorktreeIcon
@@ -8,6 +9,7 @@ import SwiftUI
 
 struct SidebarNewChatProjectPickerSheet: View {
     let choices: [SidebarProjectChoice]
+    var showsWithoutProjectOption = true
     let onSelectProject: (String) -> Void
     let onSelectWorktreeProject: (String) -> Void
     let onSelectWithoutProject: () -> Void
@@ -87,22 +89,24 @@ struct SidebarNewChatProjectPickerSheet: View {
                     }
                 }
 
-                Section {
-                    Button {
-                        dismiss()
-                        onSelectWithoutProject()
-                    } label: {
-                        projectRow(
-                            icon: AnyView(
-                                RemodexIcon.image(systemName: "bubble.left.and.bubble.right")
-                                    .font(AppFont.body(weight: .medium))
-                                    .foregroundStyle(.secondary)
-                            ),
-                            title: "Quick Chat",
-                            subtitle: "Start a chat without a working directory."
-                        )
+                if showsWithoutProjectOption {
+                    Section {
+                        Button {
+                            dismiss()
+                            onSelectWithoutProject()
+                        } label: {
+                            projectRow(
+                                icon: AnyView(
+                                    RemodexIcon.image(systemName: "bubble.left.and.bubble.right")
+                                        .font(AppFont.body(weight: .medium))
+                                        .foregroundStyle(.secondary)
+                                ),
+                                title: "Quick Chat",
+                                subtitle: "Start a chat without a working directory."
+                            )
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
             }
             .listStyle(.insetGrouped)

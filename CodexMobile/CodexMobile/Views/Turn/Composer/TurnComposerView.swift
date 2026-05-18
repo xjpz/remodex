@@ -108,6 +108,10 @@ struct TurnComposerView: View {
 
     @State private var composerInputHeight: CGFloat = 32
 
+    private var showsSendButton: Bool {
+        !isThreadRunning || accessoryState.hasSendableContent(input: input)
+    }
+
     // ─── ENTRY POINT ─────────────────────────────────────────────
     var body: some View {
         AdaptiveGlassContainer(spacing: 6) {
@@ -185,6 +189,7 @@ struct TurnComposerView: View {
                         isQueuePaused: isQueuePaused,
                         activeTurnID: activeTurnID,
                         isThreadRunning: isThreadRunning,
+                        showsSendButton: showsSendButton,
                         voiceButtonPresentation: voiceButtonPresentation,
                         onTapAddImage: onTapAddImage,
                         onTapTakePhoto: onTapTakePhoto,

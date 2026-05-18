@@ -1,7 +1,7 @@
-# Cleanup Plan: `CodexMobile/CodexMobileTests/TextualMarkdownRenderingRegressionTests.swift`
+# Cleanup Plan: `CodexMobile/CodexMobileTests/RemodexTextKitMarkdownRenderingRegressionTests.swift`
 > ID: CLN-211 | Priority: P3 | Effort: S | Status: done | File type: test
 > Domain: Tests | Current LOC: 31
-> Last updated: 2026-05-11 20:20
+> Last updated: 2026-05-18 03:05
 
 ## Why This File Is Tracked
 - Included in the full Swift/Xcode cleanup scope requested by the user.
@@ -30,4 +30,5 @@
 - When complete, record final metrics and validation evidence in both places.
 
 ## Progress Notes
+- 2026-05-18 03:05: Renamed with the RemodexTextKit migration after disabling the legacy markdown package.
 - 2026-05-11 20:20: Initial plan created from full Swift metrics scan.

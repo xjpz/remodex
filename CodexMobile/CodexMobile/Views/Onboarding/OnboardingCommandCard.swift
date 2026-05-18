@@ -38,7 +38,6 @@ struct OnboardingCommandCard: View {
                             .renderingMode(.template)
                             .resizable()
                             .scaledToFit()
-                            .scaleEffect(x: -1, y: 1)
                     }
                 }
                 .frame(width: 15, height: 15)

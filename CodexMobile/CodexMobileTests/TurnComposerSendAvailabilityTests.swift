@@ -72,6 +72,15 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
         XCTAssertTrue(reviewState.isSendDisabled)
     }
 
+    func testRunningComposerSendButtonContentPredicate() {
+        XCTAssertFalse(makeAccessoryState().hasSendableContent(input: ""))
+        XCTAssertFalse(makeAccessoryState().hasSendableContent(input: "   "))
+
+        XCTAssertTrue(makeAccessoryState().hasSendableContent(input: "follow up"))
+        XCTAssertTrue(makeAccessoryState(hasAttachment: true).hasSendableContent(input: ""))
+        XCTAssertTrue(makeAccessoryState(hasSkillSelection: true).hasSendableContent(input: ""))
+    }
+
     func testSendTurnRestoresRawDraftWhenStartTurnFails() async {
         let service = makeService()
         service.isConnected = true
@@ -372,6 +381,36 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
             hasReviewSelection: hasReviewSelection,
             hasPendingReviewSelection: hasPendingReviewSelection,
             hasSubagentsSelection: hasSubagentsSelection
+        )
+    }
+
+    private func makeAccessoryState(
+        hasAttachment: Bool = false,
+        hasSkillSelection: Bool = false
+    ) -> TurnComposerAccessoryState {
+        let attachment = CodexImageAttachment(
+            thumbnailBase64JPEG: "thumb",
+            payloadDataURL: "data:image/jpeg;base64,AAAA"
+        )
+
+        return TurnComposerAccessoryState(
+            queuedDrafts: [],
+            canSteerQueuedDrafts: false,
+            canRestoreQueuedDrafts: false,
+            steeringDraftID: nil,
+            composerAttachments: hasAttachment ? [
+                TurnComposerImageAttachment(id: "attachment-1", state: .ready(attachment))
+            ] : [],
+            composerMentionedFiles: [],
+            composerMentionedSkills: hasSkillSelection ? [
+                TurnComposerMentionedSkill(name: "check-code", path: "/skills/check-code/SKILL.md", description: "Review")
+            ] : [],
+            composerMentionedPlugins: [],
+            composerReviewSelection: nil,
+            isSubagentsSelectionArmed: false,
+            isVoiceRecording: false,
+            voiceAudioLevels: [],
+            voiceRecordingDuration: 0
         )
     }
 

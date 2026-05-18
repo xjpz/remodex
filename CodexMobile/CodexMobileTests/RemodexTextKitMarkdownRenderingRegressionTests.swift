@@ -1,7 +1,7 @@
-// FILE: TextualMarkdownRenderingRegressionTests.swift
-// Purpose: Guards against Textual markdown rendering crashes from very fragmented rich text.
+// FILE: RemodexTextKitMarkdownRenderingRegressionTests.swift
+// Purpose: Guards against RemodexTextKit markdown rendering crashes from very fragmented rich text.
 // Layer: Unit Test
-// Exports: TextualMarkdownRenderingRegressionTests
+// Exports: RemodexTextKitMarkdownRenderingRegressionTests
 // Depends on: XCTest, SwiftUI, UIKit, CodexMobile
 
 import SwiftUI
@@ -10,7 +10,7 @@ import XCTest
 @testable import CodexMobile
 
 @MainActor
-final class TextualMarkdownRenderingRegressionTests: XCTestCase {
+final class RemodexTextKitMarkdownRenderingRegressionTests: XCTestCase {
     func testLargeFragmentedMarkdownRendersWithoutStackOverflowingTextBuilder() {
         let markdown = Self.largeFragmentedMarkdown(fragmentCount: 2_500)
         let host = UIHostingController(
@@ -32,7 +32,7 @@ final class TextualMarkdownRenderingRegressionTests: XCTestCase {
         XCTAssertGreaterThan(measuredSize.height, 0)
     }
 
-    // Builds many adjacent inline markdown runs, matching the Textual path that used to
+    // Builds many adjacent inline markdown runs, matching the RemodexTextKit path that used to
     // recursively interpolate SwiftUI Text values until large chats could crash.
     private static func largeFragmentedMarkdown(fragmentCount: Int) -> String {
         (0..<fragmentCount).map { index in

@@ -61,10 +61,7 @@ struct SidebarTopActionsRow: View {
     ) -> some View {
         let isLoading = pendingAction == action
 
-        Button {
-            HapticFeedback.shared.triggerImpactFeedback()
-            tap()
-        } label: {
+        HapticButton(hapticStyle: .medium, action: tap) {
             VStack(spacing: 8) {
                 ZStack {
                     Circle()
@@ -76,7 +73,7 @@ struct SidebarTopActionsRow: View {
                             .tint(.primary)
                             .scaleEffect(0.9)
                     } else {
-                        RemodexIcon.image(systemName: systemName, size: 22)
+                        RemodexIcon.image(systemName: systemName, size: 22, weight: .regular)
                             .foregroundStyle(.primary)
                     }
                 }

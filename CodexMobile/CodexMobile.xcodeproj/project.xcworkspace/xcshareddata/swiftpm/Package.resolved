@@ -1,5 +1,5 @@
 {
-  "originHash" : "6258034da56d47e02caec88b778b47dfa9472bcefa026488a7a946a435f12746",
+  "originHash" : "2406f9fa58cc7720c2c352b2b73ba8b0f81a04caf4b545aea4389ddd3846c078",
   "pins" : [
     {
       "identity" : "bigint",
@@ -34,6 +34,15 @@
       "state" : {
         "revision" : "abb0d68c3e7ba97b16ab51c38fcaca16b0e358c8",
         "version" : "5.66.0"
+      }
+    },
+    {
+      "identity" : "remodextextkit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Emanuele-web04/RemodexTextKit.git",
+      "state" : {
+        "revision" : "d7c9cd38021ded6af2c64a21ab48769fa64c3263",
+        "version" : "0.3.7"
       }
     },
     {
@@ -151,14 +160,6 @@
       "state" : {
         "revision" : "0b5c2cfaaec8d6193db206f675048eeb5ce95f71",
         "version" : "0.1.0"
-      }
-    },
-    {
-      "identity" : "textual",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/devnoname120/textual.git",
-      "state" : {
-        "revision" : "ac751f2fcfc96309d9330ee9a7356840f964e211"
       }
     },
     {

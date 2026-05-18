@@ -468,6 +468,14 @@ enum UserBubbleColor: String, CaseIterable, Identifiable {
         }
     }
 
+    // CTA palette: collapse the neutral "Default" onto "Primary" (.black) so
+    // accent buttons (composer send, sidebar chat pill, scope picker selected
+    // chip, ...) stay a bold label-colored CTA regardless of which neutral the
+    // user picked for their message bubbles.
+    var ctaPalette: UserBubbleColor {
+        self == .default ? .black : self
+    }
+
     func mentionForeground(for colorScheme: ColorScheme, fallback: Color) -> Color {
         self == .default ? fallback : bubbleForeground(for: colorScheme)
     }

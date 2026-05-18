@@ -342,7 +342,7 @@ private struct UIKitGitActionsMenuButton: UIViewRepresentable {
         private func makePlaceholderChangesRow(title: String, systemImage: String) -> UIAction {
             return UIAction(
                 title: title,
-                image: RemodexIcon.uiImage(systemName: systemImage),
+                image: RemodexIcon.menuUIImage(systemName: systemImage),
                 attributes: .disabled,
                 handler: { _ in }
             )
@@ -355,7 +355,7 @@ private struct UIKitGitActionsMenuButton: UIViewRepresentable {
             // presentation. NOT related to totals loading.
             let action = UIAction(
                 title: plainChangesTitle(totals: totals),
-                image: RemodexIcon.uiImage(systemName: "doc.text.magnifyingglass"),
+                image: RemodexIcon.menuUIImage(systemName: "doc.text.magnifyingglass"),
                 attributes: snapshot.isLoadingRepoDiff ? .disabled : []
             ) { _ in
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)

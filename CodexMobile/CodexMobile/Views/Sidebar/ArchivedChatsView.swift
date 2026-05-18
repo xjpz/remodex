@@ -1,6 +1,6 @@
 // FILE: ArchivedChatsView.swift
-// Purpose: Displays all archived chats with unarchive and delete actions.
-// Layer: View
+// Purpose: Displays locally archived chats from Settings with unarchive and delete actions.
+// Layer: Settings View
 // Exports: ArchivedChatsView
 // Depends on: CodexService, CodexThread
 
@@ -90,27 +90,18 @@ struct ArchivedChatsView: View {
             }
         }
         .swipeActions(edge: .leading, allowsFullSwipe: true) {
-            Button {
-                HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                codex.unarchiveThread(thread.id)
-            } label: {
-                RemodexIcon.label("Unarchive", systemName: "tray.and.arrow.up")
+            HapticButton(action: { codex.unarchiveThread(thread.id) }) {
+                RemodexIcon.menuLabel("Unarchive", systemName: "tray.and.arrow.up")
             }
             .tint(.blue)
         }
-        .contextMenu {
-            Button {
-                HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                codex.unarchiveThread(thread.id)
-            } label: {
-                RemodexIcon.label("Unarchive", systemName: "tray.and.arrow.up")
-            }
-
-            Button(role: .destructive) {
-                threadPendingDeletion = thread
-            } label: {
-                Label("Remove from Phone", systemImage: "trash")
-            }
+        .uiKitContextMenu {
+            SidebarThreadContextMenu(
+                thread: thread,
+                onArchiveToggle: { codex.unarchiveThread(thread.id) },
+                onDelete: { threadPendingDeletion = thread }
+            )
+            .uiMenu()
         }
     }
 }

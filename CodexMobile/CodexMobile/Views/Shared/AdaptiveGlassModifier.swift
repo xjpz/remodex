@@ -1,5 +1,8 @@
 // FILE: AdaptiveGlassModifier.swift
 // Purpose: Centralizes Liquid Glass availability, user preference, and fallback styling.
+//          Covers the glass material, button styles, navigation bar / toolbar item
+//          shells, and the iOS 26 scroll-edge soft fade used under translucent
+//          bars hosted via `safeAreaInset`.
 // Layer: View Modifier / Shared UI
 // Exports: GlassPreference, AdaptiveGlassStyle, AdaptiveGlassContainer, adaptive glass view helpers
 // Depends on: SwiftUI
@@ -39,6 +42,7 @@ private struct AdaptiveGlassModifier<S: Shape>: ViewModifier {
     let fallbackMaterial: Material
     let shape: S
 
+    @ViewBuilder
     func body(content: Content) -> some View {
         if #available(iOS 26, *), glassEnabled {
             switch style {
@@ -47,6 +51,11 @@ private struct AdaptiveGlassModifier<S: Shape>: ViewModifier {
             case .regular:
                 content.glassEffect(resolvedGlass, in: shape)
             }
+        } else if let tint {
+            // When a tint is provided the caller wants a colored surface (e.g. an
+            // accent CTA pill). The Liquid Glass fallback `Material` would mute
+            // that color, so paint the tint directly as the fallback background.
+            content.background(tint, in: shape)
         } else {
             content.background(fallbackMaterial, in: shape)
         }
@@ -127,6 +136,23 @@ private struct AdaptiveNavigationBarModifier: ViewModifier {
     }
 }
 
+// MARK: - Soft scroll edge effect (iOS 26)
+
+// Adds the iOS 26 soft scroll-edge fade so a `ScrollView`'s content gracefully
+// fades under a translucent bar hosted via `safeAreaInset` — same visual the
+// system navigation bar uses. No-op on iOS 18.
+private struct AdaptiveSoftScrollEdgeModifier: ViewModifier {
+    let edges: Edge.Set
+
+    func body(content: Content) -> some View {
+        if #available(iOS 26, *) {
+            content.scrollEdgeEffectStyle(.soft, for: edges)
+        } else {
+            content
+        }
+    }
+}
+
 // MARK: - Toolbar item fallback (glass OFF or iOS < 26)
 
 private struct AdaptiveToolbarItemModifier<S: Shape>: ViewModifier {
@@ -134,8 +160,13 @@ private struct AdaptiveToolbarItemModifier<S: Shape>: ViewModifier {
     let shape: S
 
     func body(content: Content) -> some View {
+        // On iOS 26 the system toolbar already wraps each `ToolbarItem` in an
+        // interactive Liquid Glass capsule/circle; stacking another
+        // `glassEffect` on top produced a visible double-background halo
+        // around the icon. Keep this a no-op there and let UIKit own the
+        // chrome; only the < iOS 26 fallback path needs the material backing.
         if #available(iOS 26, *), glassEnabled {
-            content.glassEffect(.regular.interactive(), in: shape)
+            content
         } else {
             content.background(.thinMaterial, in: shape)
         }
@@ -179,5 +210,29 @@ extension View {
 
     func adaptiveToolbarItem(in shape: some Shape) -> some View {
         modifier(AdaptiveToolbarItemModifier(shape: shape))
+    }
+
+    // Pairs with `safeAreaInset(edge:)` to give scrolled content the iOS 26
+    // soft fade under a translucent bar. No-op on iOS 18 so the bar simply
+    // sits above unfaded content (typically paired with an opaque fallback
+    // fill on the bar itself).
+    func adaptiveSoftScrollEdge(for edges: Edge.Set) -> some View {
+        modifier(AdaptiveSoftScrollEdgeModifier(edges: edges))
+    }
+
+    // Hosts a top-edge bar using the iOS 26 `safeAreaBar` primitive (which
+    // owns the Liquid Glass material + scroll-edge handoff that matches a
+    // system navigation bar), falling back to `safeAreaInset(edge:.top)` on
+    // iOS 18 where `safeAreaBar` does not exist. Use this instead of calling
+    // `glassEffect(in: Rectangle())` on a custom bar — that paints a
+    // discrete glass card with visible edges rather than blending into the
+    // safe area like the system bar does.
+    @ViewBuilder
+    func adaptiveTopBar<Bar: View>(@ViewBuilder _ bar: () -> Bar) -> some View {
+        if #available(iOS 26, *) {
+            self.safeAreaBar(edge: .top, content: bar)
+        } else {
+            self.safeAreaInset(edge: .top, spacing: 0, content: bar)
+        }
     }
 }

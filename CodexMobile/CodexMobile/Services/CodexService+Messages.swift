@@ -14,8 +14,11 @@ private enum CanonicalHistoryReconcileRetryPolicy {
 }
 
 private enum StreamingDeltaCoalescingPolicy {
-    // One display-frame worth of buffering keeps streaming lively while reducing UI invalidations.
-    static let flushDelayNanoseconds: UInt64 = 16_000_000
+    // Show the first system row quickly so the user sees immediate progress.
+    static let initialFlushDelayNanoseconds: UInt64 = 16_000_000
+    // System rows often parse markdown/tool summaries; a slightly slower cadence keeps
+    // them readable without invalidating the timeline on every transport chunk.
+    static let flushDelayNanoseconds: UInt64 = 50_000_000
 }
 
 private enum MessageTextProcessingPolicy {
@@ -2534,6 +2537,7 @@ extension CodexService {
         delta: String
     ) {
         let key = streamingItemMessageKey(threadId: threadId, itemId: itemId)
+        let shouldFlushInitialDeltaQuickly = streamingSystemMessageByItemID[key] == nil
         if pendingSystemDeltasByKey[key] == nil {
             pendingSystemDeltasByKey[key] = PendingSystemStreamingDeltas(
                 threadId: threadId,
@@ -2546,8 +2550,11 @@ extension CodexService {
         pendingSystemDeltasByKey[key]?.deltas.append(delta)
 
         guard systemDeltaFlushTasksByKey[key] == nil else { return }
+        let flushDelay = shouldFlushInitialDeltaQuickly
+            ? StreamingDeltaCoalescingPolicy.initialFlushDelayNanoseconds
+            : StreamingDeltaCoalescingPolicy.flushDelayNanoseconds
         systemDeltaFlushTasksByKey[key] = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: StreamingDeltaCoalescingPolicy.flushDelayNanoseconds)
+            try? await Task.sleep(nanoseconds: flushDelay)
             guard !Task.isCancelled else { return }
             self?.flushPendingSystemDeltas(forKey: key)
         }

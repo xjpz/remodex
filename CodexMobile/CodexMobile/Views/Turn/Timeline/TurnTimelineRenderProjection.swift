@@ -670,18 +670,37 @@ enum TurnTimelineRenderProjection {
         }
     }
 
-    // Drops placeholder-only system rows before SwiftUI can reserve timeline spacing for them.
+    // Drops placeholder-only rows before SwiftUI can reserve timeline spacing for them.
     private static func shouldSkipVisualRow(_ message: CodexMessage) -> Bool {
+        if message.role == .assistant,
+           message.isStreaming,
+           isEmptyStreamingPlaceholderText(message.text) {
+            return true
+        }
+
         guard message.role == .system,
               message.kind == .thinking else {
             return false
         }
-        guard message.text.utf8.count <= smallWhitespaceScanByteLimit else {
+
+        return isEmptyThinkingPlaceholderText(message.text)
+    }
+
+    private static func isEmptyStreamingPlaceholderText(_ text: String) -> Bool {
+        guard text.utf8.count <= smallWhitespaceScanByteLimit else {
+            return false
+        }
+
+        return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private static func isEmptyThinkingPlaceholderText(_ text: String) -> Bool {
+        guard text.utf8.count <= smallWhitespaceScanByteLimit else {
             return false
         }
 
         return ThinkingDisclosureParser
-            .normalizedThinkingContent(from: message.text)
+            .normalizedThinkingContent(from: text)
             .isEmpty
     }
 
