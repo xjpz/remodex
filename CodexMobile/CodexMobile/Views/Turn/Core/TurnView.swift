@@ -18,6 +18,8 @@ private enum TurnWorktreeOverlayRoute: Equatable {
 struct TurnView: View {
     let thread: CodexThread
     let isWakingMacDisplayRecovery: Bool
+    private let initialShouldAnchorToAssistantResponse: Bool
+    private let onInitialAssistantAnchorConsumed: (() -> Void)?
     var onOpenTerminal: ((String?) -> Void)? = nil
 
     @Environment(CodexService.self) private var codex
@@ -26,7 +28,7 @@ struct TurnView: View {
     @Environment(\.reconnectAction) private var reconnectAction
     @Environment(\.wakeMacDisplayAction) private var wakeMacDisplayAction
     @Environment(\.scenePhase) private var scenePhase
-    @State private var viewModel = TurnViewModel()
+    @State private var viewModel: TurnViewModel
     @State private var isInputFocused = false
     @State private var isShowingThreadPathSheet = false
     @State private var isShowingStatusSheet = false
@@ -49,7 +51,25 @@ struct TurnView: View {
     @State private var hasTriggeredVoiceAutoStop = false
     @State private var voiceRecoveryReason: CodexVoiceFailureReason?
     @State private var isShowingVoiceSetupSheet = false
+    @State private var hasConsumedInitialAssistantAnchor = false
     @StateObject private var voiceTranscriptionManager = GPTVoiceTranscriptionManager()
+
+    init(
+        thread: CodexThread,
+        isWakingMacDisplayRecovery: Bool,
+        initialShouldAnchorToAssistantResponse: Bool = false,
+        onInitialAssistantAnchorConsumed: (() -> Void)? = nil,
+        onOpenTerminal: ((String?) -> Void)? = nil
+    ) {
+        self.thread = thread
+        self.isWakingMacDisplayRecovery = isWakingMacDisplayRecovery
+        self.initialShouldAnchorToAssistantResponse = initialShouldAnchorToAssistantResponse
+        self.onInitialAssistantAnchorConsumed = onInitialAssistantAnchorConsumed
+        self.onOpenTerminal = onOpenTerminal
+        _viewModel = State(initialValue: TurnViewModel(
+            shouldAnchorToAssistantResponse: initialShouldAnchorToAssistantResponse
+        ))
+    }
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
     var body: some View {
@@ -73,6 +93,7 @@ struct TurnView: View {
         let isWorktreeProject = resolvedThread.isManagedWorktreeProject
         let isComposerAutocompletePresented = viewModel.isFileAutocompleteVisible
             || viewModel.isSkillAutocompleteVisible
+            || viewModel.isPluginAutocompleteVisible
             || viewModel.slashCommandPanelState != .hidden
         let isWorktreeHandoffAvailable = isWorktreeHandoffAvailable(
             isThreadRunning: isThreadRunning,
@@ -108,6 +129,7 @@ struct TurnView: View {
                 timelineChangeToken: renderSnapshot.timelineChangeToken,
                 activeTurnID: activeTurnID,
                 isThreadRunning: isThreadRunning,
+                isSendInFlight: viewModel.isSending,
                 latestTurnTerminalState: renderSnapshot.latestTurnTerminalState,
                 completedTurnIDs: renderSnapshot.completedTurnIDs,
                 stoppedTurnIDs: renderSnapshot.stoppedTurnIDs,
@@ -136,7 +158,6 @@ struct TurnView: View {
                 isLoadingRemoteEarlierMessages: renderSnapshot.isLoadingOlderHistory,
                 olderHistoryLoadErrorMessage: renderSnapshot.olderHistoryLoadErrorMessage,
                 shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponseBinding,
-                isScrolledToBottom: isScrolledToBottomBinding,
                 isComposerFocused: isInputFocused,
                 isComposerAutocompletePresented: isComposerAutocompletePresented,
                 emptyState: resolvedEmptyConversationState,
@@ -315,22 +336,35 @@ struct TurnView: View {
                 handleInitialAppear(activeTurnID: activeTurnID)
             },
             onPhotoPickerItemsChanged: { newItems in
-                handlePhotoPickerItemsChanged(newItems)
+                // Defer the observable-model mutation out of the .onChange action
+                // to avoid AttributeGraph cycles when the parent re-renders.
+                DispatchQueue.main.async { [viewModel] in
+                    viewModel.enqueuePhotoPickerItems(newItems, codex: codex, threadID: thread.id)
+                    viewModel.photoPickerItems = []
+                }
             },
             onActiveTurnChanged: { newValue in
                 if newValue != nil {
-                    viewModel.clearComposerAutocomplete()
+                    // Defer the observable-model mutation out of the .onChange action
+                    // to avoid AttributeGraph cycles when the parent re-renders.
+                    DispatchQueue.main.async { [viewModel] in
+                        viewModel.clearComposerAutocomplete()
+                    }
                 }
             },
             onThreadRunningChanged: { wasRunning, isRunning in
                 guard wasRunning, !isRunning else { return }
-                viewModel.flushQueueIfPossible(codex: codex, threadID: thread.id)
-                guard showsGitControls else { return }
-                viewModel.refreshGitBranchTargets(
-                    codex: codex,
-                    workingDirectory: gitWorkingDirectory,
-                    threadID: thread.id
-                )
+                // Defer the observable-model mutation out of the .onChange action
+                // to avoid AttributeGraph cycles when the parent re-renders.
+                DispatchQueue.main.async { [viewModel] in
+                    viewModel.flushQueueIfPossible(codex: codex, threadID: thread.id)
+                    guard showsGitControls else { return }
+                    viewModel.refreshGitBranchTargets(
+                        codex: codex,
+                        workingDirectory: gitWorkingDirectory,
+                        threadID: thread.id
+                    )
+                }
             },
             onConnectionChanged: { wasConnected, isConnected in
                 if !isConnected {
@@ -342,17 +376,25 @@ struct TurnView: View {
 
                 clearVoiceRecovery()
                 guard !wasConnected, isConnected else { return }
-                viewModel.flushQueueIfPossible(codex: codex, threadID: thread.id)
-                guard showsGitControls else { return }
-                viewModel.refreshGitBranchTargets(
-                    codex: codex,
-                    workingDirectory: gitWorkingDirectory,
-                    threadID: thread.id
-                )
+                // Defer the observable-model mutation out of the .onChange action
+                // to avoid AttributeGraph cycles when the parent re-renders.
+                DispatchQueue.main.async { [viewModel] in
+                    viewModel.flushQueueIfPossible(codex: codex, threadID: thread.id)
+                    guard showsGitControls else { return }
+                    viewModel.refreshGitBranchTargets(
+                        codex: codex,
+                        workingDirectory: gitWorkingDirectory,
+                        threadID: thread.id
+                    )
+                }
             },
             onScenePhaseChanged: { phase in
                 guard phase != .active else { return }
-                viewModel.saveLocalDraft(codex: codex, threadID: thread.id, persistToDisk: true)
+                // Defer the observable-model mutation out of the .onChange action
+                // to avoid AttributeGraph cycles when the parent re-renders.
+                DispatchQueue.main.async { [viewModel] in
+                    viewModel.saveLocalDraft(codex: codex, threadID: thread.id, persistToDisk: true)
+                }
                 cancelVoiceRecordingIfNeeded()
                 invalidatePendingVoicePreflight()
             },
@@ -370,18 +412,31 @@ struct TurnView: View {
         }
         .onChange(of: isInputFocused) { _, isFocused in
             guard !isFocused else { return }
-            viewModel.clearComposerAutocomplete()
+            // Defer the observable-model mutation out of the .onChange action
+            // to avoid AttributeGraph cycles during send.
+            DispatchQueue.main.async {
+                viewModel.clearComposerAutocomplete()
+            }
         }
         .onChange(of: renderSnapshot.repoRefreshSignal) { _, newValue in
             guard showsGitControls, newValue != nil else { return }
-            viewModel.scheduleGitStatusRefresh(
-                codex: codex,
-                workingDirectory: gitWorkingDirectory,
-                threadID: thread.id
-            )
+            // Defer the observable-model mutation out of the .onChange action
+            // to avoid AttributeGraph cycles when the parent re-renders.
+            DispatchQueue.main.async { [viewModel] in
+                viewModel.scheduleGitStatusRefresh(
+                    codex: codex,
+                    workingDirectory: gitWorkingDirectory,
+                    threadID: thread.id
+                )
+            }
         }
         .onChange(of: renderSnapshot.timelineChangeToken) { _, _ in
-            viewModel.reconcileDismissedStructuredPlanPrompts(messages: renderSnapshot.messages, codex: codex)
+            // Defer the observable-model mutation out of the .onChange action
+            // to avoid AttributeGraph cycles when the parent re-renders.
+            let messages = renderSnapshot.messages
+            DispatchQueue.main.async { [viewModel] in
+                viewModel.reconcileDismissedStructuredPlanPrompts(messages: messages, codex: codex)
+            }
         }
         .onReceive(voiceTranscriptionManager.$recordingDuration) { duration in
             guard isVoiceRecording,
@@ -575,13 +630,6 @@ struct TurnView: View {
         )
     }
 
-    private var isScrolledToBottomBinding: Binding<Bool> {
-        Binding(
-            get: { viewModel.isScrolledToBottom },
-            set: { viewModel.isScrolledToBottom = $0 }
-        )
-    }
-
     // Fetches the repo-wide local patch on demand so the toolbar pill opens the same diff UI as turn changes.
     private func presentRepositoryDiff(workingDirectory: String?) {
         guard !isLoadingRepositoryDiff else { return }
@@ -706,9 +754,9 @@ struct TurnView: View {
     }
 
     private func handleSend() {
-        isInputFocused = false
         viewModel.clearComposerAutocomplete()
         viewModel.sendTurn(codex: codex, subscriptions: subscriptions, threadID: thread.id)
+        isInputFocused = false
     }
 
     @ViewBuilder
@@ -871,6 +919,11 @@ struct TurnView: View {
 
     private func handleInitialAppear(activeTurnID: String?) {
         syncApprovalAlertPresentation()
+        if initialShouldAnchorToAssistantResponse && !hasConsumedInitialAssistantAnchor {
+            hasConsumedInitialAssistantAnchor = true
+            viewModel.shouldAnchorToAssistantResponse = true
+            onInitialAssistantAnchorConsumed?()
+        }
         if let pendingComposerAction = codex.consumePendingComposerAction(for: thread.id) {
             viewModel.applyPendingComposerAction(pendingComposerAction)
             viewModel.saveLocalDraft(codex: codex, threadID: thread.id)
@@ -1161,7 +1214,7 @@ struct TurnView: View {
             do {
                 _ = try await codex.startThreadIfReady(
                     preferredProjectPath: resolvedProjectPathForFollowUpThread(),
-                    pendingComposerAction: .codeReview(target: pendingCodeReviewTarget(for: target))
+                    pendingComposerAction: .codeReview(target: target.codexPendingTarget)
                 )
                 viewModel.clearComposerReviewSelection()
                 viewModel.saveLocalDraft(codex: codex, threadID: thread.id, persistToDisk: true)
@@ -1171,17 +1224,6 @@ struct TurnView: View {
                     codex.lastErrorMessage = message
                 }
             }
-        }
-    }
-
-    private func pendingCodeReviewTarget(
-        for target: TurnComposerReviewTarget
-    ) -> CodexPendingCodeReviewTarget {
-        switch target {
-        case .uncommittedChanges:
-            return .uncommittedChanges
-        case .baseBranch:
-            return .baseBranch
         }
     }
 
@@ -1264,10 +1306,10 @@ struct TurnView: View {
             return nil
         }
         let fullPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
-        let folderName = (fullPath as NSString).lastPathComponent
+        let folderName = fullPath.pathDisplayName
         return TurnThreadNavigationContext(
-            folderName: folderName.isEmpty ? fullPath : folderName,
-            subtitle: folderName.isEmpty ? fullPath : folderName,
+            folderName: folderName,
+            subtitle: folderName,
             fullPath: fullPath
         )
     }
@@ -1611,7 +1653,7 @@ struct TurnView: View {
     // MARK: - Empty State
 
     private var loadingState: some View {
-        chatPlaceholderState(
+        ChatEmptyStatePlaceholder(
             title: Text("Loading chat..."),
             subtitle: "Fetching the latest messages for this conversation."
         )
@@ -1627,49 +1669,18 @@ struct TurnView: View {
     }
 
     private var emptyState: some View {
-        chatPlaceholderState(
-            title: emptyStateTitle,
+        ChatEmptyStatePlaceholder(
+            title: ChatEmptyStateTitleBuilder.makeTitle(for: emptyStateFolderName),
             subtitle: "Chats are End-to-end encrypted"
         )
     }
 
-    private var emptyStateTitle: Text {
-        guard let folder = emptyStateFolderName else {
-            return Text("Hi! How can I help you?")
-        }
-        return Text("What should we do in ")
-            + Text(folder).foregroundStyle(.secondary)
-            + Text("?")
-    }
-
     private var emptyStateFolderName: String? {
         guard let cwd = currentResolvedThread.gitWorkingDirectory else { return nil }
-        let component = (cwd as NSString).lastPathComponent
-        return component.isEmpty ? nil : component
-    }
-
-    private func chatPlaceholderState(title: Text, subtitle: String) -> some View {
-        VStack(spacing: 12) {
-            Spacer()
-            Image("AppLogo")
-                .resizable()
-                .scaledToFit()
-                .frame(width: 56, height: 56)
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                .adaptiveGlass(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            title
-                .font(AppFont.title2(weight: .regular))
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 28)
-            Text(subtitle)
-                .font(AppFont.caption())
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 28)
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding()
+        let display = cwd.pathDisplayName
+        // Defensive: pathDisplayName falls back to the input, so only nil out
+        // when there's no usable folder portion at all (empty cwd after split).
+        return display.isEmpty ? nil : display
     }
 }
 

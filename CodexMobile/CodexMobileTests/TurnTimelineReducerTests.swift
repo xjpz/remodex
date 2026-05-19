@@ -2706,6 +2706,74 @@ final class TurnTimelineReducerTests: XCTestCase {
         ])
     }
 
+    func testFileChangeStaysBeforeNextTurnWhenOrderIndexIsAnchored() {
+        let now = Date()
+        var order = 0
+        func nextOrder() -> Int { order += 1; return order }
+
+        let messages = [
+            makeMessage(
+                id: "user-1",
+                threadID: "thread",
+                role: .user,
+                text: "First edit",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                text: "Done",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "assistant-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "file-change-1",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: "Path: Sources/First.swift\nKind: update\nTotals: +1 -1",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "file-change-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "user-2",
+                threadID: "thread",
+                role: .user,
+                text: "Second edit",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-2",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "assistant-2",
+                threadID: "thread",
+                role: .assistant,
+                text: "Done again",
+                createdAt: now.addingTimeInterval(4),
+                turnID: "turn-2",
+                itemID: "assistant-2",
+                orderIndex: nextOrder()
+            ),
+        ]
+
+        let projected = TurnTimelineReducer.project(messages: messages).messages
+
+        XCTAssertEqual(projected.map(\.id), [
+            "user-1",
+            "assistant-1",
+            "file-change-1",
+            "user-2",
+            "assistant-2",
+        ])
+    }
+
     func testEnforceIntraTurnOrderKeepsSteerUserNearBottomOfInterleavedTurn() {
         let now = Date()
         var order = 0
@@ -4210,9 +4278,7 @@ final class TurnScrollStateTrackerTests: XCTestCase {
         XCTAssertTrue(
             TurnScrollStateTracker.shouldPinDuringGeometryChange(
                 currentMode: .followBottom,
-                isScrolledToBottom: false,
-                isAutomaticScrollingPaused: false,
-                assistantAnchorTargetExists: true
+                isAutomaticScrollingPaused: false
             )
         )
     }
@@ -4264,38 +4330,30 @@ final class TurnScrollStateTrackerTests: XCTestCase {
         XCTAssertFalse(
             TurnScrollStateTracker.shouldPinDuringGeometryChange(
                 currentMode: .manual,
-                isScrolledToBottom: true,
-                isAutomaticScrollingPaused: false,
-                assistantAnchorTargetExists: false
+                isAutomaticScrollingPaused: false
             )
         )
 
         XCTAssertFalse(
             TurnScrollStateTracker.shouldPinDuringGeometryChange(
                 currentMode: .followBottom,
-                isScrolledToBottom: true,
-                isAutomaticScrollingPaused: true,
-                assistantAnchorTargetExists: false
+                isAutomaticScrollingPaused: true
             )
         )
     }
 
-    func testAssistantAnchorPinsOnlyWhileWaitingForAssistantTarget() {
-        XCTAssertTrue(
+    func testAssistantAnchorDoesNotBottomPinWhileWaitingForAssistantTarget() {
+        XCTAssertFalse(
             TurnScrollStateTracker.shouldPinDuringGeometryChange(
                 currentMode: .anchorAssistantResponse,
-                isScrolledToBottom: true,
-                isAutomaticScrollingPaused: false,
-                assistantAnchorTargetExists: false
+                isAutomaticScrollingPaused: false
             )
         )
 
         XCTAssertFalse(
             TurnScrollStateTracker.shouldPinDuringGeometryChange(
                 currentMode: .anchorAssistantResponse,
-                isScrolledToBottom: true,
-                isAutomaticScrollingPaused: false,
-                assistantAnchorTargetExists: true
+                isAutomaticScrollingPaused: true
             )
         )
     }

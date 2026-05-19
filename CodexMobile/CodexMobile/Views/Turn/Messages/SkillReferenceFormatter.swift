@@ -17,6 +17,10 @@ enum SkillReferenceFormatter {
         in text: String,
         style: SkillReferenceReplacementStyle
     ) -> String {
+        guard mayContainSkillReference(text) else {
+            return text
+        }
+
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         var isInsideFence = false
 
@@ -35,6 +39,16 @@ enum SkillReferenceFormatter {
         }
 
         return transformed.joined(separator: "\n")
+    }
+
+    // Most chat text has no filesystem skill path; skip line splitting and regex passes in that common case.
+    private static func mayContainSkillReference(_ text: String) -> Bool {
+        let lowercasedText = text.lowercased()
+        guard lowercasedText.contains("/skill.md") else {
+            return false
+        }
+
+        return knownSkillPathMarkers.contains { lowercasedText.contains($0) }
     }
 
     private static func replacingSkillReferencesInLine(

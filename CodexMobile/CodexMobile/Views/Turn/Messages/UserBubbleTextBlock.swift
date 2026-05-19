@@ -13,30 +13,31 @@ struct UserBubbleTextBlock<Content: View>: View {
 
     let contentIdentity: String
     let rawText: String
+    var contentResetKey: String? = nil
     @ViewBuilder let content: () -> Content
 
     @State private var isExpanded = false
 
     private var canCollapse: Bool {
-        if rawText.count > Self.collapseCharacterThreshold {
-            return true
-        }
-
+        var characterCount = 0
         var newlineCount = 0
-        for character in rawText where character == "\n" {
-            newlineCount += 1
-            if newlineCount >= Self.collapseNewlineThreshold {
+        for character in rawText {
+            characterCount += 1
+            if characterCount > Self.collapseCharacterThreshold {
                 return true
+            }
+            if character == "\n" {
+                newlineCount += 1
+                if newlineCount >= Self.collapseNewlineThreshold {
+                    return true
+                }
             }
         }
         return false
     }
 
-    private var collapseResetKey: Int {
-        var hasher = Hasher()
-        hasher.combine(contentIdentity)
-        hasher.combine(rawText)
-        return hasher.finalize()
+    private var collapseResetKey: String {
+        "\(contentIdentity)|\(contentResetKey ?? TurnTextCacheKey.stableFingerprint(for: rawText))"
     }
 
     var body: some View {

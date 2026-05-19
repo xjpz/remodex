@@ -1226,10 +1226,15 @@ extension CodexService {
         text: String,
         turnId: String? = nil,
         attachments: [CodexImageAttachment] = [],
-        fileMentions: [String] = []
+        fileMentions: [String] = [],
+        skillMentions: [String] = [],
+        pluginMentions: [String] = []
     ) -> String {
         let trimmedText = Self.normalizedMessageText(text)
-        guard Self.hasMeaningfulHistoryText(trimmedText) || !attachments.isEmpty else {
+        guard Self.hasMeaningfulHistoryText(trimmedText)
+                || !attachments.isEmpty
+                || !skillMentions.isEmpty
+                || !pluginMentions.isEmpty else {
             return ""
         }
 
@@ -1238,6 +1243,8 @@ extension CodexService {
             role: .user,
             text: trimmedText,
             fileMentions: fileMentions,
+            skillMentions: skillMentions,
+            pluginMentions: pluginMentions,
             turnId: turnId,
             isStreaming: false,
             deliveryState: .pending,
@@ -1379,9 +1386,8 @@ extension CodexService {
                     turnId: resolvedTurnId,
                     fileChangePathKeys: incomingPathKeys
                 )
-                if let refreshedIndex = threadMessages.indices.first(where: { threadMessages[$0].id == keepID }) {
-                    threadMessages[refreshedIndex].orderIndex = CodexMessageOrderCounter.next()
-                }
+                // Preserve the row's original timeline slot. The render reducer handles
+                // trailing file-change cards inside their own turn without crossing later users.
                 threadMessages.sort(by: { $0.orderIndex < $1.orderIndex })
                 messagesByThread[threadId] = threadMessages
                 persistMessages()
@@ -2118,11 +2124,8 @@ extension CodexService {
                     }
                 }
                 if let finalIndex = threadMessages.indices.first(where: { threadMessages[$0].id == keepID }) {
-                    if kind == .fileChange {
-                        // File-change cards are intentionally trailed; other activity keeps
-                        // its original slot so late completion refreshes do not jump below the answer.
-                        threadMessages[finalIndex].orderIndex = CodexMessageOrderCounter.next()
-                    }
+                    // Keep refreshed file-change rows anchored to their original turn.
+                    // Intra-turn rendering still trails them after the assistant answer.
                     finalRawIndex = finalIndex
                 }
                 threadMessages.sort(by: { $0.orderIndex < $1.orderIndex })
@@ -3933,6 +3936,25 @@ extension CodexService {
         messagesByThread[threadId] = threadMessages
         persistMessages()
         updateCurrentOutput(for: threadId)
+    }
+
+    // Removes a known optimistic user row when text matching is not reliable, such as mention-only sends.
+    @discardableResult
+    func removeUserMessage(threadId: String, messageId: String) -> Bool {
+        guard !messageId.isEmpty,
+              var threadMessages = messagesByThread[threadId],
+              let index = findMessageIndex(threadId: threadId, messageId: messageId),
+              threadMessages.indices.contains(index),
+              threadMessages[index].role == .user else {
+            return false
+        }
+
+        threadMessages.remove(at: index)
+        messagesByThread[threadId] = threadMessages
+        messageIndexCacheByThread[threadId] = nil
+        persistMessages()
+        updateCurrentOutput(for: threadId)
+        return true
     }
 
     // Marks streaming assistant state complete once turn/completed arrives.

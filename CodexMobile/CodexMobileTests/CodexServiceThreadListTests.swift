@@ -112,6 +112,85 @@ final class CodexServiceThreadListTests: XCTestCase {
         XCTAssertEqual(requestCount, 1)
     }
 
+    func testConcurrentListThreadsShareInFlightRequest() async throws {
+        let service = makeService()
+        service.isConnected = true
+        service.isInitialized = true
+
+        var requestCount = 0
+
+        service.requestTransportOverride = { method, _ in
+            guard method == "thread/list" else {
+                return RPCMessage(id: .string(UUID().uuidString), result: .object([:]), includeJSONRPC: false)
+            }
+
+            requestCount += 1
+            try await Task.sleep(nanoseconds: 50_000_000)
+
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "threads": .array([
+                        .object([
+                            "id": .string("thread-active"),
+                            "title": .string("Active thread"),
+                        ]),
+                    ]),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        let firstRefresh = Task { @MainActor in try await service.listThreads() }
+        let secondRefresh = Task { @MainActor in try await service.listThreads() }
+
+        try await firstRefresh.value
+        try await secondRefresh.value
+
+        XCTAssertEqual(requestCount, 1)
+        XCTAssertEqual(service.threads.map(\.id), ["thread-active"])
+        XCTAssertFalse(service.isLoadingThreads)
+    }
+
+    func testRealtimeSyncSharesInFlightListThreadsRequest() async throws {
+        let service = makeService()
+        service.isConnected = true
+        service.isInitialized = true
+
+        var requestCount = 0
+
+        service.requestTransportOverride = { method, _ in
+            guard method == "thread/list" else {
+                return RPCMessage(id: .string(UUID().uuidString), result: .object([:]), includeJSONRPC: false)
+            }
+
+            requestCount += 1
+            try await Task.sleep(nanoseconds: 50_000_000)
+
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "threads": .array([
+                        .object([
+                            "id": .string("thread-active"),
+                            "title": .string("Active thread"),
+                        ]),
+                    ]),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        let sidebarRefresh = Task { @MainActor in try await service.listThreads() }
+        try await Task.sleep(nanoseconds: 10_000_000)
+
+        await service.syncThreadsList()
+        try await sidebarRefresh.value
+
+        XCTAssertEqual(requestCount, 1)
+        XCTAssertEqual(service.threads.map(\.id), ["thread-active"])
+    }
+
     func testSortThreadsUsesUpdatedAtBeforeCreatedAtFallback() {
         let service = makeService()
         let laterByUpdatedAt = CodexThread(

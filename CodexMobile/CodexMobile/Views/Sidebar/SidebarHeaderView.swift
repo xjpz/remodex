@@ -41,7 +41,7 @@ struct SidebarHeaderView: View {
                 overflowMenuButton
 
                 SidebarToolbarIconButton(
-                    icon: .systemImage("gearshape.fill"),
+                    icon: .systemImage("gearshape"),
                     accessibilityLabel: "Settings",
                     action: overflowActions.onOpenSettings
                 )

@@ -322,7 +322,7 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
     @Binding var showsAllModelsSheet: Bool
 
     private let metaLabelColor = Color(.secondaryLabel)
-    private var metaTextFont: Font { AppFont.subheadline() }
+    private var metaTextFont: Font { AppFont.callout() }
     private var leadingIconFont: Font { AppFont.subheadline() }
 
     static func == (lhs: ComposerRuntimeMenuControl, rhs: ComposerRuntimeMenuControl) -> Bool {

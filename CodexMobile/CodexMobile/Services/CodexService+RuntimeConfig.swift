@@ -515,57 +515,6 @@ private extension CodexService {
         persistThreadRuntimeOverrides()
     }
 
-    func normalizeRuntimeSelectionsAfterModelsUpdate() {
-        guard !availableModels.isEmpty else {
-            if selectedModelId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
-                selectedModelId = nil
-            }
-            if selectedReasoningEffort?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
-                selectedReasoningEffort = nil
-            }
-            persistRuntimeSelections()
-            return
-        }
-
-        let resolvedModel = selectedModelOption(from: availableModels) ?? fallbackModel(from: availableModels)
-        selectedModelId = resolvedModel?.id
-        hasPersistedSelectedModelId = resolvedModel != nil
-
-        if let resolvedModel {
-            let supported = Set(resolvedModel.supportedReasoningEfforts.map { $0.reasoningEffort })
-            if supported.isEmpty {
-                selectedReasoningEffort = nil
-            } else if let selectedReasoningEffort,
-                      supported.contains(selectedReasoningEffort) {
-                // Keep current reasoning.
-            } else if let modelDefault = resolvedModel.defaultReasoningEffort,
-                      supported.contains(modelDefault) {
-                selectedReasoningEffort = modelDefault
-            } else if supported.contains("medium") {
-                selectedReasoningEffort = "medium"
-            } else {
-                selectedReasoningEffort = resolvedModel.supportedReasoningEfforts.first?.reasoningEffort
-            }
-
-            if let selectedServiceTier,
-               !resolvedModel.supportsServiceTier(selectedServiceTier) {
-                self.selectedServiceTier = nil
-            }
-        } else {
-            selectedReasoningEffort = nil
-            selectedServiceTier = nil
-        }
-
-        if let selectedGitWriterModelId,
-           !availableModels.contains(where: {
-               $0.id == selectedGitWriterModelId || $0.model == selectedGitWriterModelId
-           }) {
-            self.selectedGitWriterModelId = nil
-        }
-
-        persistRuntimeSelections()
-    }
-
     func selectedModelOption(from models: [CodexModelOption]) -> CodexModelOption? {
         guard !models.isEmpty else {
             return nil
@@ -655,5 +604,58 @@ private extension CodexService {
         }
 
         defaults.set(encodedOverrides, forKey: Self.threadRuntimeOverridesDefaultsKey)
+    }
+}
+
+extension CodexService {
+    func normalizeRuntimeSelectionsAfterModelsUpdate() {
+        guard !availableModels.isEmpty else {
+            if selectedModelId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+                selectedModelId = nil
+            }
+            if selectedReasoningEffort?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+                selectedReasoningEffort = nil
+            }
+            persistRuntimeSelections()
+            return
+        }
+
+        let resolvedModel = selectedModelOption(from: availableModels) ?? fallbackModel(from: availableModels)
+        selectedModelId = resolvedModel?.id
+        hasPersistedSelectedModelId = resolvedModel != nil
+
+        if let resolvedModel {
+            let supported = Set(resolvedModel.supportedReasoningEfforts.map { $0.reasoningEffort })
+            if supported.isEmpty {
+                selectedReasoningEffort = nil
+            } else if let selectedReasoningEffort,
+                      supported.contains(selectedReasoningEffort) {
+                // Keep current reasoning.
+            } else if let modelDefault = resolvedModel.defaultReasoningEffort,
+                      supported.contains(modelDefault) {
+                selectedReasoningEffort = modelDefault
+            } else if supported.contains("medium") {
+                selectedReasoningEffort = "medium"
+            } else {
+                selectedReasoningEffort = resolvedModel.supportedReasoningEfforts.first?.reasoningEffort
+            }
+
+            if let selectedServiceTier,
+               !resolvedModel.supportsServiceTier(selectedServiceTier) {
+                self.selectedServiceTier = nil
+            }
+        } else {
+            selectedReasoningEffort = nil
+            selectedServiceTier = nil
+        }
+
+        if let selectedGitWriterModelId,
+           !availableModels.contains(where: {
+               $0.id == selectedGitWriterModelId || $0.model == selectedGitWriterModelId
+           }) {
+            self.selectedGitWriterModelId = nil
+        }
+
+        persistRuntimeSelections()
     }
 }

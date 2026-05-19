@@ -67,6 +67,8 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
     }
     var textRenderSignature: CodexMessageTextRenderSignature
     var fileMentions: [String]
+    var skillMentions: [String]
+    var pluginMentions: [String]
     var createdAt: Date
     var turnId: String?
     var itemId: String?
@@ -91,6 +93,8 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         assistantPhase: String? = nil,
         text: String,
         fileMentions: [String] = [],
+        skillMentions: [String] = [],
+        pluginMentions: [String] = [],
         createdAt: Date = Date(),
         turnId: String? = nil,
         itemId: String? = nil,
@@ -112,6 +116,8 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         self.text = text
         self.textRenderSignature = CodexMessageTextRenderSignature(text: text)
         self.fileMentions = fileMentions
+        self.skillMentions = skillMentions
+        self.pluginMentions = pluginMentions
         self.createdAt = createdAt
         self.turnId = turnId
         self.itemId = itemId
@@ -148,6 +154,8 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         case assistantPhase
         case text
         case fileMentions
+        case skillMentions
+        case pluginMentions
         case createdAt
         case turnId
         case itemId
@@ -172,6 +180,8 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         text = try container.decode(String.self, forKey: .text)
         textRenderSignature = CodexMessageTextRenderSignature(text: text)
         fileMentions = try container.decodeIfPresent([String].self, forKey: .fileMentions) ?? []
+        skillMentions = try container.decodeIfPresent([String].self, forKey: .skillMentions) ?? []
+        pluginMentions = try container.decodeIfPresent([String].self, forKey: .pluginMentions) ?? []
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         turnId = try container.decodeIfPresent(String.self, forKey: .turnId)
         itemId = try container.decodeIfPresent(String.self, forKey: .itemId)
@@ -214,6 +224,8 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         try container.encodeIfPresent(assistantPhase, forKey: .assistantPhase)
         try container.encode(text, forKey: .text)
         try container.encode(fileMentions, forKey: .fileMentions)
+        try container.encode(skillMentions, forKey: .skillMentions)
+        try container.encode(pluginMentions, forKey: .pluginMentions)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encodeIfPresent(turnId, forKey: .turnId)
         try container.encodeIfPresent(itemId, forKey: .itemId)
@@ -236,6 +248,8 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
             && lhs.assistantPhase == rhs.assistantPhase
             && lhs.text == rhs.text
             && lhs.fileMentions == rhs.fileMentions
+            && lhs.skillMentions == rhs.skillMentions
+            && lhs.pluginMentions == rhs.pluginMentions
             && lhs.createdAt == rhs.createdAt
             && lhs.turnId == rhs.turnId
             && lhs.itemId == rhs.itemId
@@ -258,6 +272,8 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         hasher.combine(assistantPhase)
         hasher.combine(text)
         hasher.combine(fileMentions)
+        hasher.combine(skillMentions)
+        hasher.combine(pluginMentions)
         hasher.combine(createdAt)
         hasher.combine(turnId)
         hasher.combine(itemId)

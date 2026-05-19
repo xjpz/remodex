@@ -28,7 +28,7 @@ struct SidebarThreadListView: View {
     var onArchiveToggleThread: ((CodexThread) -> Void)? = nil
     var onDeleteThread: ((CodexThread) -> Void)? = nil
     @Environment(CodexService.self) private var codex
-    @AppStorage("sidebar.collapsedProjectGroupIDs") private var collapsedProjectGroupIDsStorage = ""
+    @AppStorage(SidebarProjectExpansionState.collapsedProjectGroupIDsStorageKey) private var collapsedProjectGroupIDsStorage = ""
     @State private var expandedProjectGroupIDs: Set<String> = []
     @State private var knownProjectGroupIDs: Set<String> = []
     @State private var hasInitializedProjectGroupExpansion = false
@@ -75,6 +75,11 @@ struct SidebarThreadListView: View {
             syncRevealedProjectGroupState()
             revealSelectedThreadProjectGroup()
             revealSelectedSubagentAncestors()
+        }
+        .onChange(of: collapsedProjectGroupIDsStorage) { _, _ in
+            withAnimation(.snappy(duration: 0.22)) {
+                applyPersistedProjectGroupExpansionState()
+            }
         }
         .onChange(of: selectedThread?.id) { _, _ in
             revealSelectedThreadProjectGroup()
@@ -448,13 +453,23 @@ struct SidebarThreadListView: View {
         hasInitializedProjectGroupExpansion = true
     }
 
+    // Applies bulk changes from the chip-row control immediately; regular sync
+    // preserves in-memory folds, while this treats AppStorage as the source of truth.
+    private func applyPersistedProjectGroupExpansionState() {
+        let visibleProjectGroupIDs = SidebarProjectExpansionState.projectGroupIDs(in: groups)
+        let persistedCollapsedGroupIDs = SidebarProjectExpansionState.decodePersistedGroupIDs(
+            collapsedProjectGroupIDsStorage
+        )
+
+        expandedProjectGroupIDs = visibleProjectGroupIDs.subtracting(persistedCollapsedGroupIDs)
+        knownProjectGroupIDs = visibleProjectGroupIDs
+        hasInitializedProjectGroupExpansion = true
+        revealedProjectGroupIDs = revealedProjectGroupIDs.intersection(expandedProjectGroupIDs)
+    }
+
     // Keeps Show more expansion state only for project groups that still exist on screen.
     private func syncRevealedProjectGroupState() {
-        let visibleProjectGroupIDs = Set(
-            groups
-                .filter { $0.kind == .project }
-                .map(\.id)
-        )
+        let visibleProjectGroupIDs = SidebarProjectExpansionState.projectGroupIDs(in: groups)
         revealedProjectGroupIDs = revealedProjectGroupIDs.intersection(visibleProjectGroupIDs)
     }
 

@@ -160,7 +160,7 @@ extension CodexService {
 
         do {
             // Poll recent metadata only; listThreads() uses the same cap during reconnect/refresh.
-            let activeThreads = try await fetchServerThreads(limit: recentActiveThreadListLimit)
+            let activeThreads = try await fetchCoalescedServerThreads(limit: recentActiveThreadListLimit)
 
             reconcileLocalThreadsWithServer(activeThreads)
             debugSyncLog("sync thread/list active=\(activeThreads.count) local=\(threads.count)")

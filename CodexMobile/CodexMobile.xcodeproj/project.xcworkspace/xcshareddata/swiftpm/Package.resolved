@@ -41,8 +41,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/Emanuele-web04/RemodexTextKit.git",
       "state" : {
-        "revision" : "d7c9cd38021ded6af2c64a21ab48769fa64c3263",
-        "version" : "0.3.7"
+        "revision" : "464d56175299e85124cdba75d15d9f4c87d04be3",
+        "version" : "0.3.8"
       }
     },
     {

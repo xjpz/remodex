@@ -80,7 +80,7 @@ struct SidebarToolbarIconButton: View {
 #Preview {
     HStack(spacing: 8) {
         SidebarToolbarIconButton(
-            icon: .systemImage("gearshape.fill"),
+            icon: .systemImage("gearshape"),
             accessibilityLabel: "Settings",
             action: {}
         )

@@ -29,8 +29,8 @@ function expectedGeneratedImagePath(threadId, fileName) {
 test("hasRelayConnectionGoneStale returns true once the relay silence crosses the timeout", () => {
   assert.equal(
     hasRelayConnectionGoneStale(1_000, {
-      now: 71_000,
-      staleAfterMs: 70_000,
+      now: 26_000,
+      staleAfterMs: 25_000,
     }),
     true
   );
@@ -217,24 +217,24 @@ test("disableUnsupportedReasoningSummaryForTurnStart leaves other models untouch
 test("hasRelayConnectionGoneStale returns false for fresh or missing activity timestamps", () => {
   assert.equal(
     hasRelayConnectionGoneStale(1_000, {
-      now: 70_999,
-      staleAfterMs: 70_000,
+      now: 25_999,
+      staleAfterMs: 25_000,
     }),
     false
   );
   assert.equal(hasRelayConnectionGoneStale(Number.NaN), false);
 });
 
-test("hasRelayConnectionGoneStale default threshold tolerates a full quiet minute", () => {
+test("hasRelayConnectionGoneStale default threshold waits 25 seconds", () => {
   assert.equal(
     hasRelayConnectionGoneStale(1_000, {
-      now: 60_999,
+      now: 25_999,
     }),
     false
   );
   assert.equal(
     hasRelayConnectionGoneStale(1_000, {
-      now: 71_000,
+      now: 26_000,
     }),
     true
   );

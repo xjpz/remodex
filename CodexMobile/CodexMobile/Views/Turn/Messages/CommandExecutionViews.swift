@@ -39,10 +39,7 @@ struct CommandOutputImageReference: Identifiable, Equatable {
 
     var id: String { path }
 
-    var fileName: String {
-        let basename = (path as NSString).lastPathComponent
-        return basename.isEmpty ? path : basename
-    }
+    var fileName: String { path.pathDisplayName }
 }
 
 nonisolated struct AssistantMarkdownImageReference: Identifiable, Equatable {
@@ -56,10 +53,7 @@ nonisolated struct AssistantMarkdownImageReference: Identifiable, Equatable {
         self.altText = altText
     }
 
-    var fileName: String {
-        let basename = (path as NSString).lastPathComponent
-        return basename.isEmpty ? path : basename
-    }
+    var fileName: String { path.pathDisplayName }
 
     var displayTitle: String {
         let trimmedAlt = altText.trimmingCharacters(in: .whitespacesAndNewlines)

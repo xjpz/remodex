@@ -28,8 +28,7 @@ struct CodeCommentFindingCard: View {
     }
 
     private var fileName: String {
-        let basename = (finding.file as NSString).lastPathComponent
-        return basename.isEmpty ? finding.file : basename
+        finding.file.pathDisplayName
     }
 
     private var lineLabel: String? {

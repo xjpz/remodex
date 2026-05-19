@@ -1,5 +1,5 @@
 // FILE: TurnComposerSecondaryBar.swift
-// Purpose: Owns the secondary composer controls shown below the main input card.
+// Purpose: Owns the secondary composer controls shown above the main input card.
 // Layer: View Component
 // Exports: TurnComposerSecondaryBar
 // Depends on: SwiftUI, UIKit, TurnGitBranchSelector, ContextWindowProgressRing,

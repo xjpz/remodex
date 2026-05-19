@@ -68,7 +68,10 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             isFocused: $isFocused,
             dynamicHeight: $dynamicHeight
         )
-        uiView.isEditable = isEditable
+        let shouldDeferEditabilityLock = !isEditable && uiView.isEditable && uiView.isFirstResponder
+        if !shouldDeferEditabilityLock {
+            uiView.isEditable = isEditable
+        }
         uiView.isSelectable = true
         if fontChanged {
             uiView.font = nextFont
@@ -89,6 +92,11 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             shouldBeFocused: isFocused,
             isEditable: isEditable
         )
+        if shouldDeferEditabilityLock {
+            DispatchQueue.main.async { [weak uiView] in
+                uiView?.isEditable = false
+            }
+        }
         context.coordinator.updateHeightIfNeeded(for: uiView, force: textChanged || fontChanged)
     }
 
@@ -120,6 +128,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         private var pendingHeightValue: CGFloat?
         private var isHeightCommitScheduled = false
         private var lastHeightMeasurementSignature: HeightMeasurementSignature?
+        private var lastIsEditable: Bool
 
         init(
             text: Binding<String>,
@@ -134,6 +143,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             self.minVisibleLines = minVisibleLines
             self.maxVisibleLines = maxVisibleLines
             self.lastFocusBindingValue = isFocused.wrappedValue
+            self.lastIsEditable = true
         }
 
         func updateBindings(
@@ -147,21 +157,33 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         }
 
         func textViewDidChange(_ textView: UITextView) {
-            if text.wrappedValue != textView.text {
-                text.wrappedValue = textView.text
+            let newText = textView.text ?? ""
+            if text.wrappedValue != newText {
+                // Defer the binding write out of UIKit's edit transaction to avoid
+                // AttributeGraph cycles.
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    if self.text.wrappedValue != newText {
+                        self.text.wrappedValue = newText
+                    }
+                }
             }
             updateHeightIfNeeded(for: textView, force: true)
         }
 
         func textViewDidBeginEditing(_ textView: UITextView) {
-            if !isFocused.wrappedValue {
-                isFocused.wrappedValue = true
+            // UIKit can send focus callbacks while SwiftUI is updating the representable.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.isFocused.wrappedValue else { return }
+                self.isFocused.wrappedValue = true
             }
         }
 
         func textViewDidEndEditing(_ textView: UITextView) {
-            if isFocused.wrappedValue {
-                isFocused.wrappedValue = false
+            // Defer binding writes out of UIKit's edit transaction to avoid AttributeGraph cycles.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isFocused.wrappedValue else { return }
+                self.isFocused.wrappedValue = false
             }
         }
 
@@ -288,13 +310,15 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             isEditable: Bool
         ) {
             let focusBindingDidChange = shouldBeFocused != lastFocusBindingValue
+            let editabilityDidChange = isEditable != lastIsEditable
             lastFocusBindingValue = shouldBeFocused
+            lastIsEditable = isEditable
 
-            // Only drive focus changes when the binding actually flipped.
+            // Only drive focus changes when the binding or editability actually flipped.
             // Reacting on every updateUIView when the value is merely "still true"
             // causes a becomeFirstResponder → didBeginEditing → binding write →
             // updateUIView → becomeFirstResponder loop that drops the keyboard.
-            guard focusBindingDidChange else { return }
+            guard focusBindingDidChange || editabilityDidChange else { return }
 
             if shouldBeFocused && isEditable {
                 guard !textView.isFirstResponder else { return }
@@ -303,8 +327,8 @@ struct TurnComposerInputTextView: UIViewRepresentable {
                 }
             } else if !shouldBeFocused || !isEditable {
                 guard textView.isFirstResponder else { return }
-                DispatchQueue.main.async {
-                    textView.resignFirstResponder()
+                DispatchQueue.main.async { [weak textView] in
+                    textView?.resignFirstResponder()
                 }
             }
         }

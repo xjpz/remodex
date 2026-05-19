@@ -20,6 +20,7 @@ enum TurnCacheManager {
     @MainActor static func resetAll() {
         MarkdownParseCacheReset.reset()
         MarkdownRenderableTextCache.reset()
+        UserBubbleRenderModelCache.reset()
         MessageRowRenderModelCache.reset()
         CommandExecutionStatusCache.reset()
         FileChangeSystemRenderCache.reset()

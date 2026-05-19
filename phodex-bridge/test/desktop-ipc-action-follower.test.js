@@ -16,7 +16,9 @@ const {
   applyConversationStateChange,
   createDesktopIpcActionFollower,
   desktopFollowerPayloadForResponse,
+  projectDesktopAssistantDeltaNotifications,
   projectPendingDesktopActions,
+  resolveDefaultIpcSocketPath,
   seedConversationStateFromThreadRead,
 } = require("../src/desktop-ipc-action-follower");
 
@@ -338,9 +340,127 @@ test("seeds conversation state from thread/read responses for IPC recovery", () 
   );
 });
 
+test("projects only appended assistant text as live app-server deltas", () => {
+  const previousState = {
+    turns: [{
+      id: "turn-1",
+      items: [{
+        id: "assistant-1",
+        type: "assistant_message",
+        text: "Hello",
+      }],
+    }],
+  };
+  const nextState = {
+    turns: [{
+      id: "turn-1",
+      items: [{
+        id: "assistant-1",
+        type: "assistant_message",
+        text: "Hello world",
+      }],
+    }],
+  };
+
+  assert.deepEqual(
+    projectDesktopAssistantDeltaNotifications("thread-1", previousState, nextState),
+    [{
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "assistant-1",
+        delta: " world",
+      },
+    }]
+  );
+});
+
+test("projects canonical desktop agentMessage items as live app-server deltas", () => {
+  const previousState = {
+    turns: [{
+      id: "turn-agent-message",
+      items: [{
+        id: "agent-message-1",
+        type: "agentMessage",
+        text: "Hello",
+      }],
+    }],
+  };
+  const nextState = {
+    turns: [{
+      id: "turn-agent-message",
+      items: [{
+        id: "agent-message-1",
+        type: "agentMessage",
+        text: "Hello world",
+      }],
+    }],
+  };
+
+  assert.deepEqual(
+    projectDesktopAssistantDeltaNotifications("thread-agent-message", previousState, nextState),
+    [{
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "thread-agent-message",
+        turnId: "turn-agent-message",
+        itemId: "agent-message-1",
+        delta: " world",
+      },
+    }]
+  );
+});
+
+test("does not replay unchanged or rewritten assistant text as live deltas", () => {
+  const previousState = {
+    turns: [{
+      id: "turn-1",
+      items: [
+        {
+          id: "assistant-same",
+          type: "assistant_message",
+          text: "same",
+        },
+        {
+          id: "assistant-rewrite",
+          type: "assistant_message",
+          text: "draft",
+        },
+      ],
+    }],
+  };
+  const nextState = {
+    turns: [{
+      id: "turn-1",
+      items: [
+        {
+          id: "assistant-same",
+          type: "assistant_message",
+          text: "same",
+        },
+        {
+          id: "assistant-rewrite",
+          type: "assistant_message",
+          text: "final",
+        },
+      ],
+    }],
+  };
+
+  assert.deepEqual(
+    projectDesktopAssistantDeltaNotifications("thread-1", previousState, nextState),
+    []
+  );
+});
+
+test("uses the Codex Desktop named pipe as the default Windows IPC path", (t) => {
+  useProcessPlatform(t, "win32");
+  assert.equal(resolveDefaultIpcSocketPath(), "\\\\.\\pipe\\codex-ipc");
+});
+
 test("desktop IPC follower projects first add patch-only action updates without a baseline read", async (t) => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-ipc-recovery-"));
-  const socketPath = path.join(tempDir, "ipc.sock");
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-recovery-");
   let baselineReads = 0;
   let serverSocket = null;
 
@@ -420,8 +540,7 @@ test("desktop IPC follower projects first add patch-only action updates without 
 });
 
 test("desktop IPC follower uses baseline recovery for patch-only updates that need existing state", async (t) => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-ipc-replace-recovery-"));
-  const socketPath = path.join(tempDir, "ipc.sock");
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-replace-recovery-");
   let baselineReads = 0;
   let serverSocket = null;
 
@@ -503,8 +622,7 @@ test("desktop IPC follower uses baseline recovery for patch-only updates that ne
 });
 
 test("desktop IPC follower does not issue baseline reads just because a chat opens", async (t) => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-ipc-lazy-recovery-"));
-  const socketPath = path.join(tempDir, "ipc.sock");
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-lazy-recovery-");
   let baselineReads = 0;
   let serverSocket = null;
 
@@ -552,8 +670,7 @@ test("desktop IPC follower does not issue baseline reads just because a chat ope
 });
 
 test("desktop IPC follower waits for a usable snapshot when a first patch needs missing state", async (t) => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-ipc-wait-snapshot-"));
-  const socketPath = path.join(tempDir, "ipc.sock");
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-wait-snapshot-");
   let serverSocket = null;
 
   const server = net.createServer((socket) => {
@@ -644,8 +761,7 @@ test("desktop IPC follower waits for a usable snapshot when a first patch needs 
 });
 
 test("desktop IPC follower does not block add patch-only actions on a failing baseline reader", async (t) => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-ipc-recovery-fallback-"));
-  const socketPath = path.join(tempDir, "ipc.sock");
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-recovery-fallback-");
   let serverSocket = null;
 
   const server = net.createServer((socket) => {
@@ -729,8 +845,7 @@ test("desktop IPC follower does not block add patch-only actions on a failing ba
 });
 
 test("desktop IPC follower answers client discovery requests as a passive client", async (t) => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-ipc-discovery-"));
-  const socketPath = path.join(tempDir, "ipc.sock");
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-discovery-");
   const serverFrames = [];
   let serverSocket = null;
 
@@ -793,8 +908,7 @@ test("desktop IPC follower answers client discovery requests as a passive client
 });
 
 test("desktop IPC follower forwards pending actions and routes iOS replies back to the Mac", async (t) => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-ipc-follower-"));
-  const socketPath = path.join(tempDir, "ipc.sock");
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-follower-");
   const serverFrames = [];
   let serverSocket = null;
 
@@ -896,6 +1010,97 @@ test("desktop IPC follower forwards pending actions and routes iOS replies back 
   });
 });
 
+test("desktop IPC follower mirrors live assistant text growth from desktop state", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-assistant-delta-");
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "remodex-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-live-delta" },
+  }));
+  await waitFor(() => serverSocket);
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 5,
+    params: {
+      conversationId: "thread-live-delta",
+      change: {
+        type: "snapshot",
+        conversationState: {
+          turns: [{
+            id: "turn-live-delta",
+            items: [{
+              id: "assistant-live-delta",
+              type: "assistant_message",
+              text: "Hello",
+            }],
+          }],
+        },
+      },
+    },
+  });
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 5,
+    params: {
+      conversationId: "thread-live-delta",
+      change: {
+        type: "patches",
+        patches: [{
+          op: "replace",
+          path: ["turns", 0, "items", 0, "text"],
+          value: "Hello world",
+        }],
+      },
+    },
+  });
+
+  await waitFor(() => outbound.find((message) => message.method === "item/agentMessage/delta"));
+  const deltaMessage = outbound.find((message) => message.method === "item/agentMessage/delta");
+  assert.deepEqual(deltaMessage.params, {
+    threadId: "thread-live-delta",
+    turnId: "turn-live-delta",
+    itemId: "assistant-live-delta",
+    delta: " world",
+  });
+});
+
 function attachFrameReader(socket, onFrame) {
   let buffer = Buffer.alloc(0);
   socket.on("data", (chunk) => {
@@ -928,4 +1133,23 @@ async function waitFor(predicate, timeoutMs = 500) {
     }
     await wait(5);
   }
+}
+
+function createIpcTestSocket(prefix) {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const socketPath = process.platform === "win32"
+    ? `\\\\.\\pipe\\${path.basename(tempDir)}-ipc`
+    : path.join(tempDir, "ipc.sock");
+  return { tempDir, socketPath };
+}
+
+function useProcessPlatform(t, platform) {
+  const descriptor = Object.getOwnPropertyDescriptor(process, "platform");
+  Object.defineProperty(process, "platform", {
+    ...descriptor,
+    value: platform,
+  });
+  t.after(() => {
+    Object.defineProperty(process, "platform", descriptor);
+  });
 }

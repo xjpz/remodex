@@ -56,6 +56,10 @@ struct MarkdownTextView: View {
     var constrainsToAvailableWidth: Bool = false
     var usesCaches: Bool = true
 
+    @Environment(\.colorScheme) private var colorScheme
+    @AppStorage(UserBubbleColor.storageKey)
+    private var userBubbleColorRawValue = UserBubbleColor.defaultStoredRawValue
+
     var body: some View {
         let transformed = MarkdownTextFormatter.renderableText(
             from: text,
@@ -87,6 +91,7 @@ struct MarkdownTextView: View {
                     )
                 )
             )
+            .textual.inlineStyle(markdownInlineStyle)
             .textual.structuredTextStyle(.default)
             .textual.overflowMode(.wrap)
 
@@ -107,6 +112,19 @@ struct MarkdownTextView: View {
         } else {
             renderedContent
         }
+    }
+
+    // Match markdown links to the app-wide accent palette the user picks for primary actions.
+    private var markdownInlineStyle: InlineStyle {
+        .default.link(
+            .foregroundColor(markdownLinkColor),
+            .underlineStyle(.init(pattern: .dot))
+        )
+    }
+
+    private var markdownLinkColor: Color {
+        let palette = (UserBubbleColor(rawValue: userBubbleColorRawValue) ?? .default).ctaPalette
+        return palette.bubbleBackground(for: colorScheme)
     }
 }
 

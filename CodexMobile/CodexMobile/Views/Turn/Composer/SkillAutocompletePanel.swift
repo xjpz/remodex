@@ -31,7 +31,7 @@ struct SkillAutocompletePanel: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
-            } else if items.isEmpty {
+            } else if items.isEmpty, !query.isEmpty {
                 Text("No skills for $\(query)")
                     .font(AppFont.footnote())
                     .foregroundStyle(.secondary)

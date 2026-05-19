@@ -2,7 +2,7 @@
 // Purpose: Provides scroll geometry batching and UIKit axis clamping for the timeline.
 // Layer: View Support
 // Exports: ScrollBottomGeometry, TurnTimelineRenderItemsCacheSignature, TurnTimelineRenderItemsCache,
-//   VerticalScrollAxisGuard, ScrollGeometryCoalescer
+//   TurnTimelinePendingAssistantState, VerticalScrollAxisGuard, ScrollGeometryCoalescer
 // Depends on: SwiftUI, UIKit, CodexMessage, TurnTimelineRenderProjection
 
 import SwiftUI
@@ -68,6 +68,32 @@ final class TurnTimelineRenderItemsCache {
         cachedSignature = signature
         cachedItems = projectedItems
         return projectedItems
+    }
+}
+
+enum TurnTimelinePendingAssistantState {
+    // The optimistic user row appears before the first assistant row; keep both
+    // the thinking indicator and bottom anchor active during that short gap.
+    static func isWaitingForAssistantResponse(
+        shouldAnchorToAssistantResponse: Bool,
+        messages: [CodexMessage]
+    ) -> Bool {
+        shouldAnchorToAssistantResponse
+            && messages.last?.role == .user
+    }
+
+    static func shouldTrackScrollGeometry(
+        shouldAnchorToAssistantResponse: Bool,
+        autoScrollMode: TurnAutoScrollMode,
+        isWaitingForAssistantResponse: Bool
+    ) -> Bool {
+        !shouldAnchorToAssistantResponse
+            && autoScrollMode != .anchorAssistantResponse
+            && !isWaitingForAssistantResponse
+    }
+
+    static func shouldShowIndicator(isRunStartingOrRunning: Bool) -> Bool {
+        return isRunStartingOrRunning
     }
 }
 

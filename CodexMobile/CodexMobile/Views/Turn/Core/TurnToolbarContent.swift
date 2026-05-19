@@ -1,7 +1,8 @@
 // FILE: TurnToolbarContent.swift
 // Purpose: Encapsulates the TurnView navigation toolbar and thread-path sheet.
 // Layer: View Component
-// Exports: TurnToolbarContent, TurnThreadNavigationContext
+// Exports: TurnToolbarContent, TurnThreadNavigationContext,
+//          TurnThreadActionsMenuButton, TurnThreadActionMenuItem
 
 import SwiftUI
 import UIKit
@@ -90,109 +91,55 @@ struct TurnToolbarContent: ToolbarContent {
 
         if showsThreadActions {
             ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    // Keeps all "branch from here" actions together behind the compact toolbar affordance.
-                    Button {
-                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                        onTapMacHandoff?()
-                    } label: {
-                        HStack(spacing: 10) {
-                            ResizableThreadActionSymbol(systemName: "arrow.left.arrow.right", pointSize: 13)
-                            Text("Hand off to Desktop")
-                        }
-                    }
-                    .disabled(!canTapMacHandoff)
-
-                    Button {
-                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                        onTapWorktreeHandoff?()
-                    } label: {
-                        CodexWorktreeMenuLabelRow(
+                TurnThreadActionsMenuButton(
+                    isLoading: isThreadActionLoading,
+                    actions: [
+                        TurnThreadActionMenuItem(
+                            title: "Hand off to Desktop",
+                            icon: .system("arrow.left.arrow.right"),
+                            isEnabled: canTapMacHandoff
+                        ) {
+                            onTapMacHandoff?()
+                        },
+                        TurnThreadActionMenuItem(
                             title: isCreatingGitWorktree ? "Preparing worktree..." : worktreeHandoffTitle,
-                            pointSize: 12,
-                            weight: .regular
-                        )
-                    }
-                    .disabled(!canTapWorktreeHandoff)
-
-                    Button {
-                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                        onTapNewChat?()
-                    } label: {
-                        HStack(spacing: 10) {
-                            // `square.and.pencil` resolves to `central-compose-pencil`
-                            // via RemodexIcon, matching the sidebar's "New Chat"
-                            // affordance instead of using a different SF Symbol.
-                            ResizableThreadActionSymbol(systemName: "square.and.pencil", pointSize: 13)
-                            Text("New chat")
-                        }
-                    }
-                    .disabled(!canTapNewChat)
-
-                    Button {
-                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                        onTapTerminal?()
-                    } label: {
-                        HStack(spacing: 10) {
-                            ResizableThreadActionSymbol(systemName: "terminal", pointSize: 13)
-                            Text("Open Terminal Here")
-                        }
-                    }
-                    .disabled(!canTapTerminal)
-                } label: {
-                    TurnMacHandoffToolbarLabel(isLoading: isThreadActionLoading)
-                }
-                .accessibilityLabel("Thread actions")
+                            icon: .worktree,
+                            isEnabled: canTapWorktreeHandoff
+                        ) {
+                            onTapWorktreeHandoff?()
+                        },
+                        TurnThreadActionMenuItem(
+                            title: "New chat",
+                            icon: .system("square.and.pencil"),
+                            isEnabled: canTapNewChat
+                        ) {
+                            onTapNewChat?()
+                        },
+                        TurnThreadActionMenuItem(
+                            title: "Open Terminal Here",
+                            icon: .system("terminal"),
+                            isEnabled: canTapTerminal
+                        ) {
+                            onTapTerminal?()
+                        },
+                    ]
+                )
             }
         }
     }
 
     @ViewBuilder
     private var titleTapTarget: some View {
-        if let context = navigationContext {
-            Button {
-                HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                isShowingPathSheet = true
-            } label: {
-                titleSubtitleBlock(context: context)
-            }
-            .buttonStyle(.plain)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .accessibilityLabel("\(displayTitle), \(context.subtitle)")
-            .accessibilityHint("Opens thread location")
-        } else {
-            titleLabel
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    private func titleSubtitleBlock(context: TurnThreadNavigationContext) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            titleLabel
-            subtitleLabel(for: context)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .multilineTextAlignment(.leading)
-    }
-
-    private var titleLabel: some View {
-        Text(displayTitle)
-            .font(AppFont.subheadline(weight: .medium))
-            .lineLimit(1)
-            .truncationMode(.tail)
-    }
-
-    private func subtitleLabel(for context: TurnThreadNavigationContext) -> some View {
-        Text(context.subtitle)
-            .font(AppFont.caption(weight: .regular))
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-            .truncationMode(.middle)
+        TurnChatToolbarTitleLabel(
+            title: displayTitle,
+            subtitle: navigationContext?.subtitle,
+            onTap: navigationContext == nil ? nil : { isShowingPathSheet = true },
+            accessibilityHint: navigationContext == nil ? nil : "Opens thread location"
+        )
     }
 }
 
-private struct TurnMacHandoffToolbarLabel: View {
+struct TurnMacHandoffToolbarLabel: View {
     let isLoading: Bool
 
     var body: some View {
@@ -202,9 +149,8 @@ private struct TurnMacHandoffToolbarLabel: View {
                     .controlSize(.small)
             } else {
                 // Let the system toolbar render the ellipsis at its native
-                // size; sizing it through `ResizableThreadActionSymbol` (which
-                // force-fits into a square via `scaledToFit`) crushed the
-                // dots because the SF `ellipsis` glyph is wide and short.
+                // size; force-fitting the wide SF `ellipsis` glyph into a
+                // square frame crushes the dots.
                 Image(systemName: "ellipsis")
                     .foregroundStyle(.primary)
             }
@@ -214,40 +160,130 @@ private struct TurnMacHandoffToolbarLabel: View {
     }
 }
 
-private struct ResizableThreadActionSymbol: View {
-    let systemName: String
-    let pointSize: CGFloat
-    var weight: UIImage.SymbolWeight = .semibold
+struct TurnThreadActionsMenuButton: View {
+    let isLoading: Bool
+    var isEnabled: Bool = true
+    let actions: [TurnThreadActionMenuItem]
 
     var body: some View {
-        Image(uiImage: resizedSymbol(named: systemName, pointSize: pointSize, weight: weight))
-            .renderingMode(.template)
-            .resizable()
-            .scaledToFit()
-            .frame(width: pointSize, height: pointSize)
+        Group {
+            if isLoading {
+                TurnMacHandoffToolbarLabel(isLoading: true)
+            } else {
+                UIKitThreadActionsToolbarButton(
+                    isEnabled: isEnabled,
+                    actions: actions,
+                    triggerImage: Self.triggerImage
+                )
+                .frame(width: Self.triggerIconSize, height: Self.triggerIconSize)
+                .padding(.vertical, 4)
+                .frame(minWidth: Self.minToolbarButtonSize, minHeight: Self.minToolbarButtonSize)
+                .contentShape(Circle())
+                .adaptiveToolbarItem(in: Circle())
+            }
+        }
+        .opacity(isEnabled ? 1 : 0.45)
+        .disabled(!isEnabled)
+        .accessibilityLabel("Thread actions")
     }
 
-    private func resizedSymbol(named name: String, pointSize: CGFloat, weight: UIImage.SymbolWeight) -> UIImage {
-        let config = UIImage.SymbolConfiguration(pointSize: pointSize, weight: weight)
-        guard let symbol = RemodexIcon.uiImage(systemName: name, withConfiguration: config)?
-            .withRenderingMode(.alwaysTemplate) else {
-            return UIImage()
+    private static let triggerIconSize: CGFloat = 24
+    private static let minToolbarButtonSize: CGFloat = 28
+
+    private static var triggerImage: UIImage {
+        UIImage(systemName: "ellipsis") ?? UIImage()
+    }
+}
+
+struct TurnThreadActionMenuItem {
+    enum Icon {
+        case system(String)
+        case worktree
+
+        var uiImage: UIImage? {
+            switch self {
+            case .system(let systemName):
+                RemodexIcon.menuUIImage(systemName: systemName)
+            case .worktree:
+                CodexWorktreeIcon.toolbarMenuUIImage()
+            }
+        }
+    }
+
+    let title: String
+    let icon: Icon
+    var isEnabled: Bool = true
+    let handler: () -> Void
+
+    func uiAction() -> UIAction {
+        let attributes: UIMenuElement.Attributes = isEnabled ? [] : .disabled
+        return UIAction(
+            title: title,
+            image: icon.uiImage,
+            attributes: attributes
+        ) { _ in
+            guard isEnabled else { return }
+            HapticFeedback.shared.triggerImpactFeedback(style: .light)
+            handler()
+        }
+    }
+}
+
+private struct UIKitThreadActionsToolbarButton: UIViewRepresentable {
+    let isEnabled: Bool
+    let actions: [TurnThreadActionMenuItem]
+    let triggerImage: UIImage
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(actions: actions)
+    }
+
+    func makeUIView(context: Context) -> UIButton {
+        var config = UIButton.Configuration.plain()
+        config.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0)
+
+        let button = UIButton(configuration: config)
+        button.showsMenuAsPrimaryAction = true
+        button.tintColor = .label
+        button.accessibilityLabel = "Thread actions"
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentHuggingPriority(.required, for: .vertical)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        button.setContentCompressionResistancePriority(.required, for: .vertical)
+
+        let coordinator = context.coordinator
+        button.menu = UIMenu(children: [
+            UIDeferredMenuElement.uncached { [weak coordinator] completion in
+                completion(coordinator?.makeMenu().children ?? [])
+            },
+        ])
+        return button
+    }
+
+    func updateUIView(_ button: UIButton, context: Context) {
+        var config = button.configuration ?? UIButton.Configuration.plain()
+        config.image = triggerImage.withRenderingMode(.alwaysTemplate)
+        button.configuration = config
+        button.isEnabled = isEnabled
+        button.accessibilityLabel = "Thread actions"
+        context.coordinator.actions = actions
+    }
+
+    final class Coordinator {
+        var actions: [TurnThreadActionMenuItem]
+
+        init(actions: [TurnThreadActionMenuItem]) {
+            self.actions = actions
         }
 
-        let canvasSide = max(symbol.size.width, symbol.size.height)
-        let canvasSize = CGSize(width: canvasSide, height: canvasSide)
-        let renderer = UIGraphicsImageRenderer(size: canvasSize)
-        let scale = min(canvasSize.width / symbol.size.width, canvasSize.height / symbol.size.height)
-        let scaledSize = CGSize(width: symbol.size.width * scale, height: symbol.size.height * scale)
-        let origin = CGPoint(
-            x: (canvasSize.width - scaledSize.width) / 2,
-            y: (canvasSize.height - scaledSize.height) / 2
-        )
-
-        return renderer.image { _ in
-            symbol.draw(in: CGRect(origin: origin, size: scaledSize))
+        // Builds fresh rows at presentation time so disabled/loading state stays current.
+        func makeMenu() -> UIMenu {
+            UIMenu(
+                title: "",
+                options: [.displayInline],
+                children: actions.map { $0.uiAction() }
+            )
         }
-        .withRenderingMode(.alwaysTemplate)
     }
 }
 

@@ -28,8 +28,8 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         let turnID = "turn-\(UUID().uuidString)"
         let itemID = "item-\(UUID().uuidString)"
 
-        service.enqueueAssistantDelta(threadId: threadID, turnId: turnID, itemId: itemID, delta: "Hello")
-        service.enqueueAssistantDelta(threadId: threadID, turnId: turnID, itemId: itemID, delta: " world")
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: itemID, delta: "Hello")
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: itemID, delta: " world")
 
         XCTAssertTrue(service.messages(for: threadID).isEmpty)
 
@@ -48,9 +48,9 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         let turnID = "turn-\(UUID().uuidString)"
         let itemID = "item-\(UUID().uuidString)"
 
-        service.enqueueAssistantDelta(threadId: threadID, turnId: turnID, itemId: itemID, delta: "Yes")
-        service.enqueueAssistantDelta(threadId: threadID, turnId: turnID, itemId: itemID, delta: "Yes, the")
-        service.enqueueAssistantDelta(threadId: threadID, turnId: turnID, itemId: itemID, delta: "Yes, the imagegen skill")
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: itemID, delta: "Yes")
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: itemID, delta: "Yes, the")
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: itemID, delta: "Yes, the imagegen skill")
 
         service.flushAllPendingStreamingDeltas()
 

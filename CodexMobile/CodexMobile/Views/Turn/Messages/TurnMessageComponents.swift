@@ -38,6 +38,8 @@ private struct MessageRowMessageSignature: Equatable {
     let assistantPhase: String?
     let textFingerprint: CodexMessageTextRenderSignature
     let fileMentions: [String]
+    let skillMentions: [String]
+    let pluginMentions: [String]
     let turnId: String?
     let itemId: String?
     let isStreaming: Bool
@@ -58,6 +60,8 @@ private struct MessageRowMessageSignature: Equatable {
         self.assistantPhase = message.assistantPhase
         self.textFingerprint = message.textRenderSignature
         self.fileMentions = message.fileMentions
+        self.skillMentions = message.skillMentions
+        self.pluginMentions = message.pluginMentions
         self.turnId = message.turnId
         self.itemId = message.itemId
         self.isStreaming = message.isStreaming
@@ -356,20 +360,20 @@ struct MessageRow: View, Equatable {
         timelineDisplayWindow(for: message, expansionLevel: textExpansionLevel)
     }
 
-    // Computed once per body evaluation and reused by all sub-views.
-    private var displayText: String {
+    // Reuses the body-scoped display window so large clipped rows are not scanned twice.
+    private func displayText(from window: TimelineTextClippingPolicy.DisplayWindow) -> String {
         if message.role == .assistant,
            message.isStreaming,
            let throttledAssistantDisplayText {
             return throttledAssistantDisplayText
         }
 
-        return displayWindow.text
+        return window.text
     }
 
     var body: some View {
         let window = displayWindow
-        let text = displayText
+        let text = displayText(from: window)
         let actionText = timelineActionText(for: message)
         let renderModel = MessageRowRenderModelCache.model(for: message, displayText: text)
         VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 6) {

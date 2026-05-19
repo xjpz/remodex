@@ -5,8 +5,8 @@
 // Depends on: timers
 
 const BRIDGE_STATUS_HEARTBEAT_INTERVAL_MS = 5_000;
-// Keep the watchdog above the relay heartbeat cadence so quiet healthy sockets survive idle gaps.
-const RELAY_WATCHDOG_STALE_AFTER_MS = 70_000;
+// Keep the watchdog tight enough to recover quickly from sleep/wake zombie sockets.
+const RELAY_WATCHDOG_STALE_AFTER_MS = 25_000;
 const STALE_RELAY_STATUS_MESSAGE = "Relay heartbeat stalled; reconnect pending.";
 
 // Wraps daemon status publication so bridge.js does not own heartbeat bookkeeping.

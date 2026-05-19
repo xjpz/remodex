@@ -87,13 +87,7 @@ extension CodexService {
 
         let activeLimit = limit ?? recentActiveThreadListLimit
 
-        let activeThreads = try await fetchServerThreads(limit: activeLimit) { _, accumulatedThreads in
-            self.reconcileLocalThreadsWithServer(accumulatedThreads)
-
-            if self.activeThreadId == nil {
-                self.activeThreadId = self.firstLiveThreadID()
-            }
-        }
+        let activeThreads = try await fetchCoalescedServerThreads(limit: activeLimit)
         reconcileLocalThreadsWithServer(activeThreads)
 
         if activeThreadId == nil {
@@ -253,11 +247,50 @@ extension CodexService {
             collaborationMode: effectiveCollaborationMode,
             preserveExisting: preservePlanSessionState
         )
+        let outgoingDisplayText = displayTextForOutgoingTurn(
+            userInput: trimmedInput,
+            skillMentions: skillMentions,
+            mentionMentions: mentionMentions
+        )
+        let preResumeTitleSeed = shouldAppendUserMessage
+            ? automaticThreadTitleSeedIfNeeded(
+                userInput: outgoingDisplayText,
+                attachments: attachments,
+                threadId: initialThreadId
+            )
+            : nil
+        // Put the user's bubble in the timeline before any resume/network work so
+        // sends feel instant while the runtime catches up in the background.
+        let preResumePendingMessageId = shouldAppendUserMessage
+            ? appendUserMessage(
+                threadId: initialThreadId,
+                text: outgoingDisplayText,
+                attachments: attachments,
+                fileMentions: fileMentions,
+                skillMentions: skillMentions.compactMap {
+                    let rawName = $0.name ?? $0.id
+                    let normalized = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return normalized.isEmpty ? nil : normalized
+                },
+                pluginMentions: mentionMentions.compactMap {
+                    let normalized = $0.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return normalized.isEmpty ? nil : normalized
+                }
+            )
+            : ""
 
         do {
             try await ensureThreadResumed(threadId: initialThreadId)
         } catch {
             if shouldTreatAsThreadNotFound(error) {
+                if shouldAppendUserMessage || !preResumePendingMessageId.isEmpty {
+                    removePreResumePendingUserMessage(
+                        threadId: initialThreadId,
+                        messageId: preResumePendingMessageId,
+                        matchingText: trimmedInput,
+                        matchingAttachments: attachments
+                    )
+                }
                 handleMissingThread(initialThreadId)
 
                 let continuationThread = try await createContinuationThread(from: initialThreadId)
@@ -287,16 +320,19 @@ extension CodexService {
                 mentionMentions: mentionMentions,
                 fileMentions: fileMentions,
                 to: initialThreadId,
-                shouldAppendUserMessage: shouldAppendUserMessage,
-                collaborationMode: effectiveCollaborationMode
+                shouldAppendUserMessage: false,
+                collaborationMode: effectiveCollaborationMode,
+                preAppendedUserMessageID: preResumePendingMessageId,
+                automaticTitleSeedOverride: preResumeTitleSeed
             )
         } catch {
             if shouldTreatAsThreadNotFound(error) {
                 // If turn/start explicitly says "thread not found", treat it as authoritative.
                 // Some server states can make thread/read flaky, so we avoid blocking on a second check.
-                if shouldAppendUserMessage {
-                    removeLatestFailedUserMessage(
+                if shouldAppendUserMessage || !preResumePendingMessageId.isEmpty {
+                    removePreResumePendingUserMessage(
                         threadId: initialThreadId,
+                        messageId: preResumePendingMessageId,
                         matchingText: trimmedInput,
                         matchingAttachments: attachments
                     )
@@ -323,6 +359,25 @@ extension CodexService {
         }
 
         activeThreadId = initialThreadId
+    }
+
+    // Removes the optimistic row by id first because structured mention-only rows may not match raw composer text.
+    private func removePreResumePendingUserMessage(
+        threadId: String,
+        messageId: String,
+        matchingText: String,
+        matchingAttachments: [CodexImageAttachment]
+    ) {
+        if removeUserMessage(threadId: threadId, messageId: messageId) {
+            return
+        }
+
+        markMessageDeliveryState(threadId: threadId, messageId: messageId, state: .failed)
+        removeLatestFailedUserMessage(
+            threadId: threadId,
+            matchingText: matchingText,
+            matchingAttachments: matchingAttachments
+        )
     }
 
     // Requests interruption for the active turn.
@@ -796,6 +851,26 @@ enum CodexThreadStartProjectBinding {
 }
 
 extension CodexService {
+    // Reuses an in-flight thread/list request for matching caps so launch sync and sidebar refresh share one RPC.
+    func fetchCoalescedServerThreads(limit: Int) async throws -> [CodexThread] {
+        if let existingFetch = threadListFetchTaskByLimit[limit] {
+            return try await existingFetch.task.value
+        }
+
+        let fetchID = UUID()
+        let task = Task { @MainActor in
+            defer {
+                if threadListFetchTaskByLimit[limit]?.id == fetchID {
+                    threadListFetchTaskByLimit[limit] = nil
+                }
+            }
+            return try await fetchServerThreads(limit: limit)
+        }
+        threadListFetchTaskByLimit[limit] = (id: fetchID, task: task)
+
+        return try await task.value
+    }
+
     func fetchServerThreads(
         limit: Int? = nil,
         onPage: ((_ page: [CodexThread], _ accumulatedThreads: [CodexThread]) -> Void)? = nil
@@ -1158,31 +1233,45 @@ extension CodexService {
         fileMentions: [String] = [],
         to threadId: String,
         shouldAppendUserMessage: Bool = true,
-        collaborationMode: CodexCollaborationModeKind? = nil
+        collaborationMode: CodexCollaborationModeKind? = nil,
+        preAppendedUserMessageID: String? = nil,
+        automaticTitleSeedOverride: String? = nil
     ) async throws {
-        let automaticTitleSeed = shouldAppendUserMessage
+        let outgoingDisplayText = displayTextForOutgoingTurn(
+            userInput: userInput,
+            skillMentions: skillMentions,
+            mentionMentions: mentionMentions
+        )
+        let automaticTitleSeed = automaticTitleSeedOverride ?? (shouldAppendUserMessage
             ? automaticThreadTitleSeedIfNeeded(
-                userInput: displayTextForOutgoingTurn(
-                    userInput: userInput,
-                    skillMentions: skillMentions,
-                    mentionMentions: mentionMentions
-                ),
+                userInput: outgoingDisplayText,
                 attachments: attachments,
                 threadId: threadId
             )
-            : nil
-        let pendingMessageId = shouldAppendUserMessage
-            ? appendUserMessage(
+            : nil)
+        let pendingMessageId: String
+        if let preAppendedUserMessageID,
+           !preAppendedUserMessageID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            pendingMessageId = preAppendedUserMessageID
+        } else if shouldAppendUserMessage {
+            pendingMessageId = appendUserMessage(
                 threadId: threadId,
-                text: displayTextForOutgoingTurn(
-                    userInput: userInput,
-                    skillMentions: skillMentions,
-                    mentionMentions: mentionMentions
-                ),
+                text: outgoingDisplayText,
                 attachments: attachments,
-                fileMentions: fileMentions
+                fileMentions: fileMentions,
+                skillMentions: skillMentions.compactMap {
+                    let rawName = $0.name ?? $0.id
+                    let normalized = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return normalized.isEmpty ? nil : normalized
+                },
+                pluginMentions: mentionMentions.compactMap {
+                    let normalized = $0.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return normalized.isEmpty ? nil : normalized
+                }
             )
-            : ""
+        } else {
+            pendingMessageId = ""
+        }
         activeThreadId = threadId
         markThreadAsRunning(threadId)
         setProtectedRunningFallback(true, for: threadId)
@@ -1456,7 +1545,16 @@ extension CodexService {
                     mentionMentions: mentionMentions
                 ),
                 attachments: attachments,
-                fileMentions: fileMentions
+                fileMentions: fileMentions,
+                skillMentions: skillMentions.compactMap {
+                    let rawName = $0.name ?? $0.id
+                    let normalized = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return normalized.isEmpty ? nil : normalized
+                },
+                pluginMentions: mentionMentions.compactMap {
+                    let normalized = $0.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return normalized.isEmpty ? nil : normalized
+                }
             )
             : ""
         var resolvedExpectedTurnID = normalizedInterruptIdentifier(expectedTurnId)
@@ -1825,7 +1923,22 @@ extension CodexService {
         skillMentions: [CodexTurnSkillMention],
         mentionMentions: [CodexTurnMention]
     ) -> String {
-        let trimmedInput = userInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        var trimmedInput = userInput.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        for mention in skillMentions {
+            let rawName = mention.name ?? mention.id
+            let normalizedName = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalizedName.isEmpty else { continue }
+            trimmedInput = Self.removeBoundedMentionToken("$\(normalizedName)", from: trimmedInput)
+        }
+
+        for mention in mentionMentions {
+            let normalizedName = mention.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalizedName.isEmpty else { continue }
+            trimmedInput = Self.removeBoundedMentionToken("@\(normalizedName)", from: trimmedInput)
+        }
+
+        trimmedInput = trimmedInput.trimmingCharacters(in: .whitespacesAndNewlines)
         let legacyText = legacyTextForStructuredMentions(
             skillMentions: skillMentions,
             mentionMentions: mentionMentions
@@ -1835,7 +1948,27 @@ extension CodexService {
             return legacyText
         }
 
-        return appendingMissingLegacyMentionTokens(legacyText, to: trimmedInput)
+        return trimmedInput
+    }
+
+    nonisolated static func removeBoundedMentionToken(_ token: String, from text: String) -> String {
+        let escaped = NSRegularExpression.escapedPattern(for: token)
+        guard let regex = try? NSRegularExpression(
+            pattern: escaped + "(?:[\\s,.;:!?)\\]}>]|$)",
+            options: [.caseInsensitive]
+        ) else {
+            return text
+        }
+
+        let range = NSRange(text.startIndex..., in: text)
+        guard let match = regex.firstMatch(in: text, range: range) else {
+            return text
+        }
+
+        var result = text
+        let matchRange = Range(match.range, in: text)!
+        result.replaceSubrange(matchRange, with: "")
+        return result
     }
 
     private func appendingMissingLegacyMentionTokens(_ legacyText: String, to text: String) -> String {

@@ -2,7 +2,7 @@
 // Purpose: Shared file-mention chip UI used in the composer (removable) and message timeline (read-only).
 // Layer: View Component
 // Exports: FileMentionChip, SkillMentionChip, PluginMentionChip, ComposerActionChip, FileMentionChipRow, UserMentionChipRow, UserMessageParser, UserMessageParsed, SkillDisplayNameFormatter
-// Depends on: SwiftUI
+// Depends on: SwiftUI, TurnMentionChips
 
 import SwiftUI
 
@@ -14,31 +14,7 @@ struct FileMentionChip: View {
     var onRemove: (() -> Void)? = nil
 
     var body: some View {
-        HStack(spacing: 4) {
-            RemodexIcon.image(systemName: "chevron.left.forwardslash.chevron.right")
-                .font(AppFont.system(size: 9, weight: .semibold))
-                .foregroundStyle(Color.blue)
-
-            Text(fileName)
-                .font(AppFont.footnote(weight: .medium))
-                .foregroundStyle(Color.blue)
-                .lineLimit(1)
-
-            if let onRemove {
-                Button(action: onRemove) {
-                    RemodexIcon.image(systemName: "xmark")
-                        .font(AppFont.system(size: 8, weight: .bold))
-                        .foregroundStyle(Color.blue)
-                        .frame(width: 14, height: 14)
-                        .background(Color.blue.opacity(0.14), in: Circle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Remove file mention")
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Color.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        TurnMentionChip(ref: .file(fileName, label: fileName), onRemove: onRemove)
     }
 }
 
@@ -48,31 +24,7 @@ struct SkillMentionChip: View {
     var onRemove: (() -> Void)? = nil
 
     var body: some View {
-        HStack(spacing: 4) {
-            RemodexIcon.image(systemName: "square.stack.3d.up")
-                .font(AppFont.system(size: 9, weight: .semibold))
-                .foregroundStyle(Color.indigo)
-
-            Text(SkillDisplayNameFormatter.displayName(for: skillName))
-                .font(AppFont.footnote(weight: .medium))
-                .foregroundStyle(Color.indigo)
-                .lineLimit(1)
-
-            if let onRemove {
-                Button(action: onRemove) {
-                    RemodexIcon.image(systemName: "xmark")
-                        .font(AppFont.system(size: 8, weight: .bold))
-                        .foregroundStyle(Color.indigo)
-                        .frame(width: 14, height: 14)
-                        .background(Color.indigo.opacity(0.14), in: Circle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Remove skill mention")
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Color.indigo.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        TurnMentionChip(ref: .skill(skillName), onRemove: onRemove)
     }
 }
 
@@ -82,31 +34,7 @@ struct PluginMentionChip: View {
     var onRemove: (() -> Void)? = nil
 
     var body: some View {
-        HStack(spacing: 4) {
-            RemodexIcon.image(systemName: "circle.grid.2x2")
-                .font(AppFont.system(size: 9, weight: .semibold))
-                .foregroundStyle(.blue)
-
-            Text(SkillDisplayNameFormatter.displayName(for: pluginName))
-                .font(AppFont.footnote(weight: .medium))
-                .foregroundStyle(.blue)
-                .lineLimit(1)
-
-            if let onRemove {
-                Button(action: onRemove) {
-                    RemodexIcon.image(systemName: "xmark")
-                        .font(AppFont.system(size: 8, weight: .bold))
-                        .foregroundStyle(.blue)
-                        .frame(width: 14, height: 14)
-                        .background(Color.blue.opacity(0.14), in: Circle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Remove plugin mention")
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Color.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        TurnMentionChip(ref: .plugin(pluginName), onRemove: onRemove)
     }
 }
 
@@ -119,31 +47,11 @@ struct ComposerActionChip: View {
     var onRemove: (() -> Void)? = nil
 
     var body: some View {
-        HStack(spacing: 4) {
-            RemodexIcon.image(systemName: symbolName)
-                .font(AppFont.system(size: 9, weight: .semibold))
-                .foregroundStyle(tintColor)
-
-            Text(title)
-                .font(AppFont.footnote(weight: .medium))
-                .foregroundStyle(tintColor)
-                .lineLimit(1)
-
-            if let onRemove {
-                Button(action: onRemove) {
-                    RemodexIcon.image(systemName: "xmark")
-                        .font(AppFont.system(size: 8, weight: .bold))
-                        .foregroundStyle(tintColor)
-                        .frame(width: 14, height: 14)
-                        .background(tintColor.opacity(0.14), in: Circle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(removeAccessibilityLabel)
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(tintColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        TurnMentionChip(
+            ref: .action(title: title, symbolName: symbolName, tintColor: tintColor),
+            removeAccessibilityLabelOverride: removeAccessibilityLabel,
+            onRemove: onRemove
+        )
     }
 }
 
@@ -156,7 +64,7 @@ struct FileMentionChipRow: View {
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
+            HStack(spacing: TurnMentionChipTokens.rowSpacing) {
                 ForEach(files) { file in
                     FileMentionChip(
                         fileName: file.fileName,
@@ -180,18 +88,10 @@ struct UserMentionChipRow: View {
     let mentions: [String]  // raw file paths
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                ForEach(mentions, id: \.self) { path in
-                    FileMentionChip(fileName: Self.fileName(from: path))
-                }
-            }
-        }
-    }
-
-    private static func fileName(from path: String) -> String {
-        let name = (path as NSString).lastPathComponent
-        return name.isEmpty ? path : name
+        TurnMentionChipRow(
+            chips: mentions.map { .file($0) },
+            layout: .scrollLeading
+        )
     }
 }
 
@@ -228,24 +128,7 @@ enum SkillDisplayNameFormatter {
 // MARK: - Previews
 
 #Preview("Chips") {
-    VStack(alignment: .leading, spacing: 16) {
-        HStack(spacing: 8) {
-            FileMentionChip(fileName: "SidebarView.swift")
-            FileMentionChip(fileName: "index.ts")
-            FileMentionChip(fileName: "main.py")
-        }
-        .padding(.horizontal, 16)
-
-        Divider()
-
-        UserMentionChipRow(mentions: [
-            "src/Views/SidebarView.swift",
-            "src/index.ts",
-            "config.json",
-        ])
-        .padding(.horizontal, 16)
-    }
-    .padding(.vertical)
+    TurnMentionChipCatalog()
 }
 
 // MARK: - Flow layout (wraps chips + text field inline)

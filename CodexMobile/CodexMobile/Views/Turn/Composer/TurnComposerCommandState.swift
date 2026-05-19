@@ -197,6 +197,18 @@ enum TurnComposerReviewTarget: String, Codable, Equatable, Sendable {
             return .baseBranch
         }
     }
+
+    // Mirror used by thread-start callers (NewChatDraftView, TurnView) when they
+    // need to seed `CodexPendingThreadComposerAction.codeReview` for a brand-new
+    // thread without duplicating the case mapping.
+    var codexPendingTarget: CodexPendingCodeReviewTarget {
+        switch self {
+        case .uncommittedChanges:
+            return .uncommittedChanges
+        case .baseBranch:
+            return .baseBranch
+        }
+    }
 }
 
 struct TurnComposerReviewSelection: Codable, Equatable, Sendable {

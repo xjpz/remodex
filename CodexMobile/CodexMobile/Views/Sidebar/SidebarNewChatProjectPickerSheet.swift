@@ -10,6 +10,7 @@ import SwiftUI
 struct SidebarNewChatProjectPickerSheet: View {
     let choices: [SidebarProjectChoice]
     var showsWithoutProjectOption = true
+    var showsWorktreeOptions = true
     let onSelectProject: (String) -> Void
     let onSelectWorktreeProject: (String) -> Void
     let onSelectWithoutProject: () -> Void
@@ -20,28 +21,6 @@ struct SidebarNewChatProjectPickerSheet: View {
     var body: some View {
         NavigationStack {
             List {
-                Section {
-                    Button {
-                        onBrowseLocalFolder()
-                    } label: {
-                        projectRow(
-                            icon: AnyView(
-                                RemodexIcon.image(systemName: "folder.badge.plus")
-                                    .font(AppFont.body(weight: .medium))
-                                    .foregroundStyle(.secondary)
-                            ),
-                            title: "Add Local Folder",
-                            subtitle: "Browse or create a folder on your Mac."
-                        )
-                    }
-                    .buttonStyle(.plain)
-                } header: {
-                    Text("Choose a project for this chat")
-                        .font(AppFont.caption())
-                        .foregroundStyle(.secondary)
-                        .textCase(nil)
-                }
-
                 if !choices.isEmpty {
                     Section("Local") {
                         ForEach(choices) { choice in
@@ -69,24 +48,56 @@ struct SidebarNewChatProjectPickerSheet: View {
                         }
                     }
 
-                    Section("Worktree") {
-                        ForEach(choices) { choice in
-                            Button {
-                                dismiss()
-                                onSelectWorktreeProject(choice.projectPath)
-                            } label: {
-                                projectRow(
-                                    icon: AnyView(
-                                        CodexWorktreeIcon(pointSize: 16, weight: .medium)
-                                            .foregroundStyle(.secondary)
-                                    ),
-                                    title: choice.label,
-                                    subtitle: "Detached worktree from the default branch."
-                                )
+                    if showsWorktreeOptions {
+                        Section("Worktree") {
+                            ForEach(choices) { choice in
+                                Button {
+                                    dismiss()
+                                    onSelectWorktreeProject(choice.projectPath)
+                                } label: {
+                                    projectRow(
+                                        icon: AnyView(
+                                            CodexWorktreeIcon(pointSize: 16, weight: .medium)
+                                                .foregroundStyle(.secondary)
+                                        ),
+                                        title: choice.label,
+                                        subtitle: "Detached worktree from the default branch."
+                                    )
+                                }
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
                         }
                     }
+                } else {
+                    Section {
+                        Text("No recent project chats yet.")
+                            .font(AppFont.body())
+                            .foregroundStyle(.secondary)
+                    } header: {
+                        Text("Local")
+                    }
+                }
+
+                Section {
+                    Button {
+                        onBrowseLocalFolder()
+                    } label: {
+                        projectRow(
+                            icon: AnyView(
+                                RemodexIcon.image(systemName: "folder.badge.plus")
+                                    .font(AppFont.body(weight: .medium))
+                                    .foregroundStyle(.secondary)
+                            ),
+                            title: "Add Local Folder",
+                            subtitle: "Browse or create a folder on your Mac."
+                        )
+                    }
+                    .buttonStyle(.plain)
+                } header: {
+                    Text("Add")
+                        .font(AppFont.caption())
+                        .foregroundStyle(.secondary)
+                        .textCase(nil)
                 }
 
                 if showsWithoutProjectOption {

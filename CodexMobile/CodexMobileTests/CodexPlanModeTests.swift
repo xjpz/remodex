@@ -245,11 +245,13 @@ final class CodexPlanModeTests: XCTestCase {
                     id: "scope",
                     header: "Scope",
                     question: "What scope should we use?",
+                    isOther: false,
+                    isSecret: false,
+                    selectionLimit: 1,
                     options: [
-                        CodexStructuredUserInputOption(label: "Ship now", description: nil),
-                        CodexStructuredUserInputOption(label: "Stage behind a flag", description: nil),
-                    ],
-                    allowsMultiple: false
+                        CodexStructuredUserInputOption(label: "Ship now", description: ""),
+                        CodexStructuredUserInputOption(label: "Stage behind a flag", description: ""),
+                    ]
                 ),
             ],
             answersByQuestionID: [
@@ -368,7 +370,7 @@ final class CodexPlanModeTests: XCTestCase {
 
             default:
                 XCTFail("Unexpected method \(method)")
-                return RPCMessage(id: .string(UUID().uuidString), includeJSONRPC: false)
+                return RPCMessage(id: .string(UUID().uuidString), method: method, includeJSONRPC: false)
             }
         }
 
@@ -1164,13 +1166,16 @@ final class CodexPlanModeTests: XCTestCase {
             )
             XCTFail("Expected cancelStructuredPlanSession to throw")
         } catch let error as CodexServiceError {
-            XCTAssertEqual(error, .disconnected)
+            guard case .disconnected = error else {
+                XCTFail("Unexpected CodexServiceError: \(error)")
+                return
+            }
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
 
         XCTAssertEqual(service.messages(for: threadID).filter { $0.kind == .userInputPrompt }.count, 1)
-        XCTAssertEqual(service.currentPlanSessionSource(for: threadID), .native)
+        XCTAssertTrue(service.currentPlanSessionSource(for: threadID)?.isNative == true)
     }
 
     func testDismissStructuredPlanPromptFailureKeepsPromptVisible() async {
@@ -1226,7 +1231,7 @@ final class CodexPlanModeTests: XCTestCase {
         XCTAssertFalse(viewModel.isStructuredPlanPromptDismissed(requestID, codex: service))
         XCTAssertFalse(viewModel.isStructuredPlanPromptDismissing(requestID, codex: service))
         XCTAssertEqual(service.messages(for: threadID).filter { $0.kind == .userInputPrompt }.count, 1)
-        XCTAssertEqual(service.currentPlanSessionSource(for: threadID), .native)
+        XCTAssertTrue(service.currentPlanSessionSource(for: threadID)?.isNative == true)
         XCTAssertEqual(service.lastErrorMessage, service.userFacingTurnErrorMessage(from: CodexServiceError.disconnected))
     }
 
@@ -1346,6 +1351,7 @@ final class CodexPlanModeTests: XCTestCase {
 
     func testResolvedFallbackChoiceListStillAppearsAfterNativeThreadDegradesToPlainText() {
         let assistantMessage = CodexMessage(
+            threadId: "thread-plan",
             role: .assistant,
             text: """
             Suggested Roadmap If we wanted a practical sequence, I'd do:
@@ -1360,7 +1366,6 @@ final class CodexPlanModeTests: XCTestCase {
             2. a feature-priority matrix
             3. a "v1 vs v2" product strategy doc
             """,
-            threadId: "thread-plan",
             turnId: "turn-plan",
             orderIndex: 3
         )
@@ -1375,7 +1380,7 @@ final class CodexPlanModeTests: XCTestCase {
         XCTAssertEqual(questionnaire?.questions.count, 1)
         XCTAssertEqual(questionnaire?.questions.first?.header, "Next step")
         XCTAssertEqual(
-            questionnaire?.questions.first?.options.map(\.label),
+            questionnaire?.questions.first?.options.map { $0.label },
             [
                 "a concrete 2-week roadmap",
                 "a feature-priority matrix",
@@ -1386,6 +1391,7 @@ final class CodexPlanModeTests: XCTestCase {
 
     func testResolvedFallbackChoiceListDoesNotAppearOutsidePlanModeSession() {
         let assistantMessage = CodexMessage(
+            threadId: "thread-default",
             role: .assistant,
             text: """
             If you want, next I can turn this into one of these:
@@ -1394,7 +1400,6 @@ final class CodexPlanModeTests: XCTestCase {
             2. a feature-priority matrix
             3. a "v1 vs v2" product strategy doc
             """,
-            threadId: "thread-default",
             turnId: "turn-default",
             orderIndex: 3
         )
@@ -1415,6 +1420,7 @@ final class CodexPlanModeTests: XCTestCase {
         service.markNativePlanSession(for: "thread-native")
 
         let assistantMessage = CodexMessage(
+            threadId: "thread-native",
             role: .assistant,
             text: """
             If you want, next I can turn this into one of these:
@@ -1423,7 +1429,6 @@ final class CodexPlanModeTests: XCTestCase {
             2. a feature-priority matrix
             3. a "v1 vs v2" product strategy doc
             """,
-            threadId: "thread-native",
             turnId: "turn-native",
             orderIndex: 3
         )

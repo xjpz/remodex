@@ -54,7 +54,7 @@ struct ComposerPillLabel: View {
             }
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        .padding(.vertical, 6)
         .adaptiveGlass(.regular, isInteractive: true, in: Capsule())
         .foregroundStyle(foregroundColor)
         .contentShape(Capsule())
@@ -71,8 +71,7 @@ struct ComposerPillLabel: View {
         ComposerPillLabel(
             title: "main",
             iconSystemName: "remodex.git-branch",
-            titleFont: AppFont.mono(.subheadline),
-            titleWeight: .medium
+            showsTrailingChevron: false
         )
     }
     .padding()

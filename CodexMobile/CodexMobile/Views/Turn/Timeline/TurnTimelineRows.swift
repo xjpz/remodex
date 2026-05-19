@@ -34,6 +34,17 @@ struct AssistantBlockAccessoryState: Equatable {
         )
     }
 
+    func replacingRunningIndicator(_ showsRunningIndicator: Bool) -> AssistantBlockAccessoryState {
+        AssistantBlockAccessoryState(
+            copyText: copyText,
+            showsRunningIndicator: showsRunningIndicator,
+            blockDiffText: blockDiffText,
+            blockDiffEntries: blockDiffEntries,
+            blockRevertPresentation: blockRevertPresentation,
+            blockRevertMessage: blockRevertMessage
+        )
+    }
+
     func mergingRehomedAccessoryState(_ state: AssistantBlockAccessoryState) -> AssistantBlockAccessoryState {
         AssistantBlockAccessoryState(
             copyText: copyText ?? state.copyText,
@@ -86,6 +97,7 @@ private struct TurnTimelineMessageRow: View {
     let planMatchingFingerprint: Int
     let newestStreamingMessageID: String?
     let autoScrollMode: TurnAutoScrollMode
+    let showsGlobalRunningIndicator: Bool
     let onRetryUserMessage: (String) -> Void
     let onTapAssistantRevert: (CodexMessage) -> Void
     let onTapSubagent: (CodexSubagentThreadPresentation) -> Void
@@ -95,7 +107,7 @@ private struct TurnTimelineMessageRow: View {
             message: message,
             isRetryAvailable: isRetryAvailable,
             onRetryUserMessage: onRetryUserMessage,
-            assistantBlockAccessoryState: cachedBlockInfoByMessageID[message.id],
+            assistantBlockAccessoryState: assistantBlockAccessoryState,
             planSessionSource: planSessionSource,
             allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
             assistantTurnCompleted: message.turnId.map(completedTurnIDs.contains) ?? false,
@@ -112,6 +124,13 @@ private struct TurnTimelineMessageRow: View {
         .equatable()
         .id(message.id)
     }
+
+    private var assistantBlockAccessoryState: AssistantBlockAccessoryState? {
+        let state = cachedBlockInfoByMessageID[message.id]
+        return showsGlobalRunningIndicator
+            ? state?.replacingRunningIndicator(false)
+            : state
+    }
 }
 
 private struct TurnTimelineToolBurstView: View {
@@ -126,6 +145,7 @@ private struct TurnTimelineToolBurstView: View {
     let planMatchingFingerprint: Int
     let newestStreamingMessageID: String?
     let autoScrollMode: TurnAutoScrollMode
+    let showsGlobalRunningIndicator: Bool
     let onRetryUserMessage: (String) -> Void
     let onTapAssistantRevert: (CodexMessage) -> Void
     let onTapSubagent: (CodexSubagentThreadPresentation) -> Void
@@ -155,6 +175,7 @@ private struct TurnTimelineToolBurstView: View {
                     planMatchingFingerprint: planMatchingFingerprint,
                     newestStreamingMessageID: newestStreamingMessageID,
                     autoScrollMode: autoScrollMode,
+                    showsGlobalRunningIndicator: showsGlobalRunningIndicator,
                     onRetryUserMessage: onRetryUserMessage,
                     onTapAssistantRevert: onTapAssistantRevert,
                     onTapSubagent: onTapSubagent
@@ -202,6 +223,7 @@ private struct TurnTimelineToolBurstView: View {
                         planMatchingFingerprint: planMatchingFingerprint,
                         newestStreamingMessageID: newestStreamingMessageID,
                         autoScrollMode: autoScrollMode,
+                        showsGlobalRunningIndicator: showsGlobalRunningIndicator,
                         onRetryUserMessage: onRetryUserMessage,
                         onTapAssistantRevert: onTapAssistantRevert,
                         onTapSubagent: onTapSubagent
@@ -224,6 +246,7 @@ private struct TurnTimelinePreviousMessagesView: View {
     let planMatchingFingerprint: Int
     let newestStreamingMessageID: String?
     let autoScrollMode: TurnAutoScrollMode
+    let showsGlobalRunningIndicator: Bool
     let onRetryUserMessage: (String) -> Void
     let onTapAssistantRevert: (CodexMessage) -> Void
     let onTapSubagent: (CodexSubagentThreadPresentation) -> Void
@@ -232,6 +255,12 @@ private struct TurnTimelinePreviousMessagesView: View {
 
     private var title: String {
         group.hiddenCount == 1 ? "1 previous message" : "\(group.hiddenCount) previous messages"
+    }
+
+    private var divider: some View {
+        Rectangle()
+            .fill(Color.secondary.opacity(0.18))
+            .frame(height: 1)
     }
 
     var body: some View {
@@ -250,12 +279,6 @@ private struct TurnTimelinePreviousMessagesView: View {
                         .foregroundStyle(.secondary)
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
                     Spacer(minLength: 0)
-                }
-                .padding(.bottom, 8)
-                .overlay(alignment: .bottom) {
-                    Rectangle()
-                        .fill(Color.secondary.opacity(0.18))
-                        .frame(height: 1)
                 }
                 .contentShape(Rectangle())
             }
@@ -277,12 +300,15 @@ private struct TurnTimelinePreviousMessagesView: View {
                         planMatchingFingerprint: planMatchingFingerprint,
                         newestStreamingMessageID: newestStreamingMessageID,
                         autoScrollMode: autoScrollMode,
+                        showsGlobalRunningIndicator: showsGlobalRunningIndicator,
                         onRetryUserMessage: onRetryUserMessage,
                         onTapAssistantRevert: onTapAssistantRevert,
                         onTapSubagent: onTapSubagent
                     )
                 }
             }
+
+            divider
         }
         .id(group.id)
     }
@@ -294,6 +320,7 @@ struct TurnTimelineRowsSection: View {
     let isLoadingEarlierMessages: Bool
     let earlierMessagesErrorMessage: String?
     let renderItems: [TurnTimelineRenderItem]
+    let showsPendingAssistantIndicator: Bool
     let isRetryAvailable: Bool
     let cachedBlockInfoByMessageID: [String: AssistantBlockAccessoryState]
     let planSessionSource: CodexPlanSessionSource?
@@ -355,6 +382,7 @@ struct TurnTimelineRowsSection: View {
                         planMatchingFingerprint: planMatchingFingerprint,
                         newestStreamingMessageID: newestStreamingMessageID,
                         autoScrollMode: autoScrollMode,
+                        showsGlobalRunningIndicator: shouldShowPendingAssistantIndicator,
                         onRetryUserMessage: onRetryUserMessage,
                         onTapAssistantRevert: onTapAssistantRevert,
                         onTapSubagent: onTapSubagent
@@ -372,6 +400,7 @@ struct TurnTimelineRowsSection: View {
                         planMatchingFingerprint: planMatchingFingerprint,
                         newestStreamingMessageID: newestStreamingMessageID,
                         autoScrollMode: autoScrollMode,
+                        showsGlobalRunningIndicator: shouldShowPendingAssistantIndicator,
                         onRetryUserMessage: onRetryUserMessage,
                         onTapAssistantRevert: onTapAssistantRevert,
                         onTapSubagent: onTapSubagent
@@ -389,14 +418,25 @@ struct TurnTimelineRowsSection: View {
                         planMatchingFingerprint: planMatchingFingerprint,
                         newestStreamingMessageID: newestStreamingMessageID,
                         autoScrollMode: autoScrollMode,
+                        showsGlobalRunningIndicator: shouldShowPendingAssistantIndicator,
                         onRetryUserMessage: onRetryUserMessage,
                         onTapAssistantRevert: onTapAssistantRevert,
                         onTapSubagent: onTapSubagent
                     )
                 }
             }
+
+            if shouldShowPendingAssistantIndicator {
+                PendingAssistantIndicatorRow()
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var shouldShowPendingAssistantIndicator: Bool {
+        TurnTimelinePendingAssistantState.shouldShowIndicator(
+            isRunStartingOrRunning: showsPendingAssistantIndicator
+        )
     }
 
     private var earlierMessagesButtonTitle: String {
@@ -404,5 +444,17 @@ struct TurnTimelineRowsSection: View {
             return "Loading earlier messages..."
         }
         return earlierMessagesErrorMessage ?? "Load earlier messages"
+    }
+}
+
+private struct PendingAssistantIndicatorRow: View {
+    var body: some View {
+        HStack {
+            TerminalRunningIndicator()
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 4)
+        .padding(.top, 6)
     }
 }

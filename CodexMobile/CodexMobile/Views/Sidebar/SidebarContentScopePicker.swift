@@ -7,9 +7,9 @@
 //          so the entire accent surface in the sidebar stays in sync with
 //          the user's chosen color.
 // Layer: View Component
-// Exports: SidebarContentScopePicker
+// Exports: SidebarContentScopePicker, SidebarFolderExpansionToggleButton
 // Depends on: SwiftUI, SidebarContentScope, HapticButton, AppFont,
-//             UserBubbleColor, AdaptiveGlassModifier
+//             UserBubbleColor, RemodexIcon, AdaptiveGlassModifier
 
 import SwiftUI
 
@@ -23,8 +23,8 @@ struct SidebarContentScopePicker: View {
     private static let selectionAnimation: Animation = .spring(response: 0.34, dampingFraction: 0.78)
 
     var body: some View {
-        AdaptiveGlassContainer(spacing: 6) {
-            HStack(spacing: 6) {
+        AdaptiveGlassContainer(spacing: 12) {
+            HStack(spacing: 12) {
                 ForEach(SidebarContentScope.allCases) { scope in
                     scopeButton(scope)
                 }
@@ -81,6 +81,44 @@ struct SidebarContentScopePicker: View {
     }
 }
 
+// Icon-only companion to the scope chips; the parent owns the folder state.
+struct SidebarFolderExpansionToggleButton: View {
+    let areAllFoldersCollapsed: Bool
+    let action: () -> Void
+
+    private var title: String {
+        areAllFoldersCollapsed ? "Expand all" : "Collapse all"
+    }
+
+    private var iconSystemName: String {
+        areAllFoldersCollapsed
+            ? "arrow.down.backward.and.arrow.up.forward"
+            : "arrow.up.right.and.arrow.down.left"
+    }
+
+    var body: some View {
+        HapticButton(hapticStyle: .light, action: action) {
+            RemodexIcon.image(systemName: iconSystemName)
+                .font(AppFont.system(size: 13, weight: .semibold))
+                .foregroundStyle(.primary)
+                .frame(width: 36, height: 36)
+                .adaptiveGlass(
+                    .regular,
+                    isInteractive: true,
+                    fallbackMaterial: .ultraThinMaterial,
+                    in: Circle()
+                )
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityHint(
+            areAllFoldersCollapsed ? "Expands all project folders" : "Collapses all project folders"
+        )
+        .help(title)
+    }
+}
+
 #if DEBUG
 
 // Interactive preview: tap the chips to swap selection live. Renders the chip
@@ -93,7 +131,10 @@ private struct SidebarContentScopePickerPreviewHost: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 section("Interactive") {
-                    SidebarContentScopePicker(selection: $selection)
+                    HStack(spacing: 8) {
+                        SidebarContentScopePicker(selection: $selection)
+                        SidebarFolderExpansionToggleButton(areAllFoldersCollapsed: false, action: {})
+                    }
                 }
 
                 section("Projects selected") {

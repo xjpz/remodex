@@ -38,6 +38,9 @@ struct TurnComposerHostView: View {
     let onTapVoice: () -> Void
     let onCancelVoiceRecording: () -> Void
     let onSend: () -> Void
+    // Pass-through for the New Chat draft surface; defaults to true so every
+    // existing call site keeps its meta bar.
+    var showsSecondaryBar: Bool = true
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
     var body: some View {
@@ -294,7 +297,8 @@ struct TurnComposerHostView: View {
             onRemoveQueuedDraft: { draftID in
                 viewModel.removeQueuedDraft(id: draftID, codex: codex, threadID: thread.id)
             },
-            onSend: onSend
+            onSend: onSend,
+            showsSecondaryBar: showsSecondaryBar
         )
     }
 }

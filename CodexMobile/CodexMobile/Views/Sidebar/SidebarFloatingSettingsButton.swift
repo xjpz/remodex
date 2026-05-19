@@ -11,7 +11,7 @@ struct SidebarFloatingSettingsButton: View {
 
     var body: some View {
         HapticButton(hapticStyle: .medium, action: action) {
-            RemodexIcon.image(systemName: "gearshape.fill", size: 17, weight: .semibold)
+            RemodexIcon.image(systemName: "gearshape", size: 17, weight: .semibold)
                 .foregroundStyle(colorScheme == .dark ? Color.white : Color.black)
                 .frame(width: 44, height: 44)
                 .adaptiveGlass(.regular, in: Circle())
