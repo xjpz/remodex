@@ -2,7 +2,7 @@
 // Purpose: Renders user prompt bubbles, attachment previews, mention chips, and retry/copy actions.
 // Layer: View Component
 // Exports: UserMessageBubble
-// Depends on: SwiftUI, UIKit, UserAttachmentViews, UserBubbleTextBlock, UserBubbleInlineMarkdownText
+// Depends on: SwiftUI, UIKit, UserAttachmentViews, UserBubbleLayout, UserBubbleTextBlock, UserBubbleInlineMarkdownText
 
 import SwiftUI
 import UIKit
@@ -25,53 +25,50 @@ struct UserMessageBubble: View {
     var body: some View {
         let bubbleColor = selectedUserBubbleColor
         let renderModel = UserBubbleRenderModelCache.model(for: message, text: text)
-        HStack {
-            Spacer(minLength: 60)
-            VStack(alignment: .trailing, spacing: 4) {
-                if !message.attachments.isEmpty {
-                    UserAttachmentStrip(attachments: message.attachments) { tappedAttachment in
-                        if let image = AttachmentPreviewImageResolver.resolve(tappedAttachment) {
-                            previewImage = PreviewImagePayload(image: image)
-                        }
+        UserBubbleTrailingColumn {
+            if !message.attachments.isEmpty {
+                UserAttachmentStrip(attachments: message.attachments) { tappedAttachment in
+                    if let image = AttachmentPreviewImageResolver.resolve(tappedAttachment) {
+                        previewImage = PreviewImagePayload(image: image)
                     }
-                }
-
-                if !renderModel.chips.isEmpty {
-                    UserMentionChipStrip(chips: renderModel.chips)
-                }
-
-                if !renderModel.text.isEmpty {
-                    userBubbleTextContent(renderModel, bubbleColor: bubbleColor)
-                        .padding(.vertical, 12)
-                        .padding(.horizontal, 16)
-                        .background {
-                            RoundedRectangle(cornerRadius: Self.bubbleCornerRadius, style: .continuous)
-                                .fill(userBubbleBackground(for: bubbleColor))
-                        }
-                }
-
-                if let statusText = deliveryStatusText {
-                    Text(statusText)
-                        .font(AppFont.caption2())
-                        .foregroundStyle(message.deliveryState == .failed ? .red : .secondary)
                 }
             }
-            .contextMenu {
-                if !actionText.isEmpty {
-                    Button {
-                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                        UIPasteboard.general.string = actionText
-                    } label: {
-                        RemodexIcon.menuLabel("Copy", systemName: "doc.on.doc")
+
+            if !renderModel.chips.isEmpty {
+                UserMentionChipStrip(chips: renderModel.chips)
+            }
+
+            if !renderModel.text.isEmpty {
+                userBubbleTextContent(renderModel, bubbleColor: bubbleColor)
+                    .padding(.vertical, 12)
+                    .padding(.horizontal, 16)
+                    .background {
+                        RoundedRectangle(cornerRadius: Self.bubbleCornerRadius, style: .continuous)
+                            .fill(userBubbleBackground(for: bubbleColor))
                     }
+            }
+
+            if let statusText = deliveryStatusText {
+                Text(statusText)
+                    .font(AppFont.caption2())
+                    .foregroundStyle(message.deliveryState == .failed ? .red : .secondary)
+            }
+        }
+        .contextMenu {
+            if !actionText.isEmpty {
+                Button {
+                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                    UIPasteboard.general.string = actionText
+                } label: {
+                    RemodexIcon.menuLabel("Copy", systemName: "doc.on.doc")
                 }
-                if isRetryAvailable, !actionText.isEmpty {
-                    Button {
-                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                        onRetryUserMessage(actionText)
-                    } label: {
-                        Label("Retry", systemImage: "arrow.clockwise")
-                    }
+            }
+            if isRetryAvailable, !actionText.isEmpty {
+                Button {
+                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                    onRetryUserMessage(actionText)
+                } label: {
+                    Label("Retry", systemImage: "arrow.clockwise")
                 }
             }
         }
@@ -188,16 +185,6 @@ private enum UserBubbleMentionExtractor {
     }
 
     private static let repeatedHorizontalWhitespace = try? NSRegularExpression(pattern: #"[ \t]{2,}"#)
-    private static let slashCommandRegex: NSRegularExpression? = {
-        let tokens = TurnComposerSlashCommand.allCommands
-            .map(\.commandToken)
-            .map(NSRegularExpression.escapedPattern(for:))
-            .joined(separator: "|")
-        guard !tokens.isEmpty else { return nil }
-        return try? NSRegularExpression(
-            pattern: "(?<!\\S)(\(tokens))(?=[\\s,.;:!?\\)\\]\\}>]|$)"
-        )
-    }()
 
     static func renderModel(
         text rawText: String,
@@ -208,24 +195,31 @@ private enum UserBubbleMentionExtractor {
     ) -> UserBubbleRenderModel {
         var chips: [TurnMentionChipRef] = []
         var seenChipIDs: Set<String> = []
-        let confirmedFileMentions = normalizedConfirmedFileMentions(fileMentions)
+        var selectedChipsByToken: [String: TurnMentionChipRef] = [:]
 
         for mention in fileMentions {
             let trimmed = mention.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
-            appendChip(.file(trimmed), to: &chips, seenChipIDs: &seenChipIDs)
+            let chip = TurnMentionChipRef.file(trimmed)
+            appendChip(chip, to: &chips, seenChipIDs: &seenChipIDs)
+            selectedChipsByToken[mentionLookupKey(trigger: "@", token: trimmed)] = chip
+            selectedChipsByToken[mentionLookupKey(trigger: "@", token: chip.displayLabel)] = chip
         }
 
         for mention in skillMentions {
             let trimmed = mention.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
-            appendChip(.skill(trimmed), to: &chips, seenChipIDs: &seenChipIDs)
+            let chip = TurnMentionChipRef.skill(trimmed)
+            appendChip(chip, to: &chips, seenChipIDs: &seenChipIDs)
+            selectedChipsByToken[mentionLookupKey(trigger: "$", token: trimmed)] = chip
         }
 
         for mention in pluginMentions {
             let trimmed = mention.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
-            appendChip(.plugin(trimmed), to: &chips, seenChipIDs: &seenChipIDs)
+            let chip = TurnMentionChipRef.plugin(trimmed)
+            appendChip(chip, to: &chips, seenChipIDs: &seenChipIDs)
+            selectedChipsByToken[mentionLookupKey(trigger: "@", token: trimmed)] = chip
         }
 
         let normalizedText = SkillReferenceFormatter.replacingSkillReferences(
@@ -233,12 +227,7 @@ private enum UserBubbleMentionExtractor {
             style: .mentionToken
         )
         var replacements: [Replacement] = []
-        collectSlashCommandReplacements(
-            in: normalizedText,
-            replacements: &replacements,
-            chips: &chips,
-            seenChipIDs: &seenChipIDs
-        )
+        var replacedChipIDs: Set<String> = []
 
         if normalizedText.contains("@") || normalizedText.contains("$"),
            let mentionRegex = TurnMessageRegexCache.userMentionToken {
@@ -252,29 +241,21 @@ private enum UserBubbleMentionExtractor {
                 guard let parsed = parsedMention(match: match, in: nsText) else {
                     continue
                 }
-
-                switch parsed.trigger {
-                case "@":
-                    let normalizedFileToken = TurnMessageRegexCache.removingTrailingLineColumnSuffix(from: parsed.token)
-                    if confirmedFileMentions.contains(normalizedFileToken) {
-                        replacements.append(Replacement(range: match.range, text: parsed.trailingPunctuation))
-                    } else if isLikelyPluginMention(parsed.token) {
-                        appendChip(.plugin(parsed.token), to: &chips, seenChipIDs: &seenChipIDs)
-                        replacements.append(Replacement(range: match.range, text: parsed.trailingPunctuation))
-                    }
-                case "$":
-                    guard isLikelySkillMention(parsed.token) else { continue }
-                    appendChip(.skill(parsed.token), to: &chips, seenChipIDs: &seenChipIDs)
-                    replacements.append(Replacement(range: match.range, text: parsed.trailingPunctuation))
-                default:
-                    continue
-                }
+                let lookupKey = mentionLookupKey(trigger: parsed.trigger, token: parsed.token)
+                guard let chip = selectedChipsByToken[lookupKey] else { continue }
+                replacements.append(Replacement(range: match.range, text: chip.displayLabel + parsed.trailingPunctuation))
+                replacedChipIDs.insert(chip.id)
             }
         }
 
-        let displayText = cleanedText(
-            replacing: replacements,
-            in: normalizedText
+        // Missing selected chips are appended by identity, not by fuzzy text search.
+        let displayText = textByAppendingMissingChipLabels(
+            to: cleanedText(
+                replacing: replacements,
+                in: normalizedText
+            ),
+            chips: chips,
+            replacedChipIDs: replacedChipIDs
         )
         return UserBubbleRenderModel(
             text: displayText,
@@ -283,39 +264,26 @@ private enum UserBubbleMentionExtractor {
         )
     }
 
-    private static func collectSlashCommandReplacements(
-        in text: String,
-        replacements: inout [Replacement],
-        chips: inout [TurnMentionChipRef],
-        seenChipIDs: inout Set<String>
-    ) {
-        guard let slashCommandRegex else { return }
+    private static func textByAppendingMissingChipLabels(
+        to text: String,
+        chips: [TurnMentionChipRef],
+        replacedChipIDs: Set<String>
+    ) -> String {
+        let missingLabels = chips
+            .filter { !replacedChipIDs.contains($0.id) }
+            .map { $0.displayLabel.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
 
-        let nsText = text as NSString
-        let matches = slashCommandRegex.matches(
-            in: text,
-            range: NSRange(location: 0, length: nsText.length)
-        )
-        guard !matches.isEmpty else { return }
-
-        for match in matches {
-            let token = nsText.substring(with: match.range)
-            guard let command = TurnComposerSlashCommand.allCommands.first(where: { $0.commandToken == token }) else {
-                continue
-            }
-
-            appendChip(.slashCommand(command), to: &chips, seenChipIDs: &seenChipIDs)
-            replacements.append(Replacement(range: match.range, text: ""))
+        guard !missingLabels.isEmpty else {
+            return text
         }
-    }
 
-    private static func normalizedConfirmedFileMentions(_ mentions: [String]) -> Set<String> {
-        Set(
-            mentions
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .map(TurnMessageRegexCache.removingTrailingLineColumnSuffix)
-                .filter { !$0.isEmpty }
-        )
+        let suffix = missingLabels.joined(separator: " ")
+        guard !text.isEmpty else {
+            return suffix
+        }
+
+        return "\(text) \(suffix)"
     }
 
     private static func appendChip(
@@ -364,6 +332,18 @@ private enum UserBubbleMentionExtractor {
         return (path, trailing)
     }
 
+    // Only selected metadata is allowed to rewrite visible text; raw `$foo`/`@foo` stays literal.
+    private static func mentionLookupKey(trigger: String, token: String) -> String {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized: String
+        if trigger == "@" {
+            normalized = TurnMessageRegexCache.removingTrailingLineColumnSuffix(from: trimmed)
+        } else {
+            normalized = trimmed
+        }
+        return "\(trigger):\(normalized.lowercased())"
+    }
+
     private static func cleanedText(replacing replacements: [Replacement], in text: String) -> String {
         guard !replacements.isEmpty else {
             return text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -381,30 +361,6 @@ private enum UserBubbleMentionExtractor {
         )
         return collapsed.trimmingCharacters(in: .whitespacesAndNewlines)
     }
-
-    // Keeps plugin chips to app-style slugs so Swift attributes and scoped build labels stay plain.
-    private static func isLikelyPluginMention(_ token: String) -> Bool {
-        let normalized = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let first = normalized.first,
-              first.isLowercase || first.isNumber else {
-            return false
-        }
-
-        return normalized.allSatisfy { character in
-            character.isLetter || character.isNumber || character == "-" || character == "_"
-        }
-    }
-
-    private static func isLikelySkillMention(_ token: String) -> Bool {
-        let normalized = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard normalized.contains(where: \.isLetter) else {
-            return false
-        }
-
-        return normalized.allSatisfy { character in
-            character.isLetter || character.isNumber || character == "-" || character == "_"
-        }
-    }
 }
 
 // MARK: - Previews
@@ -415,7 +371,7 @@ private struct UserBubblePreviewCatalog: View {
             VStack(alignment: .leading, spacing: 28) {
                 previewSection("Skill chip + text") {
                     bubblePreview(
-                        text: "can you",
+                        text: "can you $check-code",
                         skillMentions: ["check-code"],
                         actionText: "can you $check-code",
                         bubbleColor: .purple
@@ -424,11 +380,21 @@ private struct UserBubblePreviewCatalog: View {
 
                 previewSection("Skill + file + plugin") {
                     bubblePreview(
-                        text: "review this module",
+                        text: "review this module @TurnView.swift $check-code @linear",
                         fileMentions: ["TurnView.swift"],
                         skillMentions: ["check-code"],
                         pluginMentions: ["linear"],
                         actionText: "review this module @TurnView.swift $check-code @linear",
+                        bubbleColor: .indigo
+                    )
+                }
+
+                previewSection("Long text wraps") {
+                    bubblePreview(
+                        text: "can you review this module and explain the risky parts before I merge these local changes? @TurnView.swift $check-code",
+                        fileMentions: ["TurnView.swift"],
+                        skillMentions: ["check-code"],
+                        actionText: "can you review this module and explain the risky parts before I merge these local changes? @TurnView.swift $check-code",
                         bubbleColor: .indigo
                     )
                 }
@@ -442,13 +408,15 @@ private struct UserBubblePreviewCatalog: View {
 
                 previewSection("Slash command + skill") {
                     bubblePreview(
-                        text: "run on local changes",
+                        text: "/review run on local changes $frontend-design",
                         skillMentions: ["frontend-design"],
                         actionText: "/review run on local changes $frontend-design",
                         bubbleColor: .blue
                     )
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 16)
             .padding(.vertical, 20)
         }
         .background(Color(.systemGroupedBackground))
@@ -463,10 +431,10 @@ private struct UserBubblePreviewCatalog: View {
             Text(title)
                 .font(AppFont.subheadline(weight: .semibold))
                 .foregroundStyle(.secondary)
-                .padding(.horizontal, 16)
 
             content()
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func bubblePreview(

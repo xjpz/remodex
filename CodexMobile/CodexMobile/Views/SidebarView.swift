@@ -232,8 +232,17 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
         }
     }
 
-    // Opens a rootless draft first; the real thread is created only after the first send.
+    // Opens a draft composer first; the real thread is created only after the first send.
+    // Seeds the draft with the latest used project so the pill under the prompt has a sensible
+    // default the user can still change via the picker.
     private func handleNewChatButtonTap() {
+        prepareSidebarForChatNavigation()
+        onOpenNewChatDraft(.generalChat, defaultNewChatProjectPath)
+    }
+
+    // Bottom Chat pill is the fast rootless draft entry: no project preselection,
+    // no picker pill, and the real Codex-style cwd is minted on first send.
+    private func handleRootlessChatDraftTap() {
         prepareSidebarForChatNavigation()
         onOpenNewChatDraft(.generalChat, nil)
     }
@@ -451,6 +460,10 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
             "rebuildCachedRunBadges durationMs=\(Int(Date().timeIntervalSince(startedAt) * 1000)) "
                 + "threadCount=\(codex.threads.count) cached=\(cachedRunBadges.count)"
         )
+    }
+
+    private var defaultNewChatProjectPath: String? {
+        newChatProjectChoices.first?.projectPath
     }
 
     // Keeps the chooser in sync with the same project buckets shown in the sidebar.
@@ -683,7 +696,7 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
         SidebarBottomActionBar(
             isChatEnabled: canCreateThread,
             isCreatingThread: isCreatingThread,
-            onTapChat: handleNewChatButtonTap,
+            onTapChat: handleRootlessChatDraftTap,
             onTapTerminal: openTerminal
         )
     }

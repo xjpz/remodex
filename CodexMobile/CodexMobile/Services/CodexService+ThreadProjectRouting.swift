@@ -7,25 +7,55 @@ import Foundation
 
 extension CodexService {
     // Reuses the same runtime-readiness gate across every UI entry point that starts a new chat.
+    // When no project path is provided we ask the bridge to mint a Codex-Desktop-style rootless
+    // chat root (`~/Documents/Codex/<DATE>/<slug>`) so the persisted thread lands under the
+    // same "Chats" bucket Desktop uses, instead of inheriting the app-server's process cwd
+    // (which on Mac is the user's home directory and previously surfaced as a sidebar project
+    // named after the macOS/Windows username).
     func startThreadIfReady(
         preferredProjectPath: String? = nil,
+        rootlessChatPromptHint: String? = nil,
         pendingComposerAction: CodexPendingThreadComposerAction? = nil,
         runtimeOverride: CodexThreadRuntimeOverride? = nil
     ) async throws -> CodexThread {
         try await awaitRuntimeInitializedIfNeeded()
 
+        let resolvedProjectPath = await resolvedPreferredProjectPath(
+            preferredProjectPath: preferredProjectPath,
+            rootlessChatPromptHint: rootlessChatPromptHint
+        )
+
         if let pendingComposerAction {
             return try await startThread(
-                preferredProjectPath: preferredProjectPath,
+                preferredProjectPath: resolvedProjectPath,
                 pendingComposerAction: pendingComposerAction,
                 runtimeOverride: runtimeOverride
             )
         }
 
         return try await startThread(
-            preferredProjectPath: preferredProjectPath,
+            preferredProjectPath: resolvedProjectPath,
             runtimeOverride: runtimeOverride
         )
+    }
+
+    // Best-effort rootless cwd minting. If the bridge call fails (older bridge build or
+    // filesystem problem) we fall back to sending `thread/start` without a cwd, preserving
+    // the pre-existing behaviour rather than blocking the user from starting a chat.
+    private func resolvedPreferredProjectPath(
+        preferredProjectPath: String?,
+        rootlessChatPromptHint: String?
+    ) async -> String? {
+        if let preferredProjectPath,
+           !preferredProjectPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return preferredProjectPath
+        }
+
+        do {
+            return try await createRootlessChatRoot(promptHint: rootlessChatPromptHint)
+        } catch {
+            return nil
+        }
     }
 
     // Rebinds the existing chat to a new local project path so worktree handoff keeps the same thread id.

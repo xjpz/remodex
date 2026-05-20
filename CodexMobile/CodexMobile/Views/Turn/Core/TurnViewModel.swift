@@ -1361,11 +1361,19 @@ final class TurnViewModel {
         shouldAnchorToAssistantResponse = true
         clearComposer()
 
+        // Forwards the raw user input as the rootless chat slug hint so the
+        // bridge can mirror Codex Desktop's `~/Documents/Codex/<DATE>/<slug>`
+        // naming for projectless chats opened from the iOS draft composer.
+        let rootlessChatPromptHint = pendingSend.rawInput
+
         Task { @MainActor in
             defer { isSending = false }
 
             do {
-                let thread = try await codex.startThreadIfReady(preferredProjectPath: preferredProjectPath)
+                let thread = try await codex.startThreadIfReady(
+                    preferredProjectPath: preferredProjectPath,
+                    rootlessChatPromptHint: rootlessChatPromptHint
+                )
                 onThreadCreated(thread)
 
                 do {

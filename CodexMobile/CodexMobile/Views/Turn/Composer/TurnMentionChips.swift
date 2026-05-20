@@ -1,7 +1,19 @@
 // FILE: TurnMentionChips.swift
-// Purpose: Shared mention/action chip tokens, semantic refs, row layout, and preview catalog.
+// Purpose: Single source of truth for mention/action chip UI (composer + timeline).
 // Layer: View Component
-// Exports: TurnMentionChipRef, TurnMentionChip, TurnMentionChipRow, UserMentionChipStrip, SlashCommandChip, TurnMentionChipCatalog
+//
+// Modify chip appearance in one place:
+//   - `TurnMentionChipTokens`
+//   - `TurnMentionChipStyle`
+//   - `TurnMentionChip`
+//
+// Row presets:
+//   - `TurnMentionChipRow.composer(...)` — removable composer strip
+//   - `TurnMentionChipRow.bubble(...)` / `UserMentionChipStrip` — read-only bubble strip
+//   - `TurnComposerMentionChipSections` — all composer mention rows
+//
+// Exports: TurnMentionChipRef, TurnMentionChip, TurnMentionChipRow, UserMentionChipStrip,
+//          TurnComposerMentionChipSections, TurnMentionChipCatalog, SkillDisplayNameFormatter
 // Depends on: SwiftUI, TurnComposerCommandState
 
 import SwiftUI
@@ -9,15 +21,21 @@ import SwiftUI
 // MARK: - Tokens
 
 enum TurnMentionChipTokens {
-    static let iconFont = AppFont.system(size: 9, weight: .semibold)
-    static let labelFont = AppFont.footnote(weight: .medium)
+    static let iconFont = AppFont.system(size: 12, weight: .semibold)
+    static let labelFont = AppFont.subheadline(weight: .medium)
     static let removeFont = AppFont.system(size: 8, weight: .bold)
-    static let horizontalPadding: CGFloat = 8
-    static let verticalPadding: CGFloat = 4
-    static let cornerRadius: CGFloat = 8
+    static let horizontalPadding: CGFloat = 10
+    static let verticalPadding: CGFloat = 6
+    static let cornerRadius: CGFloat = 20
     static let removeButtonSize: CGFloat = 14
     static let contentSpacing: CGFloat = 4
     static let rowSpacing: CGFloat = 6
+    static let fillOpacity: CGFloat = 0.05
+    static let removeFillOpacity: CGFloat = 0.14
+    static let composerHorizontalPadding: CGFloat = 16
+    static let composerFilesTopPadding: CGFloat = 10
+    static let composerAccessoryTopPadding: CGFloat = 8
+    static let bubbleRowSpacing: CGFloat = 6
 }
 
 struct TurnMentionChipStyle: Equatable {
@@ -152,6 +170,15 @@ struct TurnMentionChipRef: Identifiable, Equatable {
         }
     }
 
+    var displayLabel: String {
+        switch kind {
+        case .skill, .plugin:
+            return SkillDisplayNameFormatter.displayName(for: label)
+        default:
+            return label
+        }
+    }
+
     static func file(_ path: String, label: String? = nil) -> TurnMentionChipRef {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         let displayLabel = label ?? trimmed.pathDisplayName
@@ -209,6 +236,38 @@ struct TurnMentionChipRef: Identifiable, Equatable {
     }
 }
 
+// MARK: - Composer ref mapping
+
+extension Array where Element == TurnComposerMentionedFile {
+    var mentionChipRefs: [TurnMentionChipRef] {
+        map { TurnMentionChipRef.file($0.path, label: $0.fileName) }
+    }
+
+    func mentionID(matching ref: TurnMentionChipRef) -> String? {
+        first(where: { TurnMentionChipRef.file($0.path, label: $0.fileName) == ref })?.id
+    }
+}
+
+extension Array where Element == TurnComposerMentionedSkill {
+    var mentionChipRefs: [TurnMentionChipRef] {
+        map { TurnMentionChipRef.skill($0.name) }
+    }
+
+    func mentionID(matching ref: TurnMentionChipRef) -> String? {
+        first(where: { TurnMentionChipRef.skill($0.name) == ref })?.id
+    }
+}
+
+extension Array where Element == TurnComposerMentionedPlugin {
+    var mentionChipRefs: [TurnMentionChipRef] {
+        map { TurnMentionChipRef.plugin($0.name, label: $0.displayName) }
+    }
+
+    func mentionID(matching ref: TurnMentionChipRef) -> String? {
+        first(where: { TurnMentionChipRef.plugin($0.name, label: $0.displayName) == ref })?.id
+    }
+}
+
 // MARK: - Chip
 
 struct TurnMentionChip: View {
@@ -234,16 +293,14 @@ struct TurnMentionChip: View {
         }
         .padding(.horizontal, TurnMentionChipTokens.horizontalPadding)
         .padding(.vertical, TurnMentionChipTokens.verticalPadding)
-        .background(style.tintColor.opacity(0.08), in: RoundedRectangle(cornerRadius: TurnMentionChipTokens.cornerRadius))
+        .background(
+            style.tintColor.opacity(TurnMentionChipTokens.fillOpacity),
+            in: RoundedRectangle(cornerRadius: TurnMentionChipTokens.cornerRadius)
+        )
     }
 
     private var displayLabel: String {
-        switch ref.kind {
-        case .skill, .plugin:
-            return SkillDisplayNameFormatter.displayName(for: ref.label)
-        default:
-            return ref.label
-        }
+        ref.displayLabel
     }
 
     private func removeButton(tintColor: Color, action: @escaping () -> Void) -> some View {
@@ -252,30 +309,13 @@ struct TurnMentionChip: View {
                 .font(TurnMentionChipTokens.removeFont)
                 .foregroundStyle(tintColor)
                 .frame(width: TurnMentionChipTokens.removeButtonSize, height: TurnMentionChipTokens.removeButtonSize)
-                .background(tintColor.opacity(0.14), in: Circle())
+                .background(
+                    tintColor.opacity(TurnMentionChipTokens.removeFillOpacity),
+                    in: Circle()
+                )
         }
         .buttonStyle(.plain)
         .accessibilityLabel(removeAccessibilityLabelOverride ?? ref.removeAccessibilityLabel)
-    }
-}
-
-struct SlashCommandChip: View {
-    let command: TurnComposerSlashCommand
-    var onRemove: (() -> Void)? = nil
-
-    var body: some View {
-        TurnMentionChip(ref: .slashCommand(command), onRemove: onRemove)
-    }
-}
-
-// MARK: - Timeline strip
-
-/// Read-only mention chips shown above a sent user bubble, matching attachment strip placement.
-struct UserMentionChipStrip: View {
-    let chips: [TurnMentionChipRef]
-
-    var body: some View {
-        TurnMentionChipRow(chips: chips, layout: .scrollTrailing)
     }
 }
 
@@ -283,10 +323,10 @@ struct UserMentionChipStrip: View {
 
 struct TurnMentionChipRow: View {
     enum Layout {
+        /// Wrapping trailing row for the user-bubble column.
+        case compact
+        /// Horizontally scrolling row for the composer accessory area.
         case scrollLeading
-        case scrollTrailing
-        case inlineLeading
-        case inlineTrailing
     }
 
     let chips: [TurnMentionChipRef]
@@ -301,32 +341,220 @@ struct TurnMentionChipRow: View {
             .padding(.top, topPadding)
     }
 
+    static func composer(
+        chips: [TurnMentionChipRef],
+        topPadding: CGFloat,
+        onRemove: @escaping (TurnMentionChipRef) -> Void
+    ) -> TurnMentionChipRow {
+        TurnMentionChipRow(
+            chips: chips,
+            layout: .scrollLeading,
+            horizontalPadding: TurnMentionChipTokens.composerHorizontalPadding,
+            topPadding: topPadding,
+            onRemove: onRemove
+        )
+    }
+
+    static func bubble(chips: [TurnMentionChipRef]) -> TurnMentionChipRow {
+        TurnMentionChipRow(chips: chips, layout: .compact)
+    }
+
     @ViewBuilder
     private var chipStack: some View {
         switch layout {
-        case .scrollLeading, .scrollTrailing:
+        case .compact:
+            TurnMentionChipFlowLayout(
+                horizontalSpacing: TurnMentionChipTokens.rowSpacing,
+                verticalSpacing: TurnMentionChipTokens.bubbleRowSpacing
+            ) {
+                chipViews
+            }
+
+        case .scrollLeading:
             ScrollView(.horizontal, showsIndicators: false) {
                 chipHStack
             }
-            .defaultScrollAnchor(layout == .scrollLeading ? .leading : .trailing, for: .initialOffset)
-            .frame(maxWidth: .infinity, alignment: layout == .scrollLeading ? .leading : .trailing)
-
-        case .inlineLeading, .inlineTrailing:
-            chipHStack
+            .defaultScrollAnchor(.leading, for: .initialOffset)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     private var chipHStack: some View {
         HStack(spacing: TurnMentionChipTokens.rowSpacing) {
-            ForEach(chips) { chip in
-                TurnMentionChip(
-                    ref: chip,
-                    onRemove: onRemove.map { callback in
-                        { callback(chip) }
-                    }
-                )
+            chipViews
+        }
+    }
+
+    private var chipViews: some View {
+        ForEach(chips) { chip in
+            TurnMentionChip(
+                ref: chip,
+                onRemove: onRemove.map { callback in
+                    { callback(chip) }
+                }
+            )
+        }
+    }
+}
+
+private struct TurnMentionChipFlowLayout: Layout {
+    struct Row {
+        var items: [(index: Int, size: CGSize)] = []
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+    }
+
+    let horizontalSpacing: CGFloat
+    let verticalSpacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let rows = rows(for: subviews, maxWidth: proposal.width ?? .infinity)
+        let contentWidth = rows.map(\.width).max() ?? 0
+        let width = proposal.width ?? contentWidth
+        let height = rows.enumerated().reduce(CGFloat(0)) { total, pair in
+            total + pair.element.height + (pair.offset > 0 ? verticalSpacing : 0)
+        }
+        return CGSize(width: width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let rows = rows(for: subviews, maxWidth: bounds.width)
+        var y = bounds.minY
+
+        for row in rows {
+            var x = bounds.maxX - row.width
+            for item in row.items {
+                let origin = CGPoint(x: x, y: y + (row.height - item.size.height) / 2)
+                subviews[item.index].place(at: origin, proposal: ProposedViewSize(item.size))
+                x += item.size.width + horizontalSpacing
+            }
+            y += row.height + verticalSpacing
+        }
+    }
+
+    // Packs chip-sized subviews into right-aligned rows instead of shrinking labels.
+    private func rows(for subviews: Subviews, maxWidth: CGFloat) -> [Row] {
+        var rows: [Row] = []
+        var current = Row()
+
+        for (index, subview) in subviews.enumerated() {
+            let size = subview.sizeThatFits(.unspecified)
+            let proposedWidth = current.items.isEmpty ? size.width : current.width + horizontalSpacing + size.width
+
+            if !current.items.isEmpty, proposedWidth > maxWidth {
+                rows.append(current)
+                current = Row()
+            }
+
+            current.items.append((index, size))
+            current.width = current.width == 0 ? size.width : current.width + horizontalSpacing + size.width
+            current.height = max(current.height, size.height)
+        }
+
+        if !current.items.isEmpty {
+            rows.append(current)
+        }
+
+        return rows
+    }
+}
+
+// MARK: - Timeline strip
+
+/// Read-only mention chips shown above a sent user bubble.
+struct UserMentionChipStrip: View {
+    let chips: [TurnMentionChipRef]
+
+    var body: some View {
+        TurnMentionChipRow.bubble(chips: chips)
+    }
+}
+
+// MARK: - Composer sections
+
+struct TurnComposerMentionChipSections: View {
+    let state: TurnComposerAccessoryState
+    let onRemoveMentionedFile: (String) -> Void
+    let onRemoveMentionedSkill: (String) -> Void
+    let onRemoveMentionedPlugin: (String) -> Void
+    let onRemoveComposerReviewSelection: () -> Void
+    let onRemoveComposerSubagentsSelection: () -> Void
+
+    var body: some View {
+        Group {
+            if state.showsMentionedFiles {
+                TurnMentionChipRow.composer(
+                    chips: state.composerMentionedFiles.mentionChipRefs,
+                    topPadding: TurnMentionChipTokens.composerFilesTopPadding
+                ) { ref in
+                    guard let fileID = state.composerMentionedFiles.mentionID(matching: ref) else { return }
+                    onRemoveMentionedFile(fileID)
+                }
+            }
+
+            if state.showsMentionedSkills {
+                TurnMentionChipRow.composer(
+                    chips: state.composerMentionedSkills.mentionChipRefs,
+                    topPadding: TurnMentionChipTokens.composerAccessoryTopPadding
+                ) { ref in
+                    guard let skillID = state.composerMentionedSkills.mentionID(matching: ref) else { return }
+                    onRemoveMentionedSkill(skillID)
+                }
+            }
+
+            if state.showsMentionedPlugins {
+                TurnMentionChipRow.composer(
+                    chips: state.composerMentionedPlugins.mentionChipRefs,
+                    topPadding: TurnMentionChipTokens.composerAccessoryTopPadding
+                ) { ref in
+                    guard let pluginID = state.composerMentionedPlugins.mentionID(matching: ref) else { return }
+                    onRemoveMentionedPlugin(pluginID)
+                }
+            }
+
+            if state.showsSubagentsSelection {
+                TurnMentionChipRow.composer(
+                    chips: [.subagents],
+                    topPadding: TurnMentionChipTokens.composerAccessoryTopPadding
+                ) { _ in
+                    onRemoveComposerSubagentsSelection()
+                }
+            }
+
+            if let reviewTarget = state.reviewTarget {
+                TurnMentionChipRow.composer(
+                    chips: [.review(reviewTarget)],
+                    topPadding: TurnMentionChipTokens.composerAccessoryTopPadding
+                ) { _ in
+                    onRemoveComposerReviewSelection()
+                }
             }
         }
+    }
+}
+
+// MARK: - Display names
+
+enum SkillDisplayNameFormatter {
+    // Converts slug names like "skill-builder" to "Skill Builder".
+    static func displayName(for rawName: String) -> String {
+        let normalized = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            return rawName
+        }
+
+        let parts = normalized
+            .split(omittingEmptySubsequences: true, whereSeparator: { $0 == "-" || $0 == "_" })
+            .map { part in
+                let token = String(part)
+                return token.prefix(1).uppercased() + token.dropFirst().lowercased()
+            }
+
+        guard !parts.isEmpty else {
+            return normalized
+        }
+
+        return parts.joined(separator: " ")
     }
 }
 
@@ -363,7 +591,7 @@ struct TurnMentionChipCatalog: View {
                 catalogSection("Slash Commands") {
                     chipWrap {
                         ForEach(TurnComposerSlashCommand.allCommands) { command in
-                            SlashCommandChip(command: command)
+                            TurnMentionChip(ref: .slashCommand(command))
                         }
                     }
                 }
@@ -381,29 +609,27 @@ struct TurnMentionChipCatalog: View {
                         TurnMentionChip(ref: .file("TurnView.swift")) {}
                         TurnMentionChip(ref: .skill("refactor-code")) {}
                         TurnMentionChip(ref: .plugin("linear")) {}
-                        SlashCommandChip(command: .codeReview) {}
+                        TurnMentionChip(ref: .slashCommand(.codeReview)) {}
                         TurnMentionChip(ref: .review(.uncommittedChanges)) {}
                         TurnMentionChip(ref: .subagents) {}
                     }
                 }
 
                 catalogSection("Composer Row") {
-                    TurnMentionChipRow(
+                    TurnMentionChipRow.composer(
                         chips: [
                             .file("UserMessageBubble.swift"),
                             .skill("ui-component-extractor"),
                             .plugin("linear"),
                             .subagents,
                         ],
-                        layout: .scrollLeading,
-                        horizontalPadding: 16,
-                        topPadding: 10,
+                        topPadding: TurnMentionChipTokens.composerFilesTopPadding,
                         onRemove: { _ in }
                     )
                 }
 
                 catalogSection("Bubble Row") {
-                    VStack(alignment: .trailing, spacing: 4) {
+                    UserBubbleTrailingColumn {
                         UserMentionChipStrip(
                             chips: [
                                 .file("TurnMentionChips.swift"),
@@ -418,11 +644,13 @@ struct TurnMentionChipCatalog: View {
                             .padding(.horizontal, 16)
                             .background(Color.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                     }
-                    .padding(.horizontal, 16)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, TurnMentionChipTokens.composerHorizontalPadding)
             .padding(.vertical, 20)
         }
+        .background(Color(.systemGroupedBackground))
     }
 
     @ViewBuilder
@@ -434,10 +662,10 @@ struct TurnMentionChipCatalog: View {
             Text(title)
                 .font(AppFont.subheadline(weight: .semibold))
                 .foregroundStyle(.secondary)
-                .padding(.horizontal, 16)
 
             content()
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func chipWrap<Content: View>(@ViewBuilder content: () -> Content) -> some View {
@@ -445,8 +673,8 @@ struct TurnMentionChipCatalog: View {
             HStack(spacing: TurnMentionChipTokens.rowSpacing) {
                 content()
             }
-            .padding(.horizontal, 16)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

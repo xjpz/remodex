@@ -1,5 +1,5 @@
 // FILE: workspace-handler.js
-// Purpose: Executes workspace-scoped reverse patch previews/applies without touching unrelated repo changes.
+// Purpose: Executes workspace-scoped previews, reads, and patch operations without touching unrelated repo changes.
 // Layer: Bridge handler
 // Exports: handleWorkspaceRequest
 // Depends on: child_process, fs, os, path, ./codex-home, ./git-handler
@@ -8,7 +8,7 @@ const { execFile } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { promisify } = require("util");
+const { promisify, TextDecoder } = require("util");
 const { resolveCodexGeneratedImagesRoot } = require("./codex-home");
 const { gitStatus } = require("./git-handler");
 const {
@@ -23,6 +23,8 @@ const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 30_000;
 const MAX_IMAGE_READ_BYTES = 8 * 1024 * 1024;
 const MAX_IMAGE_PREVIEW_READ_BYTES = 2 * 1024 * 1024;
+const MAX_TEXT_FILE_READ_BYTES = 2 * 1024 * 1024;
+const BINARY_SNIFF_BYTES = 8 * 1024;
 const MIN_IMAGE_PREVIEW_PIXEL_DIMENSION = 128;
 const MAX_IMAGE_PREVIEW_PIXEL_DIMENSION = 3_200;
 const IMAGE_PREVIEW_RETRY_SCALE = 0.75;
@@ -83,6 +85,9 @@ async function handleWorkspaceMethod(method, params) {
   if (method === "workspace/readImage") {
     return workspaceReadImage(params);
   }
+  if (method === "workspace/readFile") {
+    return workspaceReadFile(params);
+  }
 
   const cwd = await resolveWorkspaceCwd(params);
   const repoRoot = await resolveRepoRoot(cwd);
@@ -111,6 +116,65 @@ async function handleWorkspaceMethod(method, params) {
   }
 }
 
+// Reads a UTF-8 text file from the active workspace for the phone-side read-only viewer.
+async function workspaceReadFile(params) {
+  const requestedPath = firstNonEmptyString([params.path, params.filePath, params.localPath]);
+  if (!requestedPath) {
+    throw workspaceError("missing_file_path", "The request must include a file path.");
+  }
+
+  const cwd = await resolveWorkspaceCwd(params);
+  const filePath = path.isAbsolute(requestedPath)
+    ? path.resolve(requestedPath)
+    : path.resolve(cwd, requestedPath);
+  const [realFilePath, realWorkspaceRoot] = await Promise.all([
+    realpathOrNull(filePath),
+    resolveReadableWorkspaceRoot(cwd),
+  ]);
+  if (!realFilePath) {
+    throw workspaceError("file_not_found", "The file no longer exists on this Mac.");
+  }
+  if (!realWorkspaceRoot || !isPathInside(realFilePath, realWorkspaceRoot)) {
+    throw workspaceError("file_path_not_allowed", "Only files in the current workspace can be viewed.");
+  }
+
+  const stat = await fs.promises.stat(realFilePath);
+  if (!stat.isFile()) {
+    throw workspaceError("file_not_found", "The path is not a file.");
+  }
+  if (stat.size > MAX_TEXT_FILE_READ_BYTES) {
+    throw workspaceError(
+      "file_too_large",
+      "This file is too large to send to the phone. Open it on the Mac or ask for a smaller section."
+    );
+  }
+
+  const result = {
+    path: realFilePath,
+    fileName: path.basename(realFilePath),
+    byteLength: stat.size,
+    mtimeMs: stat.mtimeMs,
+    encoding: "utf-8",
+  };
+  if (params.includeContent === false || params.metadataOnly === true) {
+    return result;
+  }
+  if (isUnchangedTextFileRead(params, stat)) {
+    return {
+      ...result,
+      notModified: true,
+    };
+  }
+
+  const data = await fs.promises.readFile(realFilePath);
+  const content = decodeUtf8TextFile(data);
+  return {
+    ...result,
+    content,
+    lineCount: countLines(content),
+  };
+}
+
 // Reads recognized local image files from the bound repo, Codex image cache, or host temp screenshot folders.
 async function workspaceReadImage(params) {
   const requestedPath = firstNonEmptyString([params.path, params.filePath, params.localPath]);
@@ -125,10 +189,7 @@ async function workspaceReadImage(params) {
     ? path.resolve(requestedPath)
     : path.resolve(cwd || process.cwd(), requestedPath);
   const extension = path.extname(imagePath).toLowerCase();
-  const mimeType = IMAGE_MIME_TYPES_BY_EXTENSION.get(extension);
-  if (!mimeType) {
-    throw workspaceError("unsupported_image_type", "Only local image files can be previewed.");
-  }
+  let mimeType = IMAGE_MIME_TYPES_BY_EXTENSION.get(extension);
 
   const [realImagePath, realGeneratedImagesRoot] = await Promise.all([
     realpathOrNull(imagePath),
@@ -153,6 +214,12 @@ async function workspaceReadImage(params) {
   const stat = await fs.promises.stat(realImagePath);
   if (!stat.isFile()) {
     throw workspaceError("image_not_found", "The image path is not a file.");
+  }
+  if (!mimeType) {
+    mimeType = await sniffImageMimeType(realImagePath);
+  }
+  if (!mimeType) {
+    throw workspaceError("unsupported_image_type", "Only local image files can be previewed.");
   }
   const includeData = params.includeData !== false && params.metadataOnly !== true;
   const maxPixelDimension = normalizedPreviewPixelDimension(params);
@@ -202,6 +269,37 @@ function normalizedPreviewPixelDimension(params) {
   );
 }
 
+async function sniffImageMimeType(filePath) {
+  let header;
+  try {
+    const handle = await fs.promises.open(filePath, "r");
+    try {
+      header = Buffer.alloc(16);
+      const read = await handle.read(header, 0, header.length, 0);
+      header = header.subarray(0, read.bytesRead);
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return null;
+  }
+
+  if (header.length >= 8 && header.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return "image/png";
+  }
+  if (header.length >= 3 && header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (header.length >= 6 && (header.subarray(0, 6).toString("ascii") === "GIF87a" || header.subarray(0, 6).toString("ascii") === "GIF89a")) {
+    return "image/gif";
+  }
+  if (header.length >= 12 && header.subarray(0, 4).toString("ascii") === "RIFF" && header.subarray(8, 12).toString("ascii") === "WEBP") {
+    return "image/webp";
+  }
+
+  return null;
+}
+
 async function realTemporaryImageRoots() {
   const candidates = [
     os.tmpdir(),
@@ -210,6 +308,7 @@ async function realTemporaryImageRoots() {
 
   if (process.platform === "darwin") {
     candidates.push("/tmp");
+    candidates.push(path.join(os.homedir(), "Library", "Caches", "com.raycast-x.macos", "clipboard"));
   }
 
   const roots = await Promise.all(
@@ -218,8 +317,8 @@ async function realTemporaryImageRoots() {
   return Array.from(new Set(roots.filter(Boolean)));
 }
 
-// Image previews are read-only, so non-git Codex scratch workspaces can be scoped to their cwd.
-async function resolveImageWorkspaceRoot(cwd) {
+// Read-only previews can scope non-git Codex scratch folders to cwd while rejecting broad roots.
+async function resolveReadableWorkspaceRoot(cwd) {
   const realRepoRoot = await resolveRepoRoot(cwd).then(realpathOrNull).catch(() => null);
   if (realRepoRoot) {
     return realRepoRoot;
@@ -232,10 +331,35 @@ async function resolveImageWorkspaceRoot(cwd) {
   return realCwd;
 }
 
+async function resolveImageWorkspaceRoot(cwd) {
+  return resolveReadableWorkspaceRoot(cwd);
+}
+
 function isBroadWorkspaceRoot(candidatePath) {
   const normalized = path.resolve(candidatePath);
   return normalized === path.parse(normalized).root
     || normalized === path.resolve(os.homedir());
+}
+
+function decodeUtf8TextFile(data) {
+  const sample = data.subarray(0, Math.min(data.length, BINARY_SNIFF_BYTES));
+  if (sample.includes(0)) {
+    throw workspaceError("binary_file", "This file looks binary, so it cannot be shown as text.");
+  }
+
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(data);
+  } catch {
+    throw workspaceError("unsupported_text_encoding", "Only UTF-8 text files can be viewed.");
+  }
+}
+
+function countLines(content) {
+  if (!content) {
+    return 0;
+  }
+  const newlineCount = (content.match(/\n/g) || []).length;
+  return content.endsWith("\n") ? newlineCount : newlineCount + 1;
 }
 
 async function readPreviewImageData(imagePath, maxPixelDimension, originalByteLength) {
@@ -453,6 +577,15 @@ function isUnchangedImageRead(params, stat, maxPixelDimension) {
   return Number.isFinite(cachedByteLength)
     && Number.isFinite(cachedMtimeMs)
     && previewDimensionMatches
+    && cachedByteLength === stat.size
+    && cachedMtimeMs === stat.mtimeMs;
+}
+
+function isUnchangedTextFileRead(params, stat) {
+  const cachedByteLength = Number(params.ifByteLength);
+  const cachedMtimeMs = Number(params.ifMtimeMs);
+  return Number.isFinite(cachedByteLength)
+    && Number.isFinite(cachedMtimeMs)
     && cachedByteLength === stat.size
     && cachedMtimeMs === stat.mtimeMs;
 }

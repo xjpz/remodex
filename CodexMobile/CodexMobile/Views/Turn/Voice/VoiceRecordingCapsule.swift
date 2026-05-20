@@ -168,15 +168,14 @@ private struct VoiceRecordingCapsulePreview: View {
             Spacer()
 
             VStack(spacing: 0) {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        FileMentionChip(fileName: "TurnView.swift")
-                        SkillMentionChip(skillName: "refactor-code")
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 16)
-                .padding(.top, 14)
+                TurnMentionChipRow.composer(
+                    chips: [
+                        .file("TurnView.swift"),
+                        .skill("refactor-code"),
+                    ],
+                    topPadding: 14,
+                    onRemove: { _ in }
+                )
 
                 Text("Ask anything... @plugins, $skills, /commands")
                     .font(AppFont.body())

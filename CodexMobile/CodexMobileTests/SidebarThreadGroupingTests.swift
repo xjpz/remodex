@@ -25,7 +25,7 @@ final class SidebarThreadGroupingTests: XCTestCase {
         XCTAssertEqual(groups.last?.threads.map(\.id), ["thread-c"])
     }
 
-    func testMakeGroupsCreatesNoProjectBucketForThreadsWithoutCwd() {
+    func testMakeGroupsCreatesChatBucketForThreadsWithoutCwd() {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let threads = [
             makeThread(id: "thread-a", updatedAt: now, cwd: nil),
@@ -35,13 +35,14 @@ final class SidebarThreadGroupingTests: XCTestCase {
         let groups = SidebarThreadGrouping.makeGroups(from: threads, now: now)
 
         XCTAssertEqual(groups.count, 1)
-        XCTAssertEqual(groups[0].id, "project:__no_project__")
-        XCTAssertEqual(groups[0].label, "No Project")
+        XCTAssertEqual(groups[0].id, "chats:rootless")
+        XCTAssertEqual(groups[0].kind, .chat)
+        XCTAssertEqual(groups[0].label, "Chats")
         XCTAssertNil(groups[0].projectPath)
         XCTAssertEqual(groups[0].threads.map(\.id), ["thread-a", "thread-b"])
     }
 
-    func testMakeGroupsTreatsPseudoProjectBucketsAsNoProject() {
+    func testMakeGroupsTreatsPseudoProjectBucketsAsChats() {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let threads = [
             makeThread(id: "thread-a", updatedAt: now, cwd: "server"),
@@ -51,8 +52,9 @@ final class SidebarThreadGroupingTests: XCTestCase {
         let groups = SidebarThreadGrouping.makeGroups(from: threads, now: now)
 
         XCTAssertEqual(groups.count, 1)
-        XCTAssertEqual(groups[0].id, "project:__no_project__")
-        XCTAssertEqual(groups[0].label, "No Project")
+        XCTAssertEqual(groups[0].id, "chats:rootless")
+        XCTAssertEqual(groups[0].kind, .chat)
+        XCTAssertEqual(groups[0].label, "Chats")
         XCTAssertNil(groups[0].projectPath)
         XCTAssertEqual(groups[0].threads.map(\.id), ["thread-a", "thread-b"])
     }
@@ -368,25 +370,20 @@ final class SidebarThreadGroupingTests: XCTestCase {
         XCTAssertEqual(threadIDs, ["app-thread-1", "app-thread-2"])
     }
 
-    func testLiveThreadIDsForProjectGroupKeepsNoProjectChatsTogether() {
+    func testMakeGroupsWithAllScopeKeepsRootlessThreadsInChats() {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
-        let allThreads = [
-            makeThread(id: "no-project-1", updatedAt: now, cwd: nil),
-            makeThread(id: "no-project-2", updatedAt: now.addingTimeInterval(-30), cwd: " "),
+        let threads = [
             makeThread(id: "project-thread", updatedAt: now.addingTimeInterval(-60), cwd: "/Users/me/work/app"),
+            makeThread(id: "rootless-1", updatedAt: now, cwd: nil),
+            makeThread(id: "rootless-2", updatedAt: now.addingTimeInterval(-30), cwd: " "),
         ]
-        let noProjectGroup = SidebarThreadGroup(
-            id: "project:__no_project__",
-            label: "No Project",
-            kind: .project,
-            sortDate: now,
-            projectPath: nil,
-            threads: [allThreads[0]]
-        )
 
-        let threadIDs = SidebarThreadGrouping.liveThreadIDsForProjectGroup(noProjectGroup, in: allThreads)
+        let groups = SidebarThreadGrouping.makeGroups(from: threads, scope: .all, now: now)
 
-        XCTAssertEqual(threadIDs, ["no-project-1", "no-project-2"])
+        XCTAssertEqual(groups.map(\.id), ["project:/Users/me/work/app", "chats:rootless"])
+        XCTAssertEqual(groups[0].threads.map(\.id), ["project-thread"])
+        XCTAssertEqual(groups[1].kind, .chat)
+        XCTAssertEqual(groups[1].threads.map(\.id), ["rootless-1", "rootless-2"])
     }
 
     func testProjectExpansionStateInitiallyExpandsAllVisibleGroups() {

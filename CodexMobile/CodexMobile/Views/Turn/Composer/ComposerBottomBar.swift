@@ -12,6 +12,7 @@ struct ComposerBottomBar: View {
     @State private var showsAllModelsSheet = false
 
     // Data
+    let hasWorkingDirectory: Bool
     let orderedModelOptions: [CodexModelOption]
     let selectedModelID: String?
     let selectedModelTitle: String
@@ -30,6 +31,14 @@ struct ComposerBottomBar: View {
     let isThreadRunning: Bool
     let showsSendButton: Bool
     let voiceButtonPresentation: TurnComposerVoiceButtonPresentation
+    let selectedAccessMode: CodexAccessMode
+    let contextWindowUsage: ContextWindowUsage?
+    let rateLimitBuckets: [CodexRateLimitBucket]
+    let isLoadingRateLimits: Bool
+    let rateLimitsErrorMessage: String?
+    let shouldAutoRefreshUsageStatus: Bool
+    let onRefreshUsageStatus: () async -> Void
+    let onSelectAccessMode: (CodexAccessMode) -> Void
     let onTapAddImage: () -> Void
     let onTapTakePhoto: () -> Void
     let onTapVoice: () -> Void
@@ -45,6 +54,8 @@ struct ComposerBottomBar: View {
     private var metaSymbolFont: Font { AppFont.system(size: 11, weight: .regular) }
     private let metaVerticalPadding: CGFloat = 6
     private let composerIconSide: CGFloat = 22
+    private let rootlessAccessControlSize: CGFloat = 32
+    private let rootlessAccessControlIconSize: CGFloat = 20
 
     private var selectedUserBubbleColor: UserBubbleColor {
         UserBubbleColor(rawValue: userBubbleColorRawValue) ?? .default
@@ -73,23 +84,22 @@ struct ComposerBottomBar: View {
         HStack(spacing: 12) {
             attachmentMenu
                 .padding(.leading, 8)
-            ComposerRuntimeMenuControl(
-                orderedModelOptions: orderedModelOptions,
-                selectedModelID: selectedModelID,
-                selectedModelTitle: selectedModelTitle,
-                isLoadingModels: isLoadingModels,
-                isRuntimeSelectionLoading: isRuntimeSelectionLoading,
-                runtimeState: runtimeState,
-                runtimeActions: runtimeActions,
-                showsAllModelsSheet: $showsAllModelsSheet
-            )
-            .equatable()
+            if !hasWorkingDirectory {
+                rootlessAccessMenuLabel
+            } else {
+                runtimeMenuControl
+            }
             if isPlanModeArmed {
                 Divider()
                     .frame(height: 16)
                 planModeIndicator
             }
             Spacer(minLength: 0)
+
+            if !hasWorkingDirectory {
+                rootlessStatusControl
+                runtimeMenuControl
+            }
 
             if isQueuePaused && queuedCount > 0 {
                 Button {
@@ -208,6 +218,63 @@ struct ComposerBottomBar: View {
     }
 
     // MARK: - Menus
+
+    // Rootless Quick Chat has no runtime/project capsule above the input, so
+    // access and usage controls live inline with the bottom composer controls.
+    private var rootlessAccessMenuLabel: some View {
+        Menu {
+            ForEach(CodexAccessMode.allCases, id: \.rawValue) { mode in
+                Button {
+                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                    onSelectAccessMode(mode)
+                } label: {
+                    if selectedAccessMode == mode {
+                        Label(mode.menuTitle, systemImage: "checkmark")
+                    } else {
+                        Text(mode.menuTitle)
+                    }
+                }
+            }
+        } label: {
+            RemodexIcon.image(
+                systemName: selectedAccessMode == .fullAccess ? "hand.thumbsup" : "hand.raised",
+                size: rootlessAccessControlIconSize
+            )
+            .frame(width: rootlessAccessControlSize, height: rootlessAccessControlSize)
+            .foregroundStyle(selectedAccessMode == .fullAccess ? .orange : metaLabelColor)
+            .contentShape(Circle())
+        }
+        .menuIndicator(.hidden)
+        .tint(metaLabelColor)
+        .disabled(isComposerInteractionLocked)
+    }
+
+    private var runtimeMenuControl: some View {
+        ComposerRuntimeMenuControl(
+            orderedModelOptions: orderedModelOptions,
+            selectedModelID: selectedModelID,
+            selectedModelTitle: selectedModelTitle,
+            isLoadingModels: isLoadingModels,
+            isRuntimeSelectionLoading: isRuntimeSelectionLoading,
+            runtimeState: runtimeState,
+            runtimeActions: runtimeActions,
+            showsAllModelsSheet: $showsAllModelsSheet
+        )
+        .equatable()
+    }
+
+    private var rootlessStatusControl: some View {
+        ContextWindowProgressRing(
+            usage: contextWindowUsage,
+            rateLimitBuckets: rateLimitBuckets,
+            isLoadingRateLimits: isLoadingRateLimits,
+            rateLimitsErrorMessage: rateLimitsErrorMessage,
+            shouldAutoRefreshStatus: shouldAutoRefreshUsageStatus,
+            showsGlassBackground: false,
+            progressColorOverride: .primary,
+            onRefreshStatus: onRefreshUsageStatus
+        )
+    }
 
     private var attachmentMenu: some View {
         Menu {

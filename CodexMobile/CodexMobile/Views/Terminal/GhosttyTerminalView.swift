@@ -315,6 +315,7 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
     private var surface: ghostty_surface_t?
     private var isCreatingSurface = false
     private var surfaceCreationFailed = false
+    private var isRendererSuspended = false
     private var appearance = TerminalAppearanceScheme.dark
     private var backgroundColorValue = UIColor(hexString: "#0a0a0a")
 
@@ -376,6 +377,7 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
     }
 
     deinit {
+        NotificationCenter.default.removeObserver(self)
         destroySurface()
     }
 
@@ -399,8 +401,18 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        guard window != nil else { return }
+        updateSurfaceRuntimeVisibility()
+        guard window != nil else {
+            inputField.resignFirstResponder()
+            return
+        }
+        if surface != nil {
+            resizeSurface()
+        } else {
+            setNeedsLayout()
+        }
         DispatchQueue.main.async { [weak self] in
+            guard self?.canRenderSurface == true else { return }
             self?.requestKeyboardFocus()
         }
     }
@@ -502,6 +514,82 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
             inputField.widthAnchor.constraint(equalToConstant: 1),
             inputField.heightAnchor.constraint(equalToConstant: 1),
         ])
+
+        registerApplicationLifecycleNotifications()
+    }
+
+    private func registerApplicationLifecycleNotifications() {
+        isRendererSuspended = UIApplication.shared.applicationState != .active
+        let center = NotificationCenter.default
+        center.addObserver(
+            self,
+            selector: #selector(handleApplicationWillResignActive),
+            name: UIApplication.willResignActiveNotification,
+            object: nil
+        )
+        center.addObserver(
+            self,
+            selector: #selector(handleApplicationDidEnterBackground),
+            name: UIApplication.didEnterBackgroundNotification,
+            object: nil
+        )
+        center.addObserver(
+            self,
+            selector: #selector(handleApplicationDidBecomeActive),
+            name: UIApplication.didBecomeActiveNotification,
+            object: nil
+        )
+    }
+
+    // MARK: - App Visibility
+
+    @objc private func handleApplicationWillResignActive() {
+        suspendRendererForAppBackground()
+    }
+
+    @objc private func handleApplicationDidEnterBackground() {
+        suspendRendererForAppBackground()
+    }
+
+    @objc private func handleApplicationDidBecomeActive() {
+        resumeRendererForActiveApp()
+    }
+
+    private var canRenderSurface: Bool {
+        window != nil && !isRendererSuspended
+    }
+
+    // Keeps Ghostty away from IOSurface drawing/input focus while UIKit is
+    // backgrounding the scene; SSH output can still accumulate in the buffer.
+    private func suspendRendererForAppBackground() {
+        guard !isRendererSuspended else { return }
+        isRendererSuspended = true
+        inputField.resignFirstResponder()
+        updateSurfaceRuntimeVisibility()
+    }
+
+    private func resumeRendererForActiveApp() {
+        guard isRendererSuspended else { return }
+        isRendererSuspended = false
+        updateSurfaceRuntimeVisibility()
+        guard window != nil else { return }
+        if surface == nil {
+            createSurfaceIfPossible()
+        }
+        resizeSurface()
+        applyRemoteBuffer(initialBuffer)
+        requestKeyboardFocus()
+    }
+
+    private func updateSurfaceRuntimeVisibility() {
+        let isVisible = canRenderSurface
+        if let app {
+            ghostty_app_set_focus(app, isVisible)
+        }
+        if let surface {
+            ghostty_surface_set_focus(surface, isVisible)
+            ghostty_surface_set_occlusion(surface, isVisible)
+        }
     }
 
     // MARK: - Input
@@ -1199,6 +1287,7 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
     private func createSurfaceIfPossible() {
         guard surface == nil, app == nil, !isCreatingSurface, !surfaceCreationFailed else { return }
         guard terminalViewport.bounds.width > 0, terminalViewport.bounds.height > 0 else { return }
+        guard canRenderSurface else { return }
         guard GhosttyRuntime.ensureInitialized() else {
             markSurfaceCreationFailed()
             return
@@ -1260,6 +1349,7 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
         ghostty_app_set_color_scheme(createdApp, appearance.ghosttyColorScheme)
         ghostty_surface_set_color_scheme(createdSurface, appearance.ghosttyColorScheme)
         setupWriteCallback()
+        updateSurfaceRuntimeVisibility()
         resizeSurface()
         feedBuffer(initialBuffer)
     }
@@ -1298,6 +1388,7 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
     }
 
     private func applyRemoteBuffer(_ buffer: Data) {
+        guard canRenderSurface else { return }
         guard surface != nil else {
             createSurfaceIfPossible()
             return
@@ -1314,12 +1405,13 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
     }
 
     private func feedBuffer(_ buffer: Data) {
-        guard !buffer.isEmpty else { return }
+        guard canRenderSurface, !buffer.isEmpty else { return }
         feedData(buffer)
         lastAppliedBuffer = buffer
     }
 
     private func replaceRenderedBuffer(with buffer: Data) {
+        guard canRenderSurface else { return }
         guard surface != nil else {
             lastAppliedBuffer = Data()
             createSurfaceIfPossible()
@@ -1333,7 +1425,7 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
     }
 
     private func feedData(_ data: Data) {
-        guard let surface, !data.isEmpty else { return }
+        guard canRenderSurface, let surface, !data.isEmpty else { return }
 
         data.withUnsafeBytes { buffer in
             guard let pointer = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
@@ -1373,7 +1465,8 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
         terminalViewport.contentScaleFactor = scale
         ghostty_surface_set_content_scale(surface, Double(scale), Double(scale))
         ghostty_surface_set_size(surface, width, height)
-        ghostty_surface_set_occlusion(surface, window != nil)
+        updateSurfaceRuntimeVisibility()
+        guard canRenderSurface else { return }
         configureIOSurfaceLayers()
         redrawSurface()
         emitGhosttyResize()
@@ -1382,6 +1475,7 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
 
     private func redrawSurface() {
         guard let surface else { return }
+        guard canRenderSurface else { return }
         ghostty_surface_refresh(surface)
         ghostty_surface_draw(surface)
         markIOSurfaceLayersForDisplay()

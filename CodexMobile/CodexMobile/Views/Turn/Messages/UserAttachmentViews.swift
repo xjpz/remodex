@@ -88,7 +88,6 @@ struct UserAttachmentStrip: View {
                 .buttonStyle(.plain)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .trailing)
     }
 }
 

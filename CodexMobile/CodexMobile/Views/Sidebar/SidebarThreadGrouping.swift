@@ -96,7 +96,12 @@ enum SidebarThreadGrouping {
 
         switch scope {
         case .all:
-            groups.append(contentsOf: makeProjectGroups(from: scopedThreads, excludingPinnedThreadIDs: pinnedThreadIDSet))
+            let projectThreads = threadsForScope(.projects, from: scopedThreads, projectlessRootPaths: projectlessRootPaths)
+            let chatThreads = threadsForScope(.chats, from: scopedThreads, projectlessRootPaths: projectlessRootPaths)
+            groups.append(contentsOf: makeProjectGroups(from: projectThreads, excludingPinnedThreadIDs: pinnedThreadIDSet))
+            if let chatGroup = makeRootlessChatGroup(from: chatThreads, excludingPinnedThreadIDs: pinnedThreadIDSet) {
+                groups.append(chatGroup)
+            }
         case .projects:
             groups.append(contentsOf: makeProjectGroups(from: scopedThreads, excludingPinnedThreadIDs: pinnedThreadIDSet))
         case .chats:

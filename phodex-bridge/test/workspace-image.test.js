@@ -442,6 +442,21 @@ test("workspace/readImage allows temporary screenshot images", async () => {
   assert.equal(result.dataBase64, bytes.toString("base64"));
 });
 
+test("workspace/readImage sniffs extensionless temporary screenshots", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-image-"));
+  const imagePath = path.join(tempDir, "clipboard-image");
+  const bytes = validOnePixelPNG;
+  fs.writeFileSync(imagePath, bytes);
+
+  const result = await handleWorkspaceMethod("workspace/readImage", {
+    path: imagePath,
+  });
+
+  assert.equal(result.path, fs.realpathSync(imagePath));
+  assert.equal(result.mimeType, "image/png");
+  assert.equal(result.dataBase64, bytes.toString("base64"));
+});
+
 test("workspace/readImage allows macOS shared /tmp screenshot images", { skip: process.platform !== "darwin" }, async () => {
   const tempDir = fs.mkdtempSync(path.join("/tmp", "remodex-image-"));
   const imagePath = path.join(tempDir, "emanuele-mobile.png");

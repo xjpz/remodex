@@ -53,6 +53,7 @@ struct TurnView: View {
     @State private var isShowingVoiceSetupSheet = false
     @State private var hasConsumedInitialAssistantAnchor = false
     @StateObject private var voiceTranscriptionManager = GPTVoiceTranscriptionManager()
+    @State private var workspaceFilePreviewRequest: WorkspaceFilePreviewRequest?
 
     init(
         thread: CodexThread,
@@ -78,7 +79,9 @@ struct TurnView: View {
         let renderSnapshot = timelineState.renderSnapshot
         let activeTurnID = renderSnapshot.activeTurnID
         let planSessionSource = codex.currentPlanSessionSource(for: thread.id)
-        let gitWorkingDirectory = resolvedThread.gitWorkingDirectory
+        // Rootless Quick Chat paths are host-side storage only; the UI should stay branch/git-less.
+        let isRootlessChat = SidebarThreadGrouping.isRootlessChatThread(resolvedThread)
+        let gitWorkingDirectory = isRootlessChat ? nil : resolvedThread.gitWorkingDirectory
         let isThreadRunning = renderSnapshot.isThreadRunning
         let isEmptyThread = renderSnapshot.messages.isEmpty
         let threadDisplayPhase = codex.threadDisplayPhase(
@@ -103,7 +106,7 @@ struct TurnView: View {
             isThreadRunning: isThreadRunning,
             gitWorkingDirectory: gitWorkingDirectory
         )
-        let toolbarNavigationContext = threadNavigationContext(for: resolvedThread)
+        let toolbarNavigationContext = isRootlessChat ? nil : threadNavigationContext(for: resolvedThread)
         let toolbarWorktreeHandoffTitle = isWorktreeProject ? "Hand off to Local" : "Hand off to Worktree"
         let isGitActionEnabled = viewModel.gitRepoSync != nil && canRunGitAction(
             isThreadRunning: isThreadRunning,
@@ -207,6 +210,16 @@ struct TurnView: View {
                     viewModel.clearComposerAutocomplete()
                 }
             )
+        .environment(\.openURL, OpenURLAction { url in
+            guard let path = WorkspaceFileLinkResolver.localPath(from: url) else {
+                return .systemAction
+            }
+            workspaceFilePreviewRequest = WorkspaceFilePreviewRequest(
+                path: path,
+                currentWorkingDirectory: gitWorkingDirectory
+            )
+            return .handled
+        })
         .environment(\.inlineCommitAndPushAction, showsGitControls ? {
             viewModel.inlineCommitAndPush(
                 codex: codex,
@@ -313,6 +326,12 @@ struct TurnView: View {
                 viewModel.enqueueCapturedImageData(data, codex: codex, threadID: thread.id)
             }
             .ignoresSafeArea()
+        }
+        .fullScreenCover(item: $workspaceFilePreviewRequest) { request in
+            WorkspaceLinkedFilePreviewScreen(
+                request: request,
+                onDismiss: { workspaceFilePreviewRequest = nil }
+            )
         }
         .photosPicker(
             isPresented: isPhotoPickerPresentedBinding,
@@ -1205,6 +1224,9 @@ struct TurnView: View {
     // Re-resolves the thread at action time so follow-up chats inherit the freshest cwd after sync/reconnect.
     private func resolvedProjectPathForFollowUpThread() -> String? {
         let currentThread = codex.thread(for: thread.id) ?? thread
+        guard !SidebarThreadGrouping.isRootlessChatThread(currentThread) else {
+            return nil
+        }
         return currentThread.normalizedProjectPath
     }
 
@@ -1350,7 +1372,7 @@ struct TurnView: View {
                 isThreadRunning: isThreadRunning,
                 isEmptyThread: isEmptyThread,
                 isWorktreeProject: isWorktreeProject,
-                canForkLocally: WorktreeFlowCoordinator.localForkProjectPath(
+                canForkLocally: gitWorkingDirectory != nil && WorktreeFlowCoordinator.localForkProjectPath(
                     for: currentThread,
                     localCheckoutPath: viewModel.gitLocalCheckoutPath
                 ) != nil,
@@ -1676,7 +1698,9 @@ struct TurnView: View {
     }
 
     private var emptyStateFolderName: String? {
-        guard let cwd = currentResolvedThread.gitWorkingDirectory else { return nil }
+        let resolvedThread = currentResolvedThread
+        guard !SidebarThreadGrouping.isRootlessChatThread(resolvedThread),
+              let cwd = resolvedThread.gitWorkingDirectory else { return nil }
         let display = cwd.pathDisplayName
         // Defensive: pathDisplayName falls back to the input, so only nil out
         // when there's no usable folder portion at all (empty cwd after split).

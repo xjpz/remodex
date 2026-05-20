@@ -32,6 +32,38 @@ final class RemodexTextKitMarkdownRenderingRegressionTests: XCTestCase {
         XCTAssertGreaterThan(measuredSize.height, 0)
     }
 
+    func testWorkspaceFileLinkResolverAcceptsLocalFileURLsAndAbsolutePaths() throws {
+        let fileURL = try XCTUnwrap(URL(string: "file:///tmp/example.swift"))
+        let absolutePathURL = try XCTUnwrap(URL(string: "/Users/test/Project/App.swift"))
+        let relativePathURL = try XCTUnwrap(URL(string: "README.md"))
+        let nestedRelativePathURL = try XCTUnwrap(URL(string: "Sources/App.swift"))
+        let extensionlessKnownFileURL = try XCTUnwrap(URL(string: "Dockerfile"))
+        let lineSuffixURL = try XCTUnwrap(URL(string: "Sources/App.swift:42:7"))
+        let fragmentURL = try XCTUnwrap(URL(string: "Sources/App.swift#L42"))
+        let queryURL = try XCTUnwrap(URL(string: "Sources/App.swift?plain=1"))
+
+        XCTAssertEqual(WorkspaceFileLinkResolver.localPath(from: fileURL), "/tmp/example.swift")
+        XCTAssertEqual(WorkspaceFileLinkResolver.localPath(from: absolutePathURL), "/Users/test/Project/App.swift")
+        XCTAssertEqual(WorkspaceFileLinkResolver.localPath(from: relativePathURL), "README.md")
+        XCTAssertEqual(WorkspaceFileLinkResolver.localPath(from: nestedRelativePathURL), "Sources/App.swift")
+        XCTAssertEqual(WorkspaceFileLinkResolver.localPath(from: extensionlessKnownFileURL), "Dockerfile")
+        XCTAssertEqual(WorkspaceFileLinkResolver.localPath(from: lineSuffixURL), "Sources/App.swift")
+        XCTAssertEqual(WorkspaceFileLinkResolver.localPath(from: fragmentURL), "Sources/App.swift")
+        XCTAssertEqual(WorkspaceFileLinkResolver.localPath(from: queryURL), "Sources/App.swift")
+    }
+
+    func testWorkspaceFileLinkResolverIgnoresRemoteURLs() throws {
+        let remoteURL = try XCTUnwrap(URL(string: "https://example.com/App.swift"))
+        let bareWebHostURL = try XCTUnwrap(URL(string: "example.com"))
+        let schemeLessWebURL = try XCTUnwrap(URL(string: "example.com/path"))
+        let schemeLessWebFileURL = try XCTUnwrap(URL(string: "example.com/App.swift"))
+
+        XCTAssertNil(WorkspaceFileLinkResolver.localPath(from: remoteURL))
+        XCTAssertNil(WorkspaceFileLinkResolver.localPath(from: bareWebHostURL))
+        XCTAssertNil(WorkspaceFileLinkResolver.localPath(from: schemeLessWebURL))
+        XCTAssertNil(WorkspaceFileLinkResolver.localPath(from: schemeLessWebFileURL))
+    }
+
     // Builds many adjacent inline markdown runs, matching the RemodexTextKit path that used to
     // recursively interpolate SwiftUI Text values until large chats could crash.
     private static func largeFragmentedMarkdown(fragmentCount: Int) -> String {

@@ -15,6 +15,14 @@ const DEFAULT_DIRECTORY_SEARCH_MAX_DEPTH = 8;
 const DEFAULT_DIRECTORY_SEARCH_MAX_VISITED = 5000;
 const DEFAULT_HIDDEN_DIRECTORY_NAMES = new Set(["Library"]);
 
+// Rootless chat slug rules mirror Codex Desktop's `~/Documents/Codex/<DATE>/<slug>`
+// convention so iOS-created Quick Chats land in the same bucket Desktop classifies
+// as projectless.
+const ROOTLESS_CHAT_SLUG_MAX_TOKENS = 6;
+const ROOTLESS_CHAT_SLUG_MAX_LENGTH = 60;
+const ROOTLESS_CHAT_SLUG_FALLBACK = "new-chat";
+const ROOTLESS_CHAT_DEDUP_LIMIT = 50;
+
 // ─── ENTRY POINT ─────────────────────────────────────────────
 
 function handleProjectRequest(rawMessage, sendResponse) {
@@ -69,6 +77,8 @@ async function handleProjectMethod(method, params, options = {}) {
       return projectValidatePath(params, options);
     case "project/createDirectory":
       return projectCreateDirectory(params, options);
+    case "project/createRootlessChatRoot":
+      return projectCreateRootlessChatRoot(params, options);
     default:
       throw projectError("unknown_method", `Unknown project method: ${method}`);
   }
@@ -203,6 +213,116 @@ async function projectCreateDirectory(params, options = {}) {
     parentPath: parent.path,
     name: path.basename(created.path),
   };
+}
+
+// Mirrors the Codex Desktop "Chats" convention by materializing a dated rootless
+// chat folder under `~/Documents/Codex/<DATE>/<slug>` (or its Windows equivalent
+// `%USERPROFILE%\Documents\Codex\<DATE>\<slug>`) before the iOS client issues
+// `thread/start`. Without an explicit cwd the app-server falls back to its own
+// process working directory (often the user's home), which would otherwise show
+// up in the sidebar as a project named after the user account.
+async function projectCreateRootlessChatRoot(params = {}, options = {}) {
+  const homeDir = resolveHomeDir(options);
+  const desktopDocumentsRoot = path.join(homeDir, "Documents", "Codex");
+  const dateFolder = readString(params.dateFolder) || formatRootlessChatDate(new Date());
+  if (!isISODateFolderName(dateFolder)) {
+    throw projectError("invalid_date_folder", "The chat date folder must be in YYYY-MM-DD format.");
+  }
+
+  const slugBase = rootlessChatSlugFromPromptHint(params.promptHint);
+  const dateRootPath = path.join(desktopDocumentsRoot, dateFolder);
+
+  try {
+    await fs.promises.mkdir(dateRootPath, { recursive: true });
+  } catch (error) {
+    throw projectError("create_failed", error?.message || "Unable to prepare the Codex chats folder.");
+  }
+
+  const targetPath = await reserveUniqueRootlessChatPath(dateRootPath, slugBase);
+  try {
+    await fs.promises.mkdir(targetPath, { recursive: false });
+  } catch (error) {
+    if (error?.code !== "EEXIST") {
+      throw projectError("create_failed", error?.message || "Unable to create the rootless chat folder.");
+    }
+  }
+
+  const resolvedPath = await safeRealpath(targetPath);
+  return {
+    path: resolvedPath,
+    parentPath: dateRootPath,
+    name: path.basename(resolvedPath),
+    slug: slugBase,
+    dateFolder,
+    root: desktopDocumentsRoot,
+  };
+}
+
+// Codex Desktop generates kebab-case slugs from the first words of the prompt
+// (e.g. "mi-dici-la-pwd-corrente" from "mi dici la pwd corrente?"). We mirror
+// the same shape so that side-by-side users with the desktop app see a
+// consistent chat folder naming scheme.
+function rootlessChatSlugFromPromptHint(rawPromptHint) {
+  const hint = typeof rawPromptHint === "string" ? rawPromptHint.normalize("NFKD") : "";
+  const sanitized = hint
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, " ")
+    .trim();
+  if (!sanitized) {
+    return ROOTLESS_CHAT_SLUG_FALLBACK;
+  }
+
+  const tokens = sanitized
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, ROOTLESS_CHAT_SLUG_MAX_TOKENS);
+  if (!tokens.length) {
+    return ROOTLESS_CHAT_SLUG_FALLBACK;
+  }
+
+  let slug = tokens.join("-");
+  if (slug.length > ROOTLESS_CHAT_SLUG_MAX_LENGTH) {
+    slug = slug.slice(0, ROOTLESS_CHAT_SLUG_MAX_LENGTH).replace(/-+$/g, "");
+  }
+  return slug || ROOTLESS_CHAT_SLUG_FALLBACK;
+}
+
+// Appends "-2", "-3", … so two rapid-fire chats with the same first words
+// keep distinct folders instead of fighting over the same path.
+async function reserveUniqueRootlessChatPath(parentDirectory, slugBase) {
+  for (let attempt = 0; attempt < ROOTLESS_CHAT_DEDUP_LIMIT; attempt += 1) {
+    const candidateSlug = attempt === 0 ? slugBase : `${slugBase}-${attempt + 1}`;
+    const candidatePath = path.join(parentDirectory, candidateSlug);
+    try {
+      await fs.promises.access(candidatePath, fs.constants.F_OK);
+    } catch {
+      return candidatePath;
+    }
+  }
+
+  return path.join(parentDirectory, `${slugBase}-${Date.now()}`);
+}
+
+function formatRootlessChatDate(date) {
+  const year = date.getFullYear().toString().padStart(4, "0");
+  const month = (date.getMonth() + 1).toString().padStart(2, "0");
+  const day = date.getDate().toString().padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function isISODateFolderName(value) {
+  if (typeof value !== "string" || value.length !== 10) {
+    return false;
+  }
+  return /^\d{4}-\d{2}-\d{2}$/u.test(value);
+}
+
+async function safeRealpath(candidatePath) {
+  try {
+    return await fs.promises.realpath(candidatePath);
+  } catch {
+    return path.resolve(candidatePath);
+  }
 }
 
 // ─── Filesystem Helpers ──────────────────────────────────────
@@ -528,5 +648,7 @@ module.exports = {
   projectSearchDirectories,
   projectValidatePath,
   projectCreateDirectory,
+  projectCreateRootlessChatRoot,
   validateDirectory,
+  rootlessChatSlugFromPromptHint,
 };

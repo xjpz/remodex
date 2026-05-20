@@ -1,7 +1,7 @@
 // FILE: CodexService+WorkspaceImages.swift
-// Purpose: Fetches local workspace/generated images through the paired Mac bridge on demand.
+// Purpose: Fetches local workspace files and images through the paired Mac bridge on demand.
 // Layer: Service extension
-// Exports: WorkspaceImageReadResult, CodexService.readWorkspaceImage
+// Exports: WorkspaceImageReadResult, WorkspaceTextFileReadResult, CodexService workspace preview APIs
 // Depends on: Foundation, CodexService, JSONValue
 
 import Foundation
@@ -37,8 +37,90 @@ struct WorkspaceImageReadResult: Sendable {
     }
 }
 
+struct WorkspaceTextFileMetadata: Sendable {
+    let path: String
+    let fileName: String
+    let byteLength: Int
+    let mtimeMs: Double?
+    let encoding: String
+}
+
+struct WorkspaceTextFileReadResult: Sendable {
+    let path: String
+    let fileName: String
+    let byteLength: Int
+    let mtimeMs: Double?
+    let encoding: String
+    let content: String?
+    let lineCount: Int?
+    let isNotModified: Bool
+
+    var metadata: WorkspaceTextFileMetadata {
+        WorkspaceTextFileMetadata(
+            path: path,
+            fileName: fileName,
+            byteLength: byteLength,
+            mtimeMs: mtimeMs,
+            encoding: encoding
+        )
+    }
+}
+
 extension CodexService {
     private static let timelineImagePreviewMaxPixelDimension = 1_600
+
+    // Loads text only after the user opens a path link, keeping timeline rows lightweight.
+    func readWorkspaceTextFile(
+        path: String,
+        cwd: String?,
+        cachedMetadata: WorkspaceTextFileMetadata? = nil
+    ) async throws -> WorkspaceTextFileReadResult {
+        var params: [String: JSONValue] = [
+            "path": .string(path),
+            "includeContent": .bool(true)
+        ]
+        if let cwd = cwd?.trimmingCharacters(in: .whitespacesAndNewlines), !cwd.isEmpty {
+            params["cwd"] = .string(cwd)
+        }
+        if let cachedMetadata {
+            params["ifByteLength"] = .integer(cachedMetadata.byteLength)
+            if let mtimeMs = cachedMetadata.mtimeMs {
+                params["ifMtimeMs"] = .double(mtimeMs)
+            }
+        }
+
+        let response = try await sendRequest(method: "workspace/readFile", params: .object(params))
+        guard let result = response.result?.objectValue else {
+            throw CodexServiceError.invalidResponse("File preview response was missing a result.")
+        }
+        let metadata = parseWorkspaceTextFileMetadata(result: result, fallbackPath: path)
+        if result["notModified"]?.boolValue == true {
+            return WorkspaceTextFileReadResult(
+                path: metadata.path,
+                fileName: metadata.fileName,
+                byteLength: metadata.byteLength,
+                mtimeMs: metadata.mtimeMs,
+                encoding: metadata.encoding,
+                content: nil,
+                lineCount: result["lineCount"]?.intValue,
+                isNotModified: true
+            )
+        }
+
+        guard let content = result["content"]?.stringValue else {
+            throw CodexServiceError.invalidResponse("File preview response did not include file content.")
+        }
+        return WorkspaceTextFileReadResult(
+            path: metadata.path,
+            fileName: metadata.fileName,
+            byteLength: metadata.byteLength,
+            mtimeMs: metadata.mtimeMs,
+            encoding: metadata.encoding,
+            content: content,
+            lineCount: result["lineCount"]?.intValue,
+            isNotModified: false
+        )
+    }
 
     // Loads image bytes only after the user asks to preview them, keeping timeline rows lightweight.
     func readWorkspaceImage(
@@ -126,6 +208,16 @@ extension CodexService {
             byteLength: result["byteLength"]?.intValue ?? 0,
             mtimeMs: result["mtimeMs"]?.doubleValue,
             previewMaxPixelDimension: result["previewMaxPixelDimension"]?.intValue
+        )
+    }
+
+    private func parseWorkspaceTextFileMetadata(result: RPCObject, fallbackPath path: String) -> WorkspaceTextFileMetadata {
+        WorkspaceTextFileMetadata(
+            path: result["path"]?.stringValue ?? path,
+            fileName: result["fileName"]?.stringValue ?? (path as NSString).lastPathComponent,
+            byteLength: result["byteLength"]?.intValue ?? 0,
+            mtimeMs: result["mtimeMs"]?.doubleValue,
+            encoding: result["encoding"]?.stringValue ?? "utf-8"
         )
     }
 }

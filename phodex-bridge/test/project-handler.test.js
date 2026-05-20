@@ -13,10 +13,12 @@ const {
   handleProjectRequest,
   handleProjectMethod,
   projectCreateDirectory,
+  projectCreateRootlessChatRoot,
   projectListDirectory,
   projectProjectlessRoots,
   projectSearchDirectories,
   projectValidatePath,
+  rootlessChatSlugFromPromptHint,
 } = require("../src/project-handler");
 
 function makeTempHome() {
@@ -158,6 +160,67 @@ test("project/validatePath rejects folders outside the allowed home root", async
   assert.equal(result.isAllowed, false);
   assert.equal(result.exists, false);
   assert.equal(result.isDirectory, false);
+});
+
+test("rootlessChatSlugFromPromptHint mirrors Codex Desktop's kebab-case slug shape", () => {
+  assert.equal(
+    rootlessChatSlugFromPromptHint("mi dici la pwd corrente?"),
+    "mi-dici-la-pwd-corrente"
+  );
+  assert.equal(
+    rootlessChatSlugFromPromptHint("  Mi FAI un cwd di dove siamo davvero, grazie!"),
+    "mi-fai-un-cwd-di-dove"
+  );
+  assert.equal(rootlessChatSlugFromPromptHint(""), "new-chat");
+  assert.equal(rootlessChatSlugFromPromptHint("   ¿¿¿ !!! "), "new-chat");
+  assert.equal(rootlessChatSlugFromPromptHint(null), "new-chat");
+});
+
+test("project/createRootlessChatRoot materializes a dated Documents/Codex slug folder", async () => {
+  const homeDir = makeTempHome();
+  const result = await projectCreateRootlessChatRoot(
+    { promptHint: "Mi dici la pwd corrente?", dateFolder: "2026-05-19" },
+    { homeDir }
+  );
+
+  const expectedRoot = path.join(homeDir, "Documents", "Codex");
+  const expectedParent = path.join(expectedRoot, "2026-05-19");
+  const expectedPath = path.join(expectedParent, "mi-dici-la-pwd-corrente");
+
+  assert.equal(result.root, expectedRoot);
+  assert.equal(result.parentPath, expectedParent);
+  assert.equal(result.path, fs.realpathSync(expectedPath));
+  assert.equal(result.slug, "mi-dici-la-pwd-corrente");
+  assert.equal(result.dateFolder, "2026-05-19");
+  assert.equal(fs.statSync(expectedPath).isDirectory(), true);
+  assert.equal(fs.existsSync(path.join(expectedPath, ".git")), false);
+});
+
+test("project/createRootlessChatRoot dedupes colliding slugs in the same day", async () => {
+  const homeDir = makeTempHome();
+  const firstResult = await projectCreateRootlessChatRoot(
+    { promptHint: "Same idea twice", dateFolder: "2026-05-19" },
+    { homeDir }
+  );
+  const secondResult = await projectCreateRootlessChatRoot(
+    { promptHint: "Same idea twice", dateFolder: "2026-05-19" },
+    { homeDir }
+  );
+
+  assert.equal(path.basename(firstResult.path), "same-idea-twice");
+  assert.equal(path.basename(secondResult.path), "same-idea-twice-2");
+});
+
+test("project/createRootlessChatRoot rejects malformed date folders", async () => {
+  const homeDir = makeTempHome();
+
+  await assert.rejects(
+    () => projectCreateRootlessChatRoot(
+      { promptHint: "hello", dateFolder: "2026/05/19" },
+      { homeDir }
+    ),
+    /chat date folder must be in YYYY-MM-DD format/
+  );
 });
 
 test("handleProjectRequest responds to project JSON-RPC requests", async () => {

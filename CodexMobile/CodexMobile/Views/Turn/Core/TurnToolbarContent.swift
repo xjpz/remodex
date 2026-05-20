@@ -49,6 +49,12 @@ struct TurnToolbarContent: ToolbarContent {
             && !isThreadActionLoading
         let canTapNewChat = onTapNewChat != nil && !isThreadActionLoading
         let canTapTerminal = onTapTerminal != nil
+        let threadActions = threadActionItems(
+            canTapMacHandoff: canTapMacHandoff,
+            canTapWorktreeHandoff: canTapWorktreeHandoff,
+            canTapNewChat: canTapNewChat,
+            canTapTerminal: canTapTerminal
+        )
 
         // Keep title + path as one leading-aligned control. Splitting them into
         // iOS 26 `.title` / `.subtitle` placements lets the system align each
@@ -93,39 +99,59 @@ struct TurnToolbarContent: ToolbarContent {
             ToolbarItem(placement: .topBarTrailing) {
                 TurnThreadActionsMenuButton(
                     isLoading: isThreadActionLoading,
-                    actions: [
-                        TurnThreadActionMenuItem(
-                            title: "Hand off to Desktop",
-                            icon: .system("arrow.left.arrow.right"),
-                            isEnabled: canTapMacHandoff
-                        ) {
-                            onTapMacHandoff?()
-                        },
-                        TurnThreadActionMenuItem(
-                            title: isCreatingGitWorktree ? "Preparing worktree..." : worktreeHandoffTitle,
-                            icon: .worktree,
-                            isEnabled: canTapWorktreeHandoff
-                        ) {
-                            onTapWorktreeHandoff?()
-                        },
-                        TurnThreadActionMenuItem(
-                            title: "New chat",
-                            icon: .system("square.and.pencil"),
-                            isEnabled: canTapNewChat
-                        ) {
-                            onTapNewChat?()
-                        },
-                        TurnThreadActionMenuItem(
-                            title: "Open Terminal Here",
-                            icon: .system("terminal"),
-                            isEnabled: canTapTerminal
-                        ) {
-                            onTapTerminal?()
-                        },
-                    ]
+                    actions: threadActions
                 )
             }
         }
+    }
+
+    // Hides worktree-only actions for rootless Quick Chat, where there is no real branch context.
+    private func threadActionItems(
+        canTapMacHandoff: Bool,
+        canTapWorktreeHandoff: Bool,
+        canTapNewChat: Bool,
+        canTapTerminal: Bool
+    ) -> [TurnThreadActionMenuItem] {
+        var actions: [TurnThreadActionMenuItem] = [
+            TurnThreadActionMenuItem(
+                title: "Hand off to Desktop",
+                icon: .system("arrow.left.arrow.right"),
+                isEnabled: canTapMacHandoff
+            ) {
+                onTapMacHandoff?()
+            },
+        ]
+
+        if onTapWorktreeHandoff != nil {
+            actions.append(
+                TurnThreadActionMenuItem(
+                    title: isCreatingGitWorktree ? "Preparing worktree..." : worktreeHandoffTitle,
+                    icon: .worktree,
+                    isEnabled: canTapWorktreeHandoff
+                ) {
+                    onTapWorktreeHandoff?()
+                }
+            )
+        }
+
+        actions.append(contentsOf: [
+            TurnThreadActionMenuItem(
+                title: "New chat",
+                icon: .system("square.and.pencil"),
+                isEnabled: canTapNewChat
+            ) {
+                onTapNewChat?()
+            },
+            TurnThreadActionMenuItem(
+                title: "Open Terminal Here",
+                icon: .system("terminal"),
+                isEnabled: canTapTerminal
+            ) {
+                onTapTerminal?()
+            },
+        ])
+
+        return actions
     }
 
     @ViewBuilder

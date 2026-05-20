@@ -2,7 +2,7 @@
 // Purpose: Renders the turn composer input, queued-draft actions, attachments, and send/stop controls.
 // Layer: View Component (orchestrator)
 // Exports: TurnComposerView, TurnComposerInputChangeHandler
-// Depends on: SwiftUI, AdaptiveGlassModifier, ComposerAttachmentsPreview, FileAutocompletePanel, SkillAutocompletePanel, SlashCommandAutocompletePanel, ComposerBottomBar, QueuedDraftsPanel, FileMentionChip, TurnComposerInputTextView, TurnComposerSecondaryBar
+// Depends on: SwiftUI, AdaptiveGlassModifier, ComposerAttachmentsPreview, FileAutocompletePanel, SkillAutocompletePanel, SlashCommandAutocompletePanel, ComposerBottomBar, QueuedDraftsPanel, TurnMentionChips, TurnComposerInputTextView, TurnComposerSecondaryBar
 
 import SwiftUI
 import UIKit
@@ -129,7 +129,7 @@ struct TurnComposerView: View {
                     onRemoveQueuedDraft: onRemoveQueuedDraft
                 )
 
-                if showsSecondaryBar {
+                if showsSecondaryBar && hasWorkingDirectory {
                     TurnComposerSecondaryBar(
                         isInputFocused: isInputFocused.wrappedValue,
                         isEmptyThread: isEmptyThread,
@@ -214,6 +214,7 @@ struct TurnComposerView: View {
                     }
 
                     ComposerBottomBar(
+                        hasWorkingDirectory: hasWorkingDirectory,
                         orderedModelOptions: orderedModelOptions,
                         selectedModelID: selectedModelID,
                         selectedModelTitle: selectedModelTitle,
@@ -232,6 +233,14 @@ struct TurnComposerView: View {
                         isThreadRunning: isThreadRunning,
                         showsSendButton: showsSendButton,
                         voiceButtonPresentation: voiceButtonPresentation,
+                        selectedAccessMode: selectedAccessMode,
+                        contextWindowUsage: contextWindowUsage,
+                        rateLimitBuckets: rateLimitBuckets,
+                        isLoadingRateLimits: isLoadingRateLimits,
+                        rateLimitsErrorMessage: rateLimitsErrorMessage,
+                        shouldAutoRefreshUsageStatus: shouldAutoRefreshUsageStatus,
+                        onRefreshUsageStatus: onRefreshUsageStatus,
+                        onSelectAccessMode: onSelectAccessMode,
                         onTapAddImage: onTapAddImage,
                         onTapTakePhoto: onTapTakePhoto,
                         onTapVoice: onTapVoice,
@@ -419,87 +428,14 @@ private struct TurnComposerAccessorySection: View {
                 .padding(.bottom, 8)
             }
 
-            if state.showsMentionedFiles {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(state.composerMentionedFiles) { file in
-                            FileMentionChip(fileName: file.fileName) {
-                                onRemoveMentionedFile(file.id)
-                            }
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 16)
-                .padding(.top, 10)
-            }
-
-            if state.showsMentionedSkills {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(state.composerMentionedSkills) { skill in
-                            SkillMentionChip(skillName: skill.name) {
-                                onRemoveMentionedSkill(skill.id)
-                            }
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-            }
-
-            if state.showsMentionedPlugins {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(state.composerMentionedPlugins) { plugin in
-                            PluginMentionChip(pluginName: plugin.displayName ?? plugin.name) {
-                                onRemoveMentionedPlugin(plugin.id)
-                            }
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-            }
-
-            if state.showsSubagentsSelection {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ComposerActionChip(
-                            title: "Subagents",
-                            symbolName: "point.3.connected.trianglepath.dotted",
-                            tintColor: .teal,
-                            removeAccessibilityLabel: "Remove subagents"
-                        ) {
-                            onRemoveComposerSubagentsSelection()
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-            }
-
-            if let reviewTarget = state.reviewTarget {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ComposerActionChip(
-                            title: "Code Review: \(reviewTarget.title)",
-                            symbolName: "checklist",
-                            tintColor: .teal,
-                            removeAccessibilityLabel: "Remove code review"
-                        ) {
-                            onRemoveComposerReviewSelection()
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-            }
-
+            TurnComposerMentionChipSections(
+                state: state,
+                onRemoveMentionedFile: onRemoveMentionedFile,
+                onRemoveMentionedSkill: onRemoveMentionedSkill,
+                onRemoveMentionedPlugin: onRemoveMentionedPlugin,
+                onRemoveComposerReviewSelection: onRemoveComposerReviewSelection,
+                onRemoveComposerSubagentsSelection: onRemoveComposerSubagentsSelection
+            )
         }
     }
 }

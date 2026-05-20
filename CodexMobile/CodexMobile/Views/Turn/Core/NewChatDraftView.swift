@@ -96,12 +96,14 @@ struct NewChatDraftView: View {
                 }
             }
 
-            ToolbarItem(placement: .topBarTrailing) {
-                draftGitActionsButton
-            }
+            if hasSelectedProject {
+                ToolbarItem(placement: .topBarTrailing) {
+                    draftGitActionsButton
+                }
 
-            if #available(iOS 26.0, *) {
-                ToolbarSpacer(.fixed, placement: .topBarTrailing)
+                if #available(iOS 26.0, *) {
+                    ToolbarSpacer(.fixed, placement: .topBarTrailing)
+                }
             }
 
             ToolbarItem(placement: .topBarTrailing) {
@@ -187,7 +189,7 @@ struct NewChatDraftView: View {
     }
 
     // Source-specific prompt UI:
-    // - General Chat stays rootless and intentionally avoids project selection.
+    // - General Chat exposes the picker only while it is project-backed; rootless Quick Chat stays bare.
     // - Folder/project button keeps the normal title because that folder is already implied.
     private var promptStack: some View {
         Group {
@@ -214,11 +216,15 @@ struct NewChatDraftView: View {
                 .foregroundStyle(.primary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 28)
-            Text("Chats are End-to-end encrypted")
-                .font(AppFont.caption())
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 28)
+
+            if hasSelectedProject {
+                folderPickerPill
+                Text("Chats are End-to-end encrypted")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 28)
+            }
         }
     }
 
@@ -246,12 +252,13 @@ struct NewChatDraftView: View {
         TurnChatToolbarTitleLabel(
             title: "New thread",
             subtitle: placeholderFolderName ?? trustedHostName,
-            onTap: toolbarTitlePickerAction,
-            accessibilityHint: toolbarTitlePickerAction == nil ? nil : "Opens the project picker"
+            onTap: hasSelectedProject ? { activeSheet = .projectPicker } : nil,
+            accessibilityHint: hasSelectedProject ? "Opens the project picker" : nil
         )
     }
 
-    // Only folder-backed drafts expose Git state/actions; rootless general chat stays project-free.
+    // Drafts expose Git state/actions whenever a folder is selected (including the
+    // general-chat default seeded from the latest used project).
     private var draftGitActionsButton: some View {
         TurnGitActionsToolbarButton(
             isEnabled: isDraftGitActionEnabled,
@@ -290,11 +297,6 @@ struct NewChatDraftView: View {
 
     private var areDraftToolbarActionsDisabled: Bool {
         !hasSelectedProject
-    }
-
-    private var toolbarTitlePickerAction: (() -> Void)? {
-        guard !isFromGeneralChat else { return nil }
-        return { activeSheet = .projectPicker }
     }
 
     private var isDraftGitActionEnabled: Bool {
@@ -417,6 +419,48 @@ struct NewChatDraftView: View {
             return nil
         }
         return selectedProjectPath.pathDisplayName
+    }
+
+    // Always reads the same way as the toolbar subtitle so the inline pill and
+    // the navigation block never disagree on the currently bound folder.
+    private var folderPillLabel: String {
+        placeholderFolderName ?? "Quick Chat"
+    }
+
+    // Compact inline picker shown below the "What should we work on?" prompt.
+    // Mirrors the toolbar subtitle target so tapping either entry point opens
+    // the same project picker sheet.
+    private var folderPickerPill: some View {
+        Button {
+            HapticFeedback.shared.triggerImpactFeedback(style: .light)
+            activeSheet = .projectPicker
+        } label: {
+            HStack(spacing: 6) {
+                pickerIcon
+                Text(folderPillLabel)
+                    .font(AppFont.title2(weight: .regular))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(AppFont.title2(weight: .regular))
+            }
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 10)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Select folder")
+        .accessibilityHint("Opens the project picker")
+        .accessibilityValue(folderPillLabel)
+    }
+
+    // Uses the custom Remodex folder glyph so the inline picker matches the rest of the sidebar.
+    private var pickerIcon: some View {
+        Image("central-folder-2")
+            .renderingMode(.template)
+            .resizable()
+            .scaledToFit()
+            .frame(width: 22, height: 22)
     }
 
     private var trustedHostName: String? {
@@ -550,7 +594,9 @@ struct NewChatDraftView: View {
     private func initializeProjectSelectionIfNeeded() {
         guard !hasInitializedProjectSelection else { return }
 
-        guard !isFromGeneralChat else {
+        // A general-chat route without a preferred path is an explicit rootless Quick Chat.
+        // Keep it unbound instead of falling back to the first recent project.
+        guard !(isFromGeneralChat && route.preferredProjectPath == nil) else {
             selectedProjectPath = nil
             hasInitializedProjectSelection = true
             return
@@ -601,7 +647,7 @@ struct NewChatDraftView: View {
         case .projectPicker:
             SidebarNewChatProjectPickerSheet(
                 choices: projectChoices,
-                showsWithoutProjectOption: false,
+                showsWithoutProjectOption: isFromGeneralChat,
                 showsWorktreeOptions: false,
                 onSelectProject: { projectPath in
                     selectedProjectPath = projectPath

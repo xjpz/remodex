@@ -280,7 +280,6 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                     )
                     .modifier(timelineHistoryChangeHandlers(using: proxy))
                     .modifier(timelineRenderChangeHandlers(using: proxy))
-                    // Keeps footer pinned to bottom without adding a solid spacer block above it.
                     .safeAreaInset(edge: .bottom, spacing: 0) {
                         footer(scrollToBottomAction: {
                             handleScrollToLatestButtonTap(using: proxy)
