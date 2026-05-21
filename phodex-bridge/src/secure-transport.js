@@ -38,6 +38,7 @@ function createBridgeSecureTransport({
   relayUrl,
   deviceState,
   onTrustedPhoneUpdate = null,
+  persistTrustedPhone = true,
 }) {
   let currentDeviceState = deviceState;
   let pendingHandshake = null;
@@ -361,7 +362,8 @@ function createBridgeSecureTransport({
       currentDeviceState = rememberTrustedPhone(
         currentDeviceState,
         pendingHandshake.phoneDeviceId,
-        pendingHandshake.phoneIdentityPublicKey
+        pendingHandshake.phoneIdentityPublicKey,
+        { persist: persistTrustedPhone }
       );
       if (previousTrustedPhonePublicKey !== pendingHandshake.phoneIdentityPublicKey) {
         onTrustedPhoneUpdate?.(currentDeviceState, {
