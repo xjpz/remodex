@@ -18,9 +18,9 @@ struct ContextWindowProgressRing: View {
     @State private var isShowingPopover = false
     @State private var isRefreshing = false
 
-    private let ringSize: CGFloat = 18
-    private let lineWidth: CGFloat = 2.25
-    private let tapTargetSize: CGFloat = 36
+    private let ringSize: CGFloat = 16
+    private let lineWidth: CGFloat = 2.75
+    private let tapTargetSize: CGFloat = 34
 
     var body: some View {
         let displayUsage = usage ?? .zero
@@ -37,11 +37,6 @@ struct ContextWindowProgressRing: View {
                     .trim(from: 0, to: displayUsage.fractionUsed)
                     .stroke(ringColor(for: displayUsage), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
                     .rotationEffect(.degrees(-90))
-
-                Text("\(displayUsage.percentUsed)")
-                    .font(AppFont.system(size: 6, weight: .semibold))
-                    .minimumScaleFactor(0.75)
-                    .foregroundStyle(ringColor(for: displayUsage))
             }
             .frame(width: ringSize, height: ringSize)
             .frame(width: tapTargetSize, height: tapTargetSize)
