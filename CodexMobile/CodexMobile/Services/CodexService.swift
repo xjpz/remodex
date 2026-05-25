@@ -501,7 +501,6 @@ final class CodexService {
     @ObservationIgnored var pendingAssistantDeltaContextByStreamID: [String: (threadId: String, turnId: String, itemId: String?, assistantPhase: String?)] = [:]
     @ObservationIgnored var pendingAssistantDeltaStreamOrder: [String] = []
     @ObservationIgnored var pendingAssistantDeltaFlushTask: Task<Void, Never>?
-    let assistantDeltaBatchIntervalNanoseconds: UInt64 = 50_000_000
     // Coalesces multiple invalidateAssistantRevertStates() calls within the same run loop tick into one refresh.
     var coalescedRevertRefreshTask: Task<Void, Never>?
     // Dedupes completion payloads when servers omit turn/item identifiers.
@@ -560,6 +559,10 @@ final class CodexService {
     // Coalesces sidebar/bootstrap thread/list refreshes so launch paths do not duplicate the same fetch.
     @ObservationIgnored var threadListFetchTaskByLimit: [Int: (id: UUID, task: Task<[CodexThread], Error>)] = [:]
     var isAppInForeground = true
+    // Network quality flag: when true, sync and keepalive intervals are stretched to reduce
+    // bandwidth usage on constrained connections (Low Data Mode, hotspot tethering).
+    var isConstrainedNetwork = false
+    @ObservationIgnored var networkPathMonitor: NWPathMonitor?
     var threadListSyncTask: Task<Void, Never>?
     var activeThreadSyncTask: Task<Void, Never>?
     var runningThreadWatchSyncTask: Task<Void, Never>?
@@ -813,6 +816,26 @@ final class CodexService {
             self.secureMacFingerprint = codexSecureFingerprint(for: trustedMac.macIdentityPublicKey)
         }
         rebuildThreadLookupCaches()
+        startNetworkPathMonitor()
+    }
+
+    func startNetworkPathMonitor() {
+        networkPathMonitor?.cancel()
+        let monitor = NWPathMonitor()
+        networkPathMonitor = monitor
+        monitor.pathUpdateHandler = { [weak self] path in
+            let constrained = path.isConstrained
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if self.isConstrainedNetwork != constrained {
+                    self.isConstrainedNetwork = constrained
+                    if self.isConnected, self.isInitialized {
+                        self.startSyncLoop()
+                    }
+                }
+            }
+        }
+        monitor.start(queue: DispatchQueue(label: "CodexMobile.NetworkPathMonitor", qos: .utility))
     }
 
     // Persists per-thread plan-mode provenance so reconnect/relaunch keeps native vs fallback behavior stable.
@@ -1034,6 +1057,7 @@ final class CodexService {
 
     deinit {
         MainActor.assumeIsolated {
+            networkPathMonitor?.cancel()
             trustedSessionResolveTask?.cancel()
             messagePersistenceDebounceTask?.cancel()
             coalescedRevertRefreshTask?.cancel()

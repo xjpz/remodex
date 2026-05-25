@@ -27,15 +27,12 @@ struct TerminalConnectionEditorSheet: View {
     }
 
     private var advancedLabel: String {
-        profile.port == 22 && profile.cwd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? "Default"
-            : "Custom"
+        profile.port == 22 ? "Default" : "Custom"
     }
 
     private var isAdvancedVisible: Bool {
         isShowingAdvanced
             || profile.port != 22
-            || !profile.cwd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var portBinding: Binding<String> {
@@ -170,19 +167,12 @@ private struct TerminalSSHSection: View {
 
                 if isAdvancedVisible {
                     Divider()
-                    HStack(spacing: 12) {
-                        TerminalTextField(
-                            title: "Port",
-                            text: portBinding,
-                            placeholder: "22",
-                            keyboardType: .numberPad
-                        )
-                        TerminalTextField(
-                            title: "Working directory",
-                            text: $profile.cwd,
-                            placeholder: "/Users/name"
-                        )
-                    }
+                    TerminalTextField(
+                        title: "Port",
+                        text: portBinding,
+                        placeholder: "22",
+                        keyboardType: .numberPad
+                    )
                     .padding(.top, 14)
                 }
 

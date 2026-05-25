@@ -2,7 +2,7 @@
 // Purpose: Autocomplete dropdown for @-file and @-plugin mentions.
 // Layer: View Component
 // Exports: FileAutocompletePanel
-// Depends on: SwiftUI, AutocompleteRowButtonStyle
+// Depends on: SwiftUI, RemodexIcon, AutocompleteRowButtonStyle
 
 import SwiftUI
 
@@ -67,9 +67,7 @@ struct FileAutocompletePanel: View {
                                 onSelectPlugin(item)
                             } label: {
                                 HStack(spacing: 8) {
-                                    RemodexIcon.image(systemName: "circle.grid.2x2")
-                                        .font(AppFont.system(size: 12, weight: .semibold))
-                                        .foregroundStyle(.secondary)
+                                    mentionIcon
 
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(item.displayTitle)
@@ -104,15 +102,19 @@ struct FileAutocompletePanel: View {
                                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                                 onSelect(item)
                             } label: {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(item.fileName)
-                                        .font(AppFont.subheadline(weight: .semibold))
-                                        .lineLimit(1)
+                                HStack(spacing: 8) {
+                                    mentionIcon
 
-                                    Text(item.path)
-                                        .font(AppFont.caption())
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(item.fileName)
+                                            .font(AppFont.subheadline(weight: .semibold))
+                                            .lineLimit(1)
+
+                                        Text(item.path)
+                                            .font(AppFont.caption())
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
                                 }
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 6)
@@ -133,6 +135,13 @@ struct FileAutocompletePanel: View {
         .padding(4)
         .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
         .padding(.horizontal, 4)
+    }
+
+    private var mentionIcon: some View {
+        RemodexIcon.image(systemName: "at")
+            .font(AppFont.system(size: 14, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .frame(width: 18)
     }
 
     private func sectionHeader(_ title: String) -> some View {

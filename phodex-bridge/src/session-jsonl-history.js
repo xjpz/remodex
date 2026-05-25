@@ -37,9 +37,15 @@ function parseSessionJsonlMetadata(content) {
   let threadId = "";
   let cwd = "";
 
-  const lines = String(content || "").split(/\r?\n/);
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
+  const raw = String(content || "");
+  let lineStart = 0;
+  while (lineStart < raw.length) {
+    let lineEnd = raw.indexOf("\n", lineStart);
+    if (lineEnd === -1) {
+      lineEnd = raw.length;
+    }
+    const line = raw.substring(lineStart, lineEnd).trim();
+    lineStart = lineEnd + 1;
     if (!line) {
       continue;
     }
@@ -78,11 +84,20 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
   let sessionThreadId = normalizeString(threadId);
   let sessionCwd = "";
   const skippedCallIds = new Set();
+  const toolCallsByCallId = new Map();
   const pendingUserMessages = [];
 
-  const lines = String(content || "").split(/\r?\n/);
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index].trim();
+  const raw = String(content || "");
+  let index = -1;
+  let lineStart = 0;
+  while (lineStart < raw.length) {
+    index += 1;
+    let lineEnd = raw.indexOf("\n", lineStart);
+    if (lineEnd === -1) {
+      lineEnd = raw.length;
+    }
+    const line = raw.substring(lineStart, lineEnd).trim();
+    lineStart = lineEnd + 1;
     if (!line) {
       continue;
     }
@@ -144,6 +159,7 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
         );
         const item = normalizeResponseItemForHistory(completedItem, index + 1, {
           cwd: sessionCwd,
+          toolCallsByCallId,
         });
         if (item) {
           turn.items.push(item);
@@ -153,13 +169,9 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
 
       if (eventType === "user_message") {
         const explicitTurnId = normalizeString(payload?.turn_id) || normalizeString(payload?.turnId);
+        const item = createUserMessageHistoryItem(payload, index + 1, entry.timestamp);
         if (!explicitTurnId && !activeTurnId) {
-          pendingUserMessages.push({
-            id: normalizeString(payload?.id) || `user-message-line-${index + 1}`,
-            type: "user_message",
-            role: "user",
-            text: normalizeString(payload?.message) || normalizeString(payload?.text),
-          });
+          pushPendingUserMessage(pendingUserMessages, item);
           continue;
         }
 
@@ -170,12 +182,7 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
           sessionThreadId,
           entry.timestamp
         );
-        turn.items.push({
-          id: normalizeString(payload?.id) || `user-message-line-${index + 1}`,
-          type: "user_message",
-          role: "user",
-          text: normalizeString(payload?.message) || normalizeString(payload?.text),
-        });
+        addHistoryItemToTurn(turn, item);
         continue;
       }
 
@@ -189,6 +196,7 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
       if (!payload) {
         continue;
       }
+      rememberToolCallForHistory(payload, toolCallsByCallId);
       if (shouldSkipResponseItemForHistory(payload, skippedCallIds)) {
         continue;
       }
@@ -201,17 +209,148 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
       );
       const item = normalizeResponseItemForHistory(payload, index + 1, {
         cwd: sessionCwd,
+        toolCallsByCallId,
       });
       if (item) {
         if (shouldSkipDuplicateProposedPlanMessage(turn, item)) {
           continue;
         }
-        turn.items.push(item);
+        const itemTimestamp = historyItemTimestamp(item, entry.timestamp);
+        if (itemTimestamp && !item.createdAt) {
+          item.createdAt = itemTimestamp;
+        }
+        if (itemTimestamp && !item.timestamp) {
+          item.timestamp = itemTimestamp;
+        }
+        addHistoryItemToTurn(turn, item);
       }
     }
   }
 
   return turns.filter((turn) => turn.items.length > 0);
+}
+
+function createUserMessageHistoryItem(payload, lineNumber, timestamp) {
+  const createdAt = historyItemTimestamp(payload, timestamp);
+  return {
+    id: normalizeString(payload?.id) || `user-message-line-${lineNumber}`,
+    type: "user_message",
+    role: "user",
+    text: normalizeString(payload?.message) || normalizeString(payload?.text),
+    createdAt: createdAt || undefined,
+    timestamp: createdAt || undefined,
+  };
+}
+
+function pushPendingUserMessage(pendingUserMessages, item) {
+  if (!item || !historyUserItemText(item)) {
+    return;
+  }
+  if (pendingUserMessages.some((candidate) => areDuplicateUserHistoryItems(candidate, item))) {
+    return;
+  }
+  pendingUserMessages.push(item);
+}
+
+function addHistoryItemToTurn(turn, item) {
+  if (!turn || !item) {
+    return;
+  }
+
+  if (isUserHistoryItem(item)) {
+    const duplicateIndex = turn.items.findIndex((candidate) => areDuplicateUserHistoryItems(candidate, item));
+    if (duplicateIndex !== -1) {
+      turn.items[duplicateIndex] = mergeDuplicateUserHistoryItems(turn.items[duplicateIndex], item);
+      return;
+    }
+  }
+
+  turn.items.push(item);
+}
+
+function mergeDuplicateUserHistoryItems(existing, incoming) {
+  const existingHasStructuredContent = hasStructuredUserHistoryContent(existing);
+  const incomingHasStructuredContent = hasStructuredUserHistoryContent(incoming);
+  const preferStructured = existingHasStructuredContent !== incomingHasStructuredContent;
+  const preferIncoming = preferStructured
+    ? incomingHasStructuredContent
+    : normalizeHistoryToken(incoming?.type) === "usermessage"
+      && normalizeHistoryToken(existing?.type) !== "usermessage";
+  const base = preferIncoming ? incoming : existing;
+  const fallback = preferIncoming ? existing : incoming;
+  return {
+    ...base,
+    content: Array.isArray(base?.content) ? base.content : fallback?.content,
+    attachments: Array.isArray(base?.attachments) ? base.attachments : fallback?.attachments,
+    createdAt: historyItemTimestamp(base, historyItemTimestamp(fallback)) || undefined,
+    timestamp: historyItemTimestamp(base, historyItemTimestamp(fallback)) || undefined,
+  };
+}
+
+function hasStructuredUserHistoryContent(item) {
+  const content = Array.isArray(item?.content) ? item.content : [];
+  return content
+    .map((entry) => objectValue(entry))
+    .filter(Boolean)
+    .some((entry) => {
+      const type = normalizeHistoryToken(entry.type);
+      return type === "skill"
+        || type === "mention"
+        || type === "image"
+        || type === "inputimage";
+    });
+}
+
+function areDuplicateUserHistoryItems(first, second) {
+  if (!isUserHistoryItem(first) || !isUserHistoryItem(second)) {
+    return false;
+  }
+  const firstText = historyUserItemText(first);
+  const secondText = historyUserItemText(second);
+  if (!firstText || !secondText) {
+    return false;
+  }
+  if (firstText === secondText) {
+    return true;
+  }
+  const firstKey = canonicalUserHistoryTextKey(firstText);
+  const secondKey = canonicalUserHistoryTextKey(secondText);
+  if (firstKey.hasMentions && firstKey.key === secondKey.key) {
+    return true;
+  }
+  return Boolean(
+    firstKey.text
+      && firstKey.text === secondKey.text
+      && (firstKey.hasMentions || secondKey.hasMentions)
+      && sameUserHistoryTimestamp(first, second)
+  );
+}
+
+function sameUserHistoryTimestamp(first, second) {
+  const firstTimestamp = historyItemTimestamp(first);
+  const secondTimestamp = historyItemTimestamp(second);
+  return Boolean(firstTimestamp && secondTimestamp && firstTimestamp === secondTimestamp);
+}
+
+function historyItemTimestamp(item, fallbackTimestamp = "") {
+  return firstNonEmptyString([
+    normalizeString(item?.createdAt),
+    normalizeString(item?.created_at),
+    normalizeString(item?.timestamp),
+    normalizeString(item?.time),
+    normalizeString(fallbackTimestamp),
+  ]);
+}
+
+function isUserHistoryItem(item) {
+  return normalizeHistoryToken(item?.type) === "usermessage"
+    || normalizeString(item?.role).toLowerCase() === "user";
+}
+
+function historyUserItemText(item) {
+  return normalizeString(item?.text)
+    || normalizeString(item?.message)
+    || responseItemMessageText(item);
 }
 
 function shouldSkipDuplicateProposedPlanMessage(turn, item) {
@@ -239,7 +378,9 @@ function flushPendingUserMessagesToTurn(turn, pendingUserMessages) {
     return;
   }
 
-  turn.items.push(...pendingUserMessages.splice(0));
+  for (const item of pendingUserMessages.splice(0)) {
+    addHistoryItemToTurn(turn, item);
+  }
 }
 
 function ensureTurn(turns, turnsById, turnId, threadId, timestamp) {
@@ -262,7 +403,7 @@ function ensureTurn(turns, turnsById, turnId, threadId, timestamp) {
   return turn;
 }
 
-function normalizeResponseItemForHistory(payload, lineNumber, { cwd = "" } = {}) {
+function normalizeResponseItemForHistory(payload, lineNumber, { cwd = "", toolCallsByCallId = new Map() } = {}) {
   const type = normalizeHistoryItemType(payload.type);
   if (!type) {
     return null;
@@ -276,6 +417,13 @@ function normalizeResponseItemForHistory(payload, lineNumber, { cwd = "" } = {})
   const applyPatchItem = normalizeApplyPatchItemForHistory(payload, lineNumber, { cwd });
   if (applyPatchItem) {
     return applyPatchItem;
+  }
+
+  const toolOutputImageViewItem = normalizeToolOutputImageViewItemForHistory(payload, lineNumber, {
+    toolCallsByCallId,
+  });
+  if (toolOutputImageViewItem) {
+    return toolOutputImageViewItem;
   }
 
   const readableToolItem = normalizeReadableToolItemForHistory(payload, lineNumber, { cwd });
@@ -297,6 +445,37 @@ function normalizeResponseItemForHistory(payload, lineNumber, { cwd = "" } = {})
   }
 
   return item;
+}
+
+// Converts `view_image` tool output blobs into a lightweight local image reference.
+function normalizeToolOutputImageViewItemForHistory(payload, lineNumber, { toolCallsByCallId = new Map() } = {}) {
+  const type = normalizeHistoryItemType(payload.type);
+  if (normalizeHistoryToken(type) !== "toolcalloutput") {
+    return null;
+  }
+
+  const callId = normalizeString(payload.call_id)
+    || normalizeString(payload.callId)
+    || normalizeString(payload.id);
+  const toolCall = callId ? toolCallsByCallId.get(callId) : null;
+  if (!toolCall || normalizeString(toolCall.toolName).toLowerCase() !== "view_image") {
+    return null;
+  }
+
+  const imagePath = normalizeString(toolCall.imagePath);
+  if (!imagePath || !toolCallOutputContainsInlineImage(payload.output)) {
+    return null;
+  }
+
+  return {
+    id: `${callId || `tool-output-line-${lineNumber}`}-image-view`,
+    type: "imageView",
+    status: normalizeString(payload.status) || "completed",
+    path: imagePath,
+    call_id: callId || undefined,
+    tool_name: toolCall.toolName,
+    remodexJsonlToolOutputImage: true,
+  };
 }
 
 // Enriches raw tool-call JSONL records so mobile history can render useful rows.
@@ -351,6 +530,73 @@ function normalizeReadableToolItemForHistory(payload, lineNumber, { cwd = "" } =
     call_id: callId || undefined,
     tool_name: toolName,
   };
+}
+
+function rememberToolCallForHistory(payload, toolCallsByCallId) {
+  const typeToken = normalizeHistoryToken(normalizeHistoryItemType(payload?.type));
+  if (typeToken !== "toolcall" && typeToken !== "customtoolcall") {
+    return;
+  }
+
+  const callId = normalizeString(payload.call_id)
+    || normalizeString(payload.callId)
+    || normalizeString(payload.id);
+  const toolName = normalizeString(payload.name)
+    || normalizeString(payload.tool_name)
+    || normalizeString(payload.toolName);
+  if (!callId || !toolName) {
+    return;
+  }
+
+  const argumentsObject = parseToolArguments(
+    payload.arguments !== undefined ? payload.arguments : payload.input
+  );
+  toolCallsByCallId.set(callId, {
+    toolName,
+    imagePath: resolveToolImagePath(toolName, argumentsObject, payload),
+  });
+}
+
+function resolveToolImagePath(toolName, argumentsObject, payload) {
+  if (normalizeString(toolName).toLowerCase() !== "view_image") {
+    return "";
+  }
+
+  return firstNonEmptyString([
+    normalizeString(argumentsObject.path),
+    normalizeString(argumentsObject.filePath),
+    normalizeString(argumentsObject.file_path),
+    normalizeString(argumentsObject.localPath),
+    normalizeString(argumentsObject.local_path),
+    normalizeString(payload.path),
+    normalizeString(payload.filePath),
+    normalizeString(payload.file_path),
+    normalizeString(payload.localPath),
+    normalizeString(payload.local_path),
+  ]);
+}
+
+function toolCallOutputContainsInlineImage(rawOutput) {
+  const parsedOutput = typeof rawOutput === "string"
+    ? safeParseJSON(rawOutput) || rawOutput
+    : rawOutput;
+  return containsInlineImageDataURL(parsedOutput);
+}
+
+function containsInlineImageDataURL(value) {
+  if (typeof value === "string") {
+    return value.toLowerCase().startsWith("data:image");
+  }
+
+  if (Array.isArray(value)) {
+    return value.some(containsInlineImageDataURL);
+  }
+
+  if (value && typeof value === "object") {
+    return Object.values(value).some(containsInlineImageDataURL);
+  }
+
+  return false;
 }
 
 function normalizeApplyPatchItemForHistory(payload, lineNumber, { cwd = "" } = {}) {
@@ -685,9 +931,80 @@ function responseItemMessageText(payload) {
   return content
     .map((item) => objectValue(item))
     .filter(Boolean)
-    .map((item) => normalizeString(item.text) || normalizeString(objectValue(item.data)?.text))
+    .map((item) => responseItemContentText(item))
     .filter(Boolean)
     .join("\n");
+}
+
+function responseItemContentText(item) {
+  const type = normalizeHistoryToken(item?.type);
+  if (type === "skill") {
+    const skillName = normalizeString(item.id) || normalizeString(item.name);
+    return skillName ? `$${skillName}` : "";
+  }
+  if (type === "mention") {
+    const mentionName = normalizeString(item.name) || normalizeString(item.id);
+    return mentionName ? `@${mentionName}` : "";
+  }
+  return normalizeString(item.text) || normalizeString(objectValue(item.data)?.text);
+}
+
+function canonicalUserHistoryTextKey(text) {
+  const mentions = { skills: new Set(), plugins: new Set() };
+  let body = normalizeString(text).replace(
+    /(^|\s)([$/@])([A-Za-z0-9][A-Za-z0-9._-]*)(?=[\s,.;:!?)\]}>]|$)/g,
+    (match, prefix, trigger, rawName) => {
+      const name = normalizeString(rawName).toLowerCase();
+      if (!name) {
+        return match;
+      }
+      if (trigger === "$" || trigger === "/") {
+        mentions.skills.add(name);
+      } else if (trigger === "@") {
+        mentions.plugins.add(name);
+      }
+      return prefix || "";
+    }
+  );
+
+  for (const skill of mentions.skills) {
+    body = removeBoundedUserMentionPhrase(body, `$${skill}`);
+    body = removeBoundedUserMentionPhrase(body, `/${skill}`);
+    body = removeBoundedUserMentionPhrase(body, displayNameForUserMention(skill));
+  }
+  for (const plugin of mentions.plugins) {
+    body = removeBoundedUserMentionPhrase(body, `@${plugin}`);
+  }
+
+  const normalizedBody = body.trim().replace(/\s+/g, " ").toLowerCase();
+  const skills = [...mentions.skills].sort();
+  const plugins = [...mentions.plugins].sort();
+  return {
+    hasMentions: skills.length > 0 || plugins.length > 0,
+    text: normalizedBody,
+    key: `${normalizedBody}|skills:${skills.join(",")}|plugins:${plugins.join(",")}`,
+  };
+}
+
+function removeBoundedUserMentionPhrase(text, phrase) {
+  const normalizedPhrase = normalizeString(phrase);
+  if (!normalizedPhrase) {
+    return text;
+  }
+  const pattern = new RegExp(`(^|\\s)${escapeRegExp(normalizedPhrase)}(?=[\\s,.;:!?)\\]}>]|$)`, "gi");
+  return text.replace(pattern, (match, prefix) => prefix || "");
+}
+
+function displayNameForUserMention(name) {
+  return normalizeString(name)
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function normalizeHistoryItemType(rawType) {

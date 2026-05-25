@@ -71,6 +71,7 @@ struct TurnComposerHostView: View {
             isSkillAutocompleteVisible: viewModel.isSkillAutocompleteVisible,
             isSkillAutocompleteLoading: viewModel.isSkillAutocompleteLoading,
             skillAutocompleteQuery: viewModel.skillAutocompleteQuery,
+            skillAutocompleteTrigger: viewModel.skillAutocompleteTrigger,
             pluginAutocompleteItems: viewModel.pluginAutocompleteItems,
             isPluginAutocompleteVisible: viewModel.isPluginAutocompleteVisible,
             isPluginAutocompleteLoading: viewModel.isPluginAutocompleteLoading,

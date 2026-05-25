@@ -33,24 +33,22 @@ struct TerminalOptionsMenu: View {
             sessionSection
             connectionSection
         } label: {
+            // No fixed frame / background — the icon sits in the toolbar like
+            // a stock nav-bar button. A small status dot floats just above the
+            // glyph so we keep the running/error glance without a pill.
             RemodexIcon.image(systemName: "ellipsis")
-                .font(.system(size: 15, weight: .semibold))
+                .font(.system(size: 17, weight: .semibold))
                 .foregroundStyle(Color(hexString: theme.foreground))
-                .frame(width: 36, height: 36)
                 .overlay(alignment: .topTrailing) {
-                    // Tiny corner status badge: keeps a glanceable hint of
-                    // running/error state without restoring the wordy pill.
                     Circle()
                         .fill(Color(hexString: statusTone.tint))
-                        .frame(width: 8, height: 8)
+                        .frame(width: 7, height: 7)
                         .overlay(
                             Circle()
                                 .stroke(Color(hexString: theme.background).opacity(0.7), lineWidth: 1)
                         )
-                        .padding(5)
+                        .offset(x: 4, y: -4)
                 }
-                .adaptiveGlass(.regular, in: Circle())
-                .contentShape(Circle())
         }
         .accessibilityLabel("Terminal options")
         .accessibilityValue(statusLabel)

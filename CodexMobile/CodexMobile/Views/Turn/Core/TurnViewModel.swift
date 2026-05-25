@@ -226,6 +226,7 @@ final class TurnViewModel {
     var isSkillAutocompleteVisible = false
     var isSkillAutocompleteLoading = false
     var skillAutocompleteQuery = ""
+    var skillAutocompleteTrigger = "$"
     var pluginAutocompleteItems: [CodexPluginMetadata] = []
     var isPluginAutocompleteVisible = false
     var isPluginAutocompleteLoading = false
@@ -822,6 +823,7 @@ final class TurnViewModel {
         let normalizedRoot = normalizedAutocompleteRoot(for: thread)
         let cacheKey = autocompleteCacheKey(forRoot: normalizedRoot)
         skillAutocompleteQuery = query
+        skillAutocompleteTrigger = String(token.trigger)
         let hasCachedSkillIndex = cachedSkillSearchIndexByRoot[cacheKey] != nil
         let rootIsUnsupported = unsupportedSkillsAutocompleteRoots.contains(cacheKey)
         isSkillAutocompleteLoading = !hasCachedSkillIndex && !rootIsUnsupported
@@ -1039,7 +1041,7 @@ final class TurnViewModel {
         resetPluginAutocompleteState()
     }
 
-    // Replaces `$query` with `$skill` and stores the selected skill mention for turn/start.
+    // Replaces `$query` or `/query` with the selected skill token and stores the turn/start mention.
     func onSelectSkillAutocomplete(_ skill: CodexSkillMetadata) {
         clearComposerReviewSelectionIfNeededForNonReviewContent()
 
@@ -1089,6 +1091,14 @@ final class TurnViewModel {
         }
 
         guard let token = Self.trailingSlashCommandToken(in: text) else {
+            if case .commands = slashCommandPanelState {
+                resetSlashCommandState()
+            }
+            return
+        }
+
+        let matchingCommands = TurnComposerSlashCommand.filtered(matching: token.query)
+        guard token.query.isEmpty || !matchingCommands.isEmpty else {
             if case .commands = slashCommandPanelState {
                 resetSlashCommandState()
             }
@@ -1163,6 +1173,7 @@ final class TurnViewModel {
     func removeMentionedSkill(id: String) {
         if let mention = composerMentionedSkills.first(where: { $0.id == id }) {
             input = Self.removeBoundedToken("$\(mention.name)", from: input)
+            input = Self.removeBoundedToken("/\(mention.name)", from: input)
         }
         composerMentionedSkills.removeAll(where: { $0.id == id })
     }
@@ -1867,19 +1878,20 @@ final class TurnViewModel {
         )
     }
 
-    // Extracts only a final `$query` token at the end of composer text.
+    // Extracts only a final `$query` or `/query` token at the end of composer text.
     static func trailingSkillAutocompleteToken(in text: String) -> TurnTrailingSkillAutocompleteToken? {
-        guard let token = trailingToken(in: text, trigger: "$", allowsEmptyQuery: true) else {
+        guard let token = trailingToken(in: text, triggers: ["$", "/"], allowsEmptyQuery: true) else {
             return nil
         }
 
-        // Reject pure-numeric queries like `$100`, `$42` — not skill names.
+        // Reject pure-numeric queries like `$100`, `/42` — not skill names.
         guard token.query.isEmpty || token.query.contains(where: { $0.isLetter }) else {
             return nil
         }
 
         return TurnTrailingSkillAutocompleteToken(
             query: token.query,
+            trigger: token.trigger,
             tokenRange: token.tokenRange
         )
     }
@@ -2097,7 +2109,7 @@ final class TurnViewModel {
         }
 
         var updated = text
-        updated.replaceSubrange(token.tokenRange, with: "$\(trimmedSkill) ")
+        updated.replaceSubrange(token.tokenRange, with: "\(token.trigger)\(trimmedSkill) ")
         return updated
     }
 
@@ -2160,7 +2172,7 @@ final class TurnViewModel {
             return nil
         }
 
-        return TurnTrailingToken(query: query, tokenRange: tokenStart..<text.endIndex)
+        return TurnTrailingToken(query: query, trigger: "@", tokenRange: tokenStart..<text.endIndex)
     }
 
     // Allows flexible file aliases while keeping common Swift attributes out of file search.
@@ -2168,10 +2180,10 @@ final class TurnViewModel {
         TurnFileMentionHeuristics.isAllowedAutocompleteQuery(query)
     }
 
-    // Shared parser for final-token autocomplete triggers (`@`, `$`).
+    // Shared parser for final-token autocomplete triggers (`@`, `$`, `/`).
     private static func trailingToken(
         in text: String,
-        trigger: Character,
+        triggers: Set<Character>,
         allowsEmptyQuery: Bool = false
     ) -> TurnTrailingToken? {
         guard !text.isEmpty else {
@@ -2189,7 +2201,8 @@ final class TurnViewModel {
             return nil
         }
 
-        guard text[tokenStart] == trigger else {
+        let trigger = text[tokenStart]
+        guard triggers.contains(trigger) else {
             return nil
         }
 
@@ -2200,7 +2213,7 @@ final class TurnViewModel {
             return nil
         }
 
-        return TurnTrailingToken(query: query, tokenRange: tokenStart..<text.endIndex)
+        return TurnTrailingToken(query: query, trigger: trigger, tokenRange: tokenStart..<text.endIndex)
     }
 
     private static func appendNormalizedFileMentionAliases(
@@ -2580,6 +2593,7 @@ final class TurnViewModel {
         isSkillAutocompleteVisible = false
         isSkillAutocompleteLoading = false
         skillAutocompleteQuery = ""
+        skillAutocompleteTrigger = "$"
     }
 
     private func resetPluginAutocompleteState() {
@@ -3193,6 +3207,7 @@ struct TurnTrailingFileAutocompleteToken: Equatable {
 
 struct TurnTrailingSkillAutocompleteToken: Equatable {
     let query: String
+    let trigger: Character
     let tokenRange: Range<String.Index>
 }
 
@@ -3203,6 +3218,7 @@ struct TurnTrailingPluginAutocompleteToken: Equatable {
 
 private struct TurnTrailingToken: Equatable {
     let query: String
+    let trigger: Character
     let tokenRange: Range<String.Index>
 }
 

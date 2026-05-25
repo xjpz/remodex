@@ -177,6 +177,29 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             && visibleTailCount < min(messages.count, Self.initialVisibleTailCount)
     }
 
+    // Catches delayed tail updates without hashing the whole render window each body pass.
+    private var visibleMessagesBoundarySignature: Int {
+        let visibleSlice = visibleMessages
+        var hasher = Hasher()
+        hasher.combine(threadID)
+        hasher.combine(visibleTailCount)
+        hasher.combine(visibleSlice.count)
+        if let message = visibleSlice.first {
+            hasher.combine(message.id)
+            hasher.combine(message.orderIndex)
+        }
+        if let message = visibleSlice.last {
+            hasher.combine(message.id)
+            hasher.combine(message.role)
+            hasher.combine(message.kind)
+            hasher.combine(message.turnId)
+            hasher.combine(message.deliveryState)
+            hasher.combine(message.isStreaming)
+            hasher.combine(message.orderIndex)
+        }
+        return hasher.finalize()
+    }
+
     private var shouldShowFullTimelineLoader: Bool {
         shouldWarmRecentTailProgressively && visibleTailCount == 0
     }
@@ -353,6 +376,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                     )
                     .modifier(timelineHistoryChangeHandlers(using: proxy))
                     .modifier(timelineRenderChangeHandlers(using: proxy))
+                    .onChange(of: visibleMessagesBoundarySignature) { _, _ in
+                        handleVisibleMessagesChange(using: proxy)
+                    }
                     .safeAreaInset(edge: .bottom, spacing: 0) {
                         footer(scrollToBottomAction: {
                             handleScrollToLatestButtonTap(using: proxy)
@@ -714,8 +740,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             stoppedTurnIDs: stoppedTurnIDs,
             visibleTailCount: visibleTailCount,
             shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponse,
-            onThreadRunningChange: handleThreadRunningChange,
-            onSendInFlightChange: handleSendInFlightChange,
+            onThreadRunningChange: { handleThreadRunningChange(using: proxy) },
+            onSendInFlightChange: { handleSendInFlightChange(using: proxy) },
             onThreadIDChange: { handleThreadIDChange(using: proxy) },
             onActiveTurnIDChange: { handleActiveTurnIDChange(using: proxy) },
             onTerminalStateChange: handleTerminalStateChange,
@@ -736,6 +762,15 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         handleTimelineMutation(using: proxy)
     }
 
+    private func handleVisibleMessagesChange(using proxy: ScrollViewProxy) {
+        debugTimelineLog(
+            "visible messages changed token=\(timelineChangeToken) "
+                + "messageCount=\(messages.count) visibleTail=\(visibleTailCount)"
+        )
+        recomputeRenderItemsAndBlockInfoIfNeeded()
+        handleTimelineMutation(using: proxy)
+    }
+
     private func handleRemoteEarlierAvailabilityChange(_ newValue: Bool) {
         if !newValue {
             pendingRemoteEarlierLoadMessageCount = nil
@@ -748,14 +783,20 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         }
     }
 
-    private func handleThreadRunningChange() {
+    private func handleThreadRunningChange(using proxy: ScrollViewProxy) {
         debugTimelineLog("isThreadRunning changed value=\(isThreadRunning)")
-        recomputeBlockInfoIfNeeded()
+        // Run-state changes alter the sticky pending row and bottom inset before
+        // the first assistant item exists, so treat them like a timeline mutation.
+        recomputeRenderItemsAndBlockInfoIfNeeded()
+        handleTimelineMutation(using: proxy)
     }
 
-    private func handleSendInFlightChange() {
+    private func handleSendInFlightChange(using proxy: ScrollViewProxy) {
         debugTimelineLog("isSendInFlight changed value=\(isSendInFlight)")
-        recomputeBlockInfoIfNeeded()
+        // Sending mode is the optimistic-user-row gap between tap and turn/start.
+        // Re-run normal mutation handling so the row is measured while still pending.
+        recomputeRenderItemsAndBlockInfoIfNeeded()
+        handleTimelineMutation(using: proxy)
     }
 
     private func handleThreadIDChange(using proxy: ScrollViewProxy) {

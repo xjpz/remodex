@@ -271,18 +271,13 @@ extension CodexService {
         )
         let normalizedPreAppendedUserMessageID = normalizedInterruptIdentifier(preAppendedUserMessageID)
         let shouldAppendOnContinuation = shouldAppendUserMessage || normalizedPreAppendedUserMessageID != nil
-        let preResumeTitleSeed: String?
-        if let automaticTitleSeedOverride {
-            preResumeTitleSeed = automaticTitleSeedOverride
-        } else if shouldAppendUserMessage && normalizedPreAppendedUserMessageID == nil {
-            preResumeTitleSeed = automaticThreadTitleSeedIfNeeded(
-                userInput: outgoingDisplayText,
-                attachments: attachments,
-                threadId: initialThreadId
-            )
-        } else {
-            preResumeTitleSeed = nil
-        }
+        let preResumeTitleSeed = resolvedAutomaticThreadTitleSeed(
+            override: automaticTitleSeedOverride,
+            shouldEvaluate: shouldAppendUserMessage && normalizedPreAppendedUserMessageID == nil,
+            userInput: outgoingDisplayText,
+            attachments: attachments,
+            threadId: initialThreadId
+        )
         // Put the user's bubble in the timeline before any resume/network work so
         // sends feel instant while the runtime catches up in the background.
         let preResumePendingMessageId: String
@@ -406,7 +401,9 @@ extension CodexService {
             skillMentions: skillMentions,
             mentionMentions: mentionMentions
         )
-        let automaticTitleSeed = automaticThreadTitleSeedIfNeeded(
+        let automaticTitleSeed = resolvedAutomaticThreadTitleSeed(
+            override: nil,
+            shouldEvaluate: true,
             userInput: outgoingDisplayText,
             attachments: attachments,
             threadId: normalizedThreadID
@@ -458,6 +455,13 @@ extension CodexService {
         }
 
         let sourceMessage = sourceMessages.remove(at: sourceIndex)
+        let automaticTitleSeed = resolvedAutomaticThreadTitleSeed(
+            override: preAppendedMessage.automaticTitleSeed,
+            shouldEvaluate: true,
+            userInput: sourceMessage.text,
+            attachments: sourceMessage.attachments,
+            threadId: normalizedTargetThreadID
+        )
         let movedMessage = CodexMessage(
             id: sourceMessage.id,
             threadId: normalizedTargetThreadID,
@@ -498,7 +502,10 @@ extension CodexService {
         persistMessages()
         updateCurrentOutput(for: normalizedSourceThreadID)
         updateCurrentOutput(for: normalizedTargetThreadID)
-        return preAppendedMessage
+        return CodexPreAppendedTurnMessage(
+            messageID: messageID,
+            automaticTitleSeed: automaticTitleSeed
+        )
     }
 
     // Removes the optimistic row by id first because structured mention-only rows may not match raw composer text.
@@ -1409,13 +1416,13 @@ extension CodexService {
             skillMentions: skillMentions,
             mentionMentions: mentionMentions
         )
-        let automaticTitleSeed = automaticTitleSeedOverride ?? (shouldAppendUserMessage
-            ? automaticThreadTitleSeedIfNeeded(
-                userInput: outgoingDisplayText,
-                attachments: attachments,
-                threadId: threadId
-            )
-            : nil)
+        let automaticTitleSeed = resolvedAutomaticThreadTitleSeed(
+            override: automaticTitleSeedOverride,
+            shouldEvaluate: shouldAppendUserMessage,
+            userInput: outgoingDisplayText,
+            attachments: attachments,
+            threadId: threadId
+        )
         let pendingMessageId: String
         if let preAppendedUserMessageID,
            !preAppendedUserMessageID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -1640,6 +1647,28 @@ extension CodexService {
         } catch {
             return nil
         }
+    }
+
+    // Centralizes first-message title seeding so optimistic rows, moved draft rows,
+    // and direct turn starts all preserve the same overwrite rules.
+    private func resolvedAutomaticThreadTitleSeed(
+        override: String?,
+        shouldEvaluate: Bool,
+        userInput: String,
+        attachments: [CodexImageAttachment],
+        threadId: String
+    ) -> String? {
+        if let override {
+            return override
+        }
+        guard shouldEvaluate else {
+            return nil
+        }
+        return automaticThreadTitleSeedIfNeeded(
+            userInput: userInput,
+            attachments: attachments,
+            threadId: threadId
+        )
     }
 
     private func automaticThreadTitleSeedIfNeeded(
@@ -2013,8 +2042,8 @@ extension CodexService {
         let trimmedText = userInput.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedText.isEmpty {
             let fallbackText = legacyTextForStructuredMentions(
-                skillMentions: includeStructuredSkillItems ? [] : skillMentions,
-                mentionMentions: includeStructuredMentionItems ? [] : mentionMentions
+                skillMentions: skillMentions,
+                mentionMentions: mentionMentions
             )
             inputItems.append(
                 .object([
@@ -2024,8 +2053,8 @@ extension CodexService {
             )
         } else {
             let fallbackText = legacyTextForStructuredMentions(
-                skillMentions: includeStructuredSkillItems ? [] : skillMentions,
-                mentionMentions: includeStructuredMentionItems ? [] : mentionMentions
+                skillMentions: skillMentions,
+                mentionMentions: mentionMentions
             )
             if !fallbackText.isEmpty {
                 inputItems.append(
@@ -2084,44 +2113,76 @@ extension CodexService {
         return inputItems
     }
 
-    // Gives mention-only sends a visible local row and a text fallback for runtimes without structured items.
+    // Keeps the local bubble human-only; the turn/start payload still carries legacy text
+    // fallbacks so desktop Codex can read structured mentions.
     private func displayTextForOutgoingTurn(
         userInput: String,
         skillMentions: [CodexTurnSkillMention],
         mentionMentions: [CodexTurnMention]
     ) -> String {
         var trimmedInput = userInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        var humanTextProbe = trimmedInput
 
         for mention in skillMentions {
             let rawName = mention.name ?? mention.id
             let normalizedName = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !normalizedName.isEmpty else { continue }
-            trimmedInput = Self.removeBoundedMentionToken("$\(normalizedName)", from: trimmedInput)
+            let displayName = Self.displayNameForMentionToken(normalizedName)
+            humanTextProbe = Self.removeBoundedMentionToken("$\(normalizedName)", from: humanTextProbe)
+            humanTextProbe = Self.removeBoundedMentionToken("/\(normalizedName)", from: humanTextProbe)
+            humanTextProbe = Self.removeBoundedMentionToken(displayName, from: humanTextProbe)
+            trimmedInput = Self.replacingBoundedMentionToken("$\(normalizedName)", with: displayName, in: trimmedInput)
+            trimmedInput = Self.replacingBoundedMentionToken("/\(normalizedName)", with: displayName, in: trimmedInput)
         }
 
         for mention in mentionMentions {
             let normalizedName = mention.name.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !normalizedName.isEmpty else { continue }
+            humanTextProbe = Self.removeBoundedMentionToken("@\(normalizedName)", from: humanTextProbe)
             trimmedInput = Self.removeBoundedMentionToken("@\(normalizedName)", from: trimmedInput)
         }
 
-        trimmedInput = trimmedInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        let legacyText = legacyTextForStructuredMentions(
-            skillMentions: skillMentions,
-            mentionMentions: mentionMentions
-        )
-
-        guard !trimmedInput.isEmpty else {
-            return legacyText
+        guard !humanTextProbe.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return ""
         }
 
+        trimmedInput = trimmedInput.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmedInput
+    }
+
+    nonisolated static func displayNameForMentionToken(_ rawName: String) -> String {
+        let parts = rawName
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(omittingEmptySubsequences: true) { $0 == "-" || $0 == "_" }
+            .map { part -> String in
+                let token = String(part)
+                return token.prefix(1).uppercased() + token.dropFirst().lowercased()
+            }
+        return parts.isEmpty ? rawName : parts.joined(separator: " ")
+    }
+
+    nonisolated static func replacingBoundedMentionToken(_ token: String, with replacement: String, in text: String) -> String {
+        let escaped = NSRegularExpression.escapedPattern(for: token)
+        guard let regex = try? NSRegularExpression(
+            pattern: "(?<!\\S)" + escaped + "(?=[\\s,.;:!?)\\]}>]|$)",
+            options: [.caseInsensitive]
+        ) else {
+            return text
+        }
+
+        let range = NSRange(text.startIndex..., in: text)
+        return regex.stringByReplacingMatches(
+            in: text,
+            options: [],
+            range: range,
+            withTemplate: NSRegularExpression.escapedTemplate(for: replacement)
+        )
     }
 
     nonisolated static func removeBoundedMentionToken(_ token: String, from text: String) -> String {
         let escaped = NSRegularExpression.escapedPattern(for: token)
         guard let regex = try? NSRegularExpression(
-            pattern: escaped + "(?:[\\s,.;:!?)\\]}>]|$)",
+            pattern: "(?<!\\S)" + escaped + "(?:[\\s,.;:!?)\\]}>]|$)",
             options: [.caseInsensitive]
         ) else {
             return text
@@ -2148,13 +2209,26 @@ extension CodexService {
             .split(separator: " ")
             .map(String.init)
             .filter { token in
-                !text.localizedCaseInsensitiveContains(token)
+                !textContainsLegacyMentionToken(text, token: token)
             }
         guard !missingTokens.isEmpty else {
             return text
         }
 
         return "\(text)\n\n\(missingTokens.joined(separator: " "))"
+    }
+
+    private func textContainsLegacyMentionToken(_ text: String, token: String) -> Bool {
+        if text.localizedCaseInsensitiveContains(token) {
+            return true
+        }
+
+        if token.hasPrefix("$") {
+            let slashToken = "/" + token.dropFirst()
+            return text.localizedCaseInsensitiveContains(slashToken)
+        }
+
+        return false
     }
 
     private func legacyTextForStructuredMentions(

@@ -18,6 +18,7 @@ struct TerminalScreen: View {
     @State private var activeTerminalId = CodexService.defaultTerminalId
     @State private var bootstrappedTerminalIds = Set<String>()
     @State private var userClosedTerminalIds = Set<String>()
+    @State private var initialWorkingDirectoryByTerminalId: [String: String] = [:]
     @State private var isNativeTerminalAvailable = true
     @State private var actionErrorMessage: String?
     @State private var didApplyPreferredWorkingDirectory = false
@@ -69,11 +70,15 @@ struct TerminalScreen: View {
         codex.terminalSnapshot(for: activeTerminalId)
     }
 
+    private var routeInitialWorkingDirectory: String? {
+        let trimmed = preferredWorkingDirectory?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     private var currentWorkingDirectory: String {
         firstNonEmpty([
             activeSnapshot.cwd,
-            profileResolvedFromConnection.cwd,
-            preferredWorkingDirectory,
+            initialWorkingDirectoryByTerminalId[activeTerminalId],
         ]) ?? ""
     }
 
@@ -337,6 +342,7 @@ struct TerminalScreen: View {
         }
 
         bootstrappedTerminalIds.insert(activeTerminalId)
+        rememberRouteInitialWorkingDirectoryIfNeeded(for: activeTerminalId)
         await openTerminal()
     }
 
@@ -383,39 +389,40 @@ struct TerminalScreen: View {
         isShowingConnectionEditor = false
         userClosedTerminalIds.remove(activeTerminalId)
         bootstrappedTerminalIds.insert(activeTerminalId)
+        rememberRouteInitialWorkingDirectoryIfNeeded(for: activeTerminalId)
         await openTerminal()
     }
 
     private func openNewTerminal() async {
         let nextTerminalId = nextOpenTerminalId()
-        draftProfile.applyPreferredWorkingDirectoryOverride(currentWorkingDirectory)
         activeTerminalId = nextTerminalId
         userClosedTerminalIds.remove(nextTerminalId)
         bootstrappedTerminalIds.insert(nextTerminalId)
+        rememberRouteInitialWorkingDirectoryIfNeeded(for: nextTerminalId)
         actionErrorMessage = nil
         await openTerminal()
     }
 
     private func openTerminal() async {
-        draftProfile = profileResolvedFromConnection
-        let selectedCWD = activeSnapshot.cwd.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !selectedCWD.isEmpty {
-            draftProfile.cwd = selectedCWD
-        }
+        var connectionProfile = profileResolvedFromConnection
+        connectionProfile.cwd = ""
+        draftProfile = connectionProfile
         guard hasConnectionConfiguration else {
             isShowingConnectionEditor = true
             return
         }
 
         actionErrorMessage = nil
-        RemodexTerminalProfileStore.save(draftProfile)
+        RemodexTerminalProfileStore.save(connectionProfile)
         RemodexTerminalPrivateKeyStore.savePrivateKey(privateKeyDraft)
         RemodexTerminalPrivateKeyStore.savePassphrase(passphraseDraft)
 
+        var sessionProfile = connectionProfile
+        sessionProfile.cwd = initialWorkingDirectoryByTerminalId[activeTerminalId] ?? ""
         do {
             try await codex.openTerminal(
                 terminalId: activeTerminalId,
-                profile: draftProfile,
+                profile: sessionProfile,
                 cols: activeSnapshot.cols,
                 rows: activeSnapshot.rows
             )
@@ -457,13 +464,12 @@ struct TerminalScreen: View {
     private func applyPreferredWorkingDirectoryIfNeeded() {
         guard !didApplyPreferredWorkingDirectory else { return }
         didApplyPreferredWorkingDirectory = true
-        draftProfile.applyPreferredWorkingDirectoryOverride(preferredWorkingDirectory)
-        let trimmedCWD = draftProfile.cwd.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedCWD.isEmpty,
+        guard let trimmedCWD = routeInitialWorkingDirectory,
               activeSnapshot.status == .running,
               activeSnapshot.cwd != trimmedCWD else {
             return
         }
+        initialWorkingDirectoryByTerminalId[activeTerminalId] = trimmedCWD
         Task { @MainActor in
             do {
                 try await codex.changeTerminalWorkingDirectory(trimmedCWD, terminalId: activeTerminalId)
@@ -471,6 +477,14 @@ struct TerminalScreen: View {
                 actionErrorMessage = terminalErrorText(error)
             }
         }
+    }
+
+    private func rememberRouteInitialWorkingDirectoryIfNeeded(for terminalId: String) {
+        guard let routeInitialWorkingDirectory,
+              initialWorkingDirectoryByTerminalId[terminalId] == nil else {
+            return
+        }
+        initialWorkingDirectoryByTerminalId[terminalId] = routeInitialWorkingDirectory
     }
 
     private func handleTerminalDataInput(_ data: Data) {
@@ -570,7 +584,7 @@ struct TerminalScreen: View {
            let description = localizedError.errorDescription {
             return description
         }
-        return error.localizedDescription
+        return RemodexNativeSSHTerminalError.userFacingDescription(for: error)
     }
 
     private func firstNonEmpty(_ values: [String?]) -> String? {

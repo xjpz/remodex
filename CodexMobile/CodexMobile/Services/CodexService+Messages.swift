@@ -19,6 +19,12 @@ private enum StreamingDeltaCoalescingPolicy {
     // System rows often parse markdown/tool summaries; a slightly slower cadence keeps
     // them readable without invalidating the timeline on every transport chunk.
     static let flushDelayNanoseconds: UInt64 = 50_000_000
+    // Assistant prose gets one quick first paint, then a calmer cadence once text is visible.
+    static let assistantInitialFlushDelayNanoseconds: UInt64 = 50_000_000
+    static let assistantStreamingFlushDelayNanoseconds: UInt64 = 80_000_000
+    static let assistantLargeStreamingFlushDelayNanoseconds: UInt64 = 100_000_000
+    static let assistantLargePendingDeltaByteCount = 12_000
+    static let assistantLargeVisibleTextByteCount = 32_000
 }
 
 private enum MessageTextProcessingPolicy {
@@ -1312,17 +1318,17 @@ extension CodexService {
         threadId: String,
         turnId: String?,
         text: String,
-        fileMentions: [String] = []
+        fileMentions: [String] = [],
+        createdAt: Date? = nil
     ) {
         let trimmedText = Self.normalizedMessageText(text)
-        let normalizedIncomingText = Self.normalizedMessageText(trimmedText)
         guard Self.hasMeaningfulHistoryText(trimmedText) else {
             return
         }
 
         if let existingIndex = messagesByThread[threadId]?.lastIndex(where: { candidate in
             candidate.role == .user
-                && Self.normalizedMessageText(candidate.text) == normalizedIncomingText
+                && Self.userMessageMatchesTextForHistory(candidate, text: trimmedText)
                 && (
                     (turnId != nil && (candidate.turnId == nil || candidate.turnId == turnId))
                         || (turnId == nil && candidate.turnId == nil)
@@ -1341,6 +1347,14 @@ extension CodexService {
                 messagesByThread[threadId]?[existingIndex].fileMentions = fileMentions
                 didMutate = true
             }
+            if let createdAt,
+               CodexTimestampParser.isTrustworthyServerDate(createdAt),
+               let existingCreatedAt = messagesByThread[threadId]?[existingIndex].createdAt,
+               (!CodexTimestampParser.isTrustworthyServerDate(existingCreatedAt)
+                    || abs(existingCreatedAt.timeIntervalSince(createdAt)) > 0.5) {
+                messagesByThread[threadId]?[existingIndex].createdAt = createdAt
+                didMutate = true
+            }
             guard didMutate else {
                 return
             }
@@ -1355,6 +1369,7 @@ extension CodexService {
                 role: .user,
                 text: trimmedText,
                 fileMentions: fileMentions,
+                createdAt: createdAt ?? Date(),
                 turnId: turnId,
                 deliveryState: .confirmed
             )
@@ -4320,12 +4335,63 @@ extension CodexService {
     private func schedulePendingAssistantDeltaFlushIfNeeded() {
         guard pendingAssistantDeltaFlushTask == nil else { return }
 
+        let flushDelayNanoseconds = pendingAssistantDeltaFlushDelayNanoseconds()
         pendingAssistantDeltaFlushTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            try? await Task.sleep(nanoseconds: assistantDeltaBatchIntervalNanoseconds)
+            try? await Task.sleep(nanoseconds: flushDelayNanoseconds)
             guard !Task.isCancelled else { return }
             self.flushPendingAssistantDeltas()
         }
+    }
+
+    private func pendingAssistantDeltaFlushDelayNanoseconds() -> UInt64 {
+        var largestVisibleByteCount = 0
+        for streamID in pendingAssistantDeltaStreamOrder {
+            guard let visibleByteCount = visibleAssistantTextByteCount(forPendingAssistantStreamID: streamID) else {
+                return StreamingDeltaCoalescingPolicy.assistantInitialFlushDelayNanoseconds
+            }
+            largestVisibleByteCount = max(largestVisibleByteCount, visibleByteCount)
+        }
+
+        let pendingDeltaByteCount = pendingAssistantDeltaByStreamID.values.reduce(0) { total, delta in
+            total + delta.utf8.count
+        }
+        let isLargeStream = pendingDeltaByteCount >= StreamingDeltaCoalescingPolicy.assistantLargePendingDeltaByteCount
+            || largestVisibleByteCount >= StreamingDeltaCoalescingPolicy.assistantLargeVisibleTextByteCount
+
+        return isLargeStream
+            ? StreamingDeltaCoalescingPolicy.assistantLargeStreamingFlushDelayNanoseconds
+            : StreamingDeltaCoalescingPolicy.assistantStreamingFlushDelayNanoseconds
+    }
+
+    // Treat streams with no painted text as first-block work so sends still feel immediate.
+    private func visibleAssistantTextByteCount(forPendingAssistantStreamID streamID: String) -> Int? {
+        guard let context = pendingAssistantDeltaContextByStreamID[streamID],
+              let messageID = streamingAssistantMessageID(
+                threadId: context.threadId,
+                turnId: context.turnId,
+                itemId: context.itemId
+              ),
+              let messageIndex = findMessageIndex(threadId: context.threadId, messageId: messageID),
+              let message = messagesByThread[context.threadId]?[messageIndex],
+              hasRenderableAssistantOutputText(message.text) else {
+            return nil
+        }
+
+        return message.text.utf8.count
+    }
+
+    private func streamingAssistantMessageID(threadId: String, turnId: String, itemId: String?) -> String? {
+        if let itemId,
+           let messageID = streamingAssistantMessageByItemKey[
+            assistantStreamingMessageKey(threadId: threadId, turnId: turnId, itemId: itemId)
+           ] {
+            return messageID
+        }
+
+        return streamingAssistantFallbackMessageByTurnID[
+            streamingMessageKey(threadId: threadId, turnId: turnId)
+        ]
     }
 
     func flushPendingAssistantDeltas(
@@ -4350,26 +4416,28 @@ extension CodexService {
             }
             return true
         }
+        if !streamIDsToFlush.isEmpty {
+            let flushedStreamIDs = Set(streamIDsToFlush)
 
-        for streamID in streamIDsToFlush {
-            guard let context = pendingAssistantDeltaContextByStreamID[streamID],
-                  let delta = pendingAssistantDeltaByStreamID[streamID] else {
+            for streamID in streamIDsToFlush {
+                guard let context = pendingAssistantDeltaContextByStreamID[streamID],
+                      let delta = pendingAssistantDeltaByStreamID[streamID] else {
+                    pendingAssistantDeltaByStreamID.removeValue(forKey: streamID)
+                    pendingAssistantDeltaContextByStreamID.removeValue(forKey: streamID)
+                    continue
+                }
+
                 pendingAssistantDeltaByStreamID.removeValue(forKey: streamID)
                 pendingAssistantDeltaContextByStreamID.removeValue(forKey: streamID)
-                pendingAssistantDeltaStreamOrder.removeAll { $0 == streamID }
-                continue
+                applyAssistantDeltaBatch(
+                    threadId: context.threadId,
+                    turnId: context.turnId,
+                    itemId: context.itemId,
+                    assistantPhase: context.assistantPhase,
+                    delta: delta
+                )
             }
-
-            pendingAssistantDeltaByStreamID.removeValue(forKey: streamID)
-            pendingAssistantDeltaContextByStreamID.removeValue(forKey: streamID)
-            pendingAssistantDeltaStreamOrder.removeAll { $0 == streamID }
-            applyAssistantDeltaBatch(
-                threadId: context.threadId,
-                turnId: context.turnId,
-                itemId: context.itemId,
-                assistantPhase: context.assistantPhase,
-                delta: delta
-            )
+            pendingAssistantDeltaStreamOrder.removeAll { flushedStreamIDs.contains($0) }
         }
 
         if pendingAssistantDeltaByStreamID.isEmpty {

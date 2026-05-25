@@ -115,14 +115,6 @@ struct RemodexTerminalProfile: Codable, Equatable, Sendable {
         )
     }
 
-    mutating func applyPreferredWorkingDirectoryOverride(_ workingDirectory: String?) {
-        guard let workingDirectory = workingDirectory?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !workingDirectory.isEmpty else {
-            return
-        }
-        cwd = workingDirectory
-    }
-
     mutating func applyConnectionString(_ value: String) {
         var rawValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
         if rawValue.hasPrefix("ssh ") {

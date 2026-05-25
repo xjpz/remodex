@@ -18,7 +18,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
     let onPasteImageData: ([Data]) -> Void
 
     private let minVisibleLines: CGFloat = 1
-    private let maxVisibleLines: CGFloat = 4
+    private let maxVisibleLines: CGFloat = 5
     func makeUIView(context: Context) -> TurnComposerPasteInterceptingTextView {
         let textView = TurnComposerPasteInterceptingTextView(frame: .zero, textContainer: nil)
         textView.delegate = context.coordinator
@@ -202,10 +202,12 @@ struct TurnComposerInputTextView: UIViewRepresentable {
                 textLayoutManager.ensureLayout(for: textLayoutManager.documentRange)
             }
             let lineHeight = (textView.font ?? UIFont.preferredFont(forTextStyle: .body)).lineHeight
-            let minHeight = lineHeight * minVisibleLines
-            let maxHeight = lineHeight * maxVisibleLines
             let targetWidth = max(textView.bounds.width, textView.textContainer.size.width, 1)
             let fitSize = CGSize(width: targetWidth, height: .greatestFiniteMagnitude)
+            let viewportPadding = (textView as? TurnComposerPasteInterceptingTextView)?
+                .viewportPaddingBeyondLineHeight(targetWidth: targetWidth) ?? 0
+            let minHeight = ceil(lineHeight * minVisibleLines + viewportPadding)
+            let maxHeight = ceil(lineHeight * maxVisibleLines + viewportPadding)
             var measured = textView.sizeThatFits(fitSize).height
             let shouldScroll = measured > maxHeight + 0.5
             if textView.isScrollEnabled != shouldScroll {
@@ -260,13 +262,31 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         // Keeps the newest typed line visible once the composer switches from growing to internal scrolling.
         private func keepCaretVisible(in textView: UITextView) {
             guard textView.isScrollEnabled else { return }
-            DispatchQueue.main.async { [weak textView] in
-                guard let textView else { return }
+            DispatchQueue.main.async { [weak self, weak textView] in
+                guard let self, let textView else { return }
                 textView.layoutIfNeeded()
                 guard let selectionEnd = textView.selectedTextRange?.end else { return }
                 let caretRect = textView.caretRect(for: selectionEnd).insetBy(dx: 0, dy: -8)
                 textView.scrollRectToVisible(caretRect, animated: false)
+                self.alignVisibleTopToLineBoundary(in: textView)
             }
+        }
+
+        // Keeps the internal scroll viewport from stopping between line boxes, which clips the first visible line.
+        private func alignVisibleTopToLineBoundary(in textView: UITextView) {
+            let lineHeight = (textView.font ?? UIFont.preferredFont(forTextStyle: .body)).lineHeight
+            guard lineHeight > 0 else { return }
+
+            let adjustedInset = textView.adjustedContentInset
+            let minY = -adjustedInset.top
+            let maxY = max(minY, textView.contentSize.height - textView.bounds.height + adjustedInset.bottom)
+            let lineOrigin = minY + textView.textContainerInset.top
+            let currentY = textView.contentOffset.y
+            let snappedY = lineOrigin + ((currentY - lineOrigin) / lineHeight).rounded() * lineHeight
+            let clampedY = min(max(snappedY, minY), maxY)
+
+            guard abs(currentY - clampedY) > 0.5 else { return }
+            textView.setContentOffset(CGPoint(x: textView.contentOffset.x, y: clampedY), animated: false)
         }
 
         // Resets/clamps the text viewport after Return inserts can nudge UITextView
@@ -342,12 +362,27 @@ struct TurnComposerInputTextView: UIViewRepresentable {
     }
 }
 
+private struct ViewportPaddingSignature: Equatable {
+    let widthBucket: Int
+    let fontName: String
+    let fontPointSizeBucket: Int
+    let topInsetBucket: Int
+    let bottomInsetBucket: Int
+    let lineFragmentPaddingBucket: Int
+}
+
+private struct ViewportPaddingCacheEntry {
+    let signature: ViewportPaddingSignature
+    let value: CGFloat
+}
+
 // Internal (not fileprivate) because UIViewRepresentable protocol methods expose the type.
 // Only used by TurnComposerInputTextView in this file.
 final class TurnComposerPasteInterceptingTextView: UITextView {
     var onPasteImageData: (([Data]) -> Void)?
     var runtimeState: TurnComposerRuntimeState?
     var runtimeActions: TurnComposerRuntimeActions?
+    private var cachedViewportPadding: ViewportPaddingCacheEntry?
 
     override init(frame: CGRect, textContainer: NSTextContainer?) {
         super.init(frame: frame, textContainer: textContainer)
@@ -361,6 +396,35 @@ final class TurnComposerPasteInterceptingTextView: UITextView {
     // Without this, SwiftUI uses the full text width as the ideal size.
     override var intrinsicContentSize: CGSize {
         CGSize(width: UIView.noIntrinsicMetric, height: super.intrinsicContentSize.height)
+    }
+
+    // TextKit needs a small viewport allowance beyond raw font line height; measuring it avoids clipped final lines.
+    func viewportPaddingBeyondLineHeight(targetWidth: CGFloat) -> CGFloat {
+        let signature = ViewportPaddingSignature(
+            widthBucket: Int((targetWidth * 2).rounded()),
+            fontName: font?.fontName ?? "",
+            fontPointSizeBucket: Int(((font?.pointSize ?? 0) * 10).rounded()),
+            topInsetBucket: Int((textContainerInset.top * 2).rounded()),
+            bottomInsetBucket: Int((textContainerInset.bottom * 2).rounded()),
+            lineFragmentPaddingBucket: Int((textContainer.lineFragmentPadding * 2).rounded())
+        )
+        if let cachedViewportPadding, cachedViewportPadding.signature == signature {
+            return cachedViewportPadding.value
+        }
+
+        let measuringView = UITextView(frame: CGRect(x: 0, y: 0, width: targetWidth, height: 1))
+        measuringView.font = font
+        measuringView.textContainerInset = textContainerInset
+        measuringView.textContainer.lineFragmentPadding = textContainer.lineFragmentPadding
+        measuringView.textContainer.widthTracksTextView = true
+        measuringView.text = " "
+        let measured = measuringView.sizeThatFits(
+            CGSize(width: targetWidth, height: .greatestFiniteMagnitude)
+        ).height
+        let lineHeight = (font ?? UIFont.preferredFont(forTextStyle: .body)).lineHeight
+        let value = max(0, measured - lineHeight)
+        cachedViewportPadding = ViewportPaddingCacheEntry(signature: signature, value: value)
+        return value
     }
 
     override func layoutSubviews() {

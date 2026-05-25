@@ -58,6 +58,26 @@ struct TurnConversationContainerView: View {
         cachedMessageLayout
     }
 
+    // Detects the pending-send append that can arrive just after the timeline
+    // token observer ran, without comparing the full message array.
+    private var messageLayoutInputSignature: Int {
+        var hasher = Hasher()
+        hasher.combine(threadID)
+        hasher.combine(messages.count)
+        if let first = messages.first {
+            hasher.combine(first.id)
+            hasher.combine(first.orderIndex)
+        }
+        if let last = messages.last {
+            hasher.combine(last.id)
+            hasher.combine(last.role)
+            hasher.combine(last.kind)
+            hasher.combine(last.turnId)
+            hasher.combine(last.orderIndex)
+        }
+        return hasher.finalize()
+    }
+
     // Keeps accessory-only chats informative instead of showing a blank viewport.
     private var timelineEmptyState: AnyView {
         guard messageLayout.timelineMessages.isEmpty else {
@@ -144,6 +164,9 @@ struct TurnConversationContainerView: View {
             rebuildMessageLayoutIfNeeded()
         }
         .onChange(of: threadID) { _, _ in
+            rebuildMessageLayoutIfNeeded(force: true)
+        }
+        .onChange(of: messageLayoutInputSignature) { _, _ in
             rebuildMessageLayoutIfNeeded(force: true)
         }
         .onChange(of: cachedMessageLayout.pinnedTaskPlanMessage?.id) { _, newValue in

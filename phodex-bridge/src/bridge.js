@@ -106,6 +106,21 @@ const RELAY_TURNS_LIST_PAGINATION_RESULT_KEYS = [
   "previous_cursor",
 ];
 const jsonlArtifactItemsCacheByThread = new Map();
+const FORWARDED_REQUEST_METHODS_MAX_SIZE = 500;
+const JSONL_ROLLOUT_PATH_CACHE_MAX_SIZE = 200;
+
+function evictOldestEntries(map, maxSize) {
+  if (map.size <= maxSize) {
+    return;
+  }
+  const excess = map.size - maxSize;
+  const iterator = map.keys();
+  for (let i = 0; i < excess; i += 1) {
+    const key = iterator.next().value;
+    map.delete(key);
+  }
+}
+
 function startBridge({
   config: explicitConfig = null,
   printPairingQr = true,
@@ -404,7 +419,9 @@ function startBridge({
     }
 
     reconnectAttempt += 1;
-    const delayMs = Math.min(1_000 * reconnectAttempt, 5_000);
+    const baseDelayMs = Math.min(1_000 * reconnectAttempt, 5_000);
+    const jitterMs = Math.floor(Math.random() * Math.min(baseDelayMs, 2_000));
+    const delayMs = baseDelayMs + jitterMs;
     logConnectionStatus("connecting");
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
@@ -419,6 +436,11 @@ function startBridge({
 
     logConnectionStatus("connecting");
     const nextSocket = new WebSocket(relaySessionUrl, {
+      perMessageDeflate: {
+        zlibDeflateOptions: { level: 6 },
+        threshold: 256,
+        concurrencyLimit: 4,
+      },
       // The relay uses this per-session secret to authenticate the first push registration.
       headers: {
         "x-role": "mac",
@@ -993,16 +1015,31 @@ function startBridge({
   }
 
   function pruneExpiredForwardedRequestMethods(now = Date.now()) {
+    const expiredForwarded = [];
     for (const [requestId, trackedRequest] of forwardedRequestMethodsById.entries()) {
       if (!trackedRequest || (now - trackedRequest.createdAt) >= forwardedRequestMethodTTLms) {
-        forwardedRequestMethodsById.delete(requestId);
+        expiredForwarded.push(requestId);
       }
     }
+    for (const id of expiredForwarded) {
+      forwardedRequestMethodsById.delete(id);
+    }
+
+    const expiredSanitized = [];
     for (const [requestId, trackedRequest] of relaySanitizedResponseMethodsById.entries()) {
       if (!trackedRequest || (now - trackedRequest.createdAt) >= forwardedRequestMethodTTLms) {
-        relaySanitizedResponseMethodsById.delete(requestId);
+        expiredSanitized.push(requestId);
       }
     }
+    for (const id of expiredSanitized) {
+      relaySanitizedResponseMethodsById.delete(id);
+    }
+
+    evictOldestEntries(forwardedRequestMethodsById, FORWARDED_REQUEST_METHODS_MAX_SIZE);
+    evictOldestEntries(relaySanitizedResponseMethodsById, FORWARDED_REQUEST_METHODS_MAX_SIZE);
+    evictOldestEntries(jsonlArtifactItemsCacheByThread, RELAY_JSONL_ARTIFACT_CACHE_MAX_ENTRIES);
+    evictOldestEntries(jsonlTurnsListRolloutCacheByThread, JSONL_ROLLOUT_PATH_CACHE_MAX_SIZE);
+    evictOldestEntries(jsonlTurnsListRolloutMissCacheByThread, JSONL_ROLLOUT_PATH_CACHE_MAX_SIZE);
   }
 
   function safeParseJSON(value) {
@@ -2424,6 +2461,13 @@ function augmentRelayHistoryTurnsWithJsonlArtifacts(turns, threadId = "") {
       nextItems = nextItems === items ? [...items] : nextItems;
       nextItems.push(artifacts.fileChangeItem);
     }
+    for (const imageViewItem of artifacts.imageViewItems || []) {
+      if (hasEquivalentImageViewItem(nextItems, imageViewItem)) {
+        continue;
+      }
+      nextItems = nextItems === items ? [...items] : nextItems;
+      nextItems.push(imageViewItem);
+    }
     if (artifacts.progressPlanItem && !hasEquivalentProgressPlanItem(nextItems, artifacts.progressPlanItem)) {
       nextItems = nextItems === items ? [...items] : nextItems;
       nextItems.push(artifacts.progressPlanItem);
@@ -2527,6 +2571,7 @@ function readAndCacheJsonlArtifactItems(cacheKey, rolloutPath, threadId, stat = 
       ));
       const artifacts = {
         fileChangeItem: null,
+        imageViewItems: [],
         progressPlanItem: null,
       };
 
@@ -2551,8 +2596,14 @@ function readAndCacheJsonlArtifactItems(cacheKey, rolloutPath, threadId, stat = 
           id: normalizeNonEmptyString(progressPlan.id) || `remodex-jsonl-progress-plan-${turnId}`,
         };
       }
+      artifacts.imageViewItems = turnItems
+        .filter((item) => normalizeHistoryItemToken(item?.type) === "imageview")
+        .map((item, index) => ({
+          ...item,
+          id: normalizeNonEmptyString(item.id) || `remodex-jsonl-image-view-${turnId}-${index + 1}`,
+        }));
 
-      if (artifacts.fileChangeItem || artifacts.progressPlanItem) {
+      if (artifacts.fileChangeItem || artifacts.progressPlanItem || artifacts.imageViewItems.length > 0) {
         artifactsByTurnId.set(turnId, artifacts);
       }
     }
@@ -2626,6 +2677,29 @@ function hasEquivalentProgressPlanItem(items, incomingItem) {
     return item.remodexJsonlProgressPlan === true
       || (incomingId && normalizeNonEmptyString(item.id) === incomingId);
   });
+}
+
+function hasEquivalentImageViewItem(items, incomingItem) {
+  const incomingId = normalizeNonEmptyString(incomingItem?.id);
+  const incomingPath = normalizeImageViewPathKey(incomingItem);
+  return items.some((item) => {
+    if (normalizeHistoryItemToken(item?.type) !== "imageview") {
+      return false;
+    }
+    const itemId = normalizeNonEmptyString(item.id);
+    if (incomingId && itemId === incomingId) {
+      return true;
+    }
+    return incomingPath && normalizeImageViewPathKey(item) === incomingPath;
+  });
+}
+
+function normalizeImageViewPathKey(item) {
+  return normalizeNonEmptyString(item?.path)
+    || normalizeNonEmptyString(item?.saved_path)
+    || normalizeNonEmptyString(item?.savedPath)
+    || normalizeNonEmptyString(item?.file_path)
+    || normalizeNonEmptyString(item?.filePath);
 }
 
 function fileChangePathSet(item) {
@@ -3333,6 +3407,12 @@ function compactHistoryItemForRelay(item, maxChars) {
     type: typeof item?.type === "string" ? item.type : "relay_truncated_item",
     role: typeof item?.role === "string" ? item.role : undefined,
     itemId: typeof item?.itemId === "string" ? item.itemId : undefined,
+    turnId: typeof item?.turnId === "string" ? item.turnId : undefined,
+    turn_id: typeof item?.turn_id === "string" ? item.turn_id : undefined,
+    createdAt: relayScalarHistoryMetadata(item?.createdAt),
+    created_at: relayScalarHistoryMetadata(item?.created_at),
+    timestamp: relayScalarHistoryMetadata(item?.timestamp),
+    time: relayScalarHistoryMetadata(item?.time),
     relayPayloadTruncated: true,
   };
   const tailText = maxChars > 0 ? firstRelayTextTail(item, maxChars) : "";
@@ -3343,6 +3423,10 @@ function compactHistoryItemForRelay(item, maxChars) {
   return Object.fromEntries(
     Object.entries(compactItem).filter(([, value]) => value !== undefined)
   );
+}
+
+function relayScalarHistoryMetadata(value) {
+  return typeof value === "string" || typeof value === "number" ? value : undefined;
 }
 
 function firstRelayTextTail(value, maxChars) {

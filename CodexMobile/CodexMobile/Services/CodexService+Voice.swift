@@ -9,6 +9,7 @@ import Foundation
 struct CodexVoiceTranscriptionPreflight: Equatable, Sendable {
     static let maxDurationSeconds: TimeInterval = 120
     static let maxByteCount: Int = 10 * 1024 * 1024
+    static let requestTimeoutNanoseconds: UInt64 = 180_000_000_000
 
     let byteCount: Int
     let durationSeconds: TimeInterval
@@ -78,7 +79,9 @@ extension CodexService {
                 "audioBase64": .string(audioData.base64EncodedString()),
                 "sampleRateHz": .integer(24_000),
                 "durationMs": .integer(Int((durationSeconds * 1_000).rounded())),
-            ])
+            ]),
+            timeoutNanoseconds: CodexVoiceTranscriptionPreflight.requestTimeoutNanoseconds,
+            timeoutMessage: "Voice transcription timed out. Try a shorter clip or retry when the connection is stable."
         )
 
         guard let text = response.result?.objectValue?["text"]?.stringValue?

@@ -55,7 +55,6 @@ struct RemodexLockScreenWidgetView: View {
             .resizable()
             .renderingMode(.template)
             .scaledToFit()
-            .padding(8)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .widgetAccentable()
     }

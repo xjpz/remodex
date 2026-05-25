@@ -78,7 +78,7 @@ struct ComposerBottomBar: View {
     // MARK: - Body
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             attachmentMenu
                 .padding(.leading, 8)
             inlineAccessMenuLabel
@@ -363,7 +363,7 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
     private let metaLabelColor = Color(.secondaryLabel)
     private var metaTextFont: Font { AppFont.callout() }
     private var leadingIconFont: Font { AppFont.subheadline() }
-    private let maxInlineRuntimeLabelWidth: CGFloat = 108
+    private let maxInlineRuntimeLabelWidth: CGFloat = 130
 
     static func == (lhs: ComposerRuntimeMenuControl, rhs: ComposerRuntimeMenuControl) -> Bool {
         lhs.orderedModelOptions == rhs.orderedModelOptions
@@ -405,7 +405,7 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
                 )
             )
         }
-        .layoutPriority(-1)
+        .layoutPriority(1)
         .tint(metaLabelColor)
         .accessibilityLabel(runtimeAccessibilityLabel)
     }
@@ -420,7 +420,9 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
 
     private var effortLabelPart: String? {
         guard selectedModelID != nil else { return nil }
-        return compactReasoningTitle(runtimeState.selectedReasoningTitle)
+        let trimmed = runtimeState.selectedReasoningTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != "Select reasoning" else { return nil }
+        return trimmed
     }
 
     // Keeps inline runtime metadata short so stop + send controls do not move the composer.
@@ -448,22 +450,6 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
             return "\(selectedModelTitle), \(effort)"
         }
         return selectedModelTitle
-    }
-
-    private func compactReasoningTitle(_ title: String) -> String? {
-        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed != "Select reasoning" else {
-            return nil
-        }
-
-        switch trimmed.lowercased() {
-        case "extra high":
-            return "XH"
-        case "medium":
-            return "Med"
-        default:
-            return trimmed
-        }
     }
 
     // Identifiers pinned to the top of the model submenu; the rest are reachable
@@ -496,6 +482,7 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
         }
         .padding(.vertical, 6)
         .padding(.horizontal, 4)
+        .fixedSize(horizontal: true, vertical: false)
         .frame(maxWidth: maxInlineRuntimeLabelWidth, alignment: .leading)
         .clipped()
         .contentShape(Rectangle())

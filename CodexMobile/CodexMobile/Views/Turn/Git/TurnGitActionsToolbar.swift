@@ -66,6 +66,7 @@ struct TurnGitActionsToolbarButton: View {
     let isLoadingRepoDiff: Bool
     let onTapRepoDiff: (() -> Void)?
     let onSelect: (TurnGitActionKind) -> Void
+    var usesToolbarChrome: Bool = true
 
     private let minToolbarButtonSize: CGFloat = 28
 
@@ -133,7 +134,7 @@ struct TurnGitActionsToolbarButton: View {
         .padding(.vertical, 4)
         .frame(minWidth: minToolbarButtonSize, minHeight: minToolbarButtonSize)
         .contentShape(Circle())
-        .adaptiveToolbarItem(in: Circle())
+        .adaptiveToolbarItem(if: usesToolbarChrome, in: Circle())
         .accessibilityLabel("Git actions")
         .accessibilityValue(loadingTitle ?? syncStatusAccessibilityValue ?? "Repository status unavailable")
     }

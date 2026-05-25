@@ -79,6 +79,7 @@ enum RemodexIcon {
         "qrcode": "central-qr-code",
         "qrcode.viewfinder": "central-scan-code",
         "remodex.plan-mode": "central-planning",
+        "remodex.skill": "central-building-blocks",
         "server.rack": "central-server",
         "shift": "central-shift",
         "slider.horizontal.3": "central-settings-slider-three",
