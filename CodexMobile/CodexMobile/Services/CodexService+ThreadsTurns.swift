@@ -158,7 +158,7 @@ extension CodexService {
                     throw CodexServiceError.invalidResponse("thread/start response missing thread")
                 }
 
-                let thread = CodexThreadStartProjectBinding.applyPreferredProjectFallback(
+                let thread = CodexThreadStartProjectBinding.applyPreferredProjectBinding(
                     to: decodedThread,
                     preferredProjectPath: normalizedPreferredProjectPath
                 )
@@ -175,6 +175,13 @@ extension CodexService {
                 hydratedThreadIDs.insert(thread.id)
                 initialTurnsLoadedByThreadID.insert(thread.id)
                 upsertThread(thread, treatAsServerState: true)
+                if let normalizedPreferredProjectPath,
+                   decodedThread.normalizedProjectPath != normalizedPreferredProjectPath {
+                    beginAuthoritativeProjectPathTransition(
+                        threadId: thread.id,
+                        projectPath: normalizedPreferredProjectPath
+                    )
+                }
                 if let normalizedProjectPath = thread.normalizedProjectPath,
                    CodexThread.projectIconSystemName(for: normalizedProjectPath) == "arrow.triangle.branch" {
                     rememberAssociatedManagedWorktreePath(normalizedProjectPath, for: thread.id)
@@ -996,16 +1003,21 @@ enum CodexThreadStartProjectBinding {
         return params
     }
 
-    // Preserves project grouping even when older servers omit cwd in thread/start result.
-    static func applyPreferredProjectFallback(to thread: CodexThread, preferredProjectPath: String?) -> CodexThread {
-        guard thread.normalizedProjectPath == nil,
-              let preferredProjectPath else {
+    // Treats the requested cwd as authoritative for newly-created chats so a
+    // stale app-server process cwd cannot leak into sidebar project grouping.
+    static func applyPreferredProjectBinding(to thread: CodexThread, preferredProjectPath: String?) -> CodexThread {
+        guard let preferredProjectPath,
+              thread.normalizedProjectPath != preferredProjectPath else {
             return thread
         }
 
         var patchedThread = thread
         patchedThread.cwd = preferredProjectPath
         return patchedThread
+    }
+
+    static func applyPreferredProjectFallback(to thread: CodexThread, preferredProjectPath: String?) -> CodexThread {
+        applyPreferredProjectBinding(to: thread, preferredProjectPath: preferredProjectPath)
     }
 }
 

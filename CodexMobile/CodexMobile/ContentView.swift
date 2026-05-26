@@ -260,7 +260,7 @@ struct ContentView: View {
                     manualPairingCode = ""
                 }
             } message: {
-                Text("Paste the pairing code shown in the terminal on your device or in your phone shell.")
+                Text("Paste the pairing code shown in the terminal on your Mac.")
             }
             // Settings rides on a full-screen cover instead of `navigationPath`
             // so the gear tap inside the iOS 26 `safeAreaBar` header always
@@ -1807,7 +1807,19 @@ struct ContentView: View {
             await viewModel.stopAutoReconnectForManualScan(codex: codex)
 
             do {
-                let pairingPayload = try await codex.resolvePairingCode(pendingCode)
+                let pairingPayload: CodexPairingQRPayload
+                switch validatePairingQRCode(pendingCode) {
+                case .success(let payload):
+                    pairingPayload = payload
+                case .shortCode(let code):
+                    pairingPayload = try await codex.resolvePairingCode(code)
+                case .scanError(let message):
+                    throw CodexSecureTransportError.invalidQR(message)
+                case .bridgeUpdateRequired(let prompt):
+                    codex.bridgeUpdatePrompt = prompt
+                    return
+                }
+
                 isShowingManualPairingEntry = false
                 manualPairingCode = ""
                 withAnimation {

@@ -8,9 +8,7 @@ import SwiftUI
 
 struct SettingsConnectionCard: View {
     @Environment(CodexService.self) private var codex
-    @State private var isShowingComputerNameSheet = false
-
-    private let settingsAccentColor = Color.primary
+    let onEditComputerName: () -> Void
 
     var body: some View {
         SettingsCard(title: "Connection") {
@@ -18,9 +16,7 @@ struct SettingsConnectionCard: View {
                 SettingsTrustedComputerCard(
                     presentation: trustedPairPresentation,
                     connectionStatusLabel: connectionStatusLabel,
-                    onEditName: {
-                        isShowingComputerNameSheet = true
-                    }
+                    onEditName: onEditComputerName
                 )
             } else {
                 Text("No paired device")
@@ -52,7 +48,7 @@ struct SettingsConnectionCard: View {
 
             if codex.supportsKeepAwakeWhileBridgeRuns {
                 Toggle("Keep device reachable", isOn: keepMacAwakeWhileBridgeRunsBinding)
-                    .tint(settingsAccentColor)
+                    .tint(settingsToggleTintColor)
 
                     Text(codex.keepMacAwakeWhileBridgeRuns
                      ? "Uses the host device's keep-awake support while the bridge is running so the device stays reachable even if the display turns off. Best while charging."
@@ -77,15 +73,6 @@ struct SettingsConnectionCard: View {
                     HapticFeedback.shared.triggerImpactFeedback()
                     codex.forgetTrustedMac()
                 }
-            }
-        }
-        .sheet(isPresented: $isShowingComputerNameSheet) {
-            if let trustedPairPresentation = codex.trustedPairPresentation {
-                SettingsComputerNameSheet(
-                    nickname: sidebarComputerNicknameBinding(for: trustedPairPresentation),
-                    currentName: trustedPairPresentation.name,
-                    systemName: trustedPairPresentation.systemName ?? trustedPairPresentation.name
-                )
             }
         }
     }
@@ -148,11 +135,4 @@ struct SettingsConnectionCard: View {
         }
     }
 
-    // Writes nicknames against the active trusted computer so switching pairs does not reuse the wrong alias.
-    private func sidebarComputerNicknameBinding(for presentation: CodexTrustedPairPresentation) -> Binding<String> {
-        Binding(
-            get: { SidebarComputerNicknameStore.nickname(for: presentation.deviceId) },
-            set: { SidebarComputerNicknameStore.setNickname($0, for: presentation.deviceId) }
-        )
-    }
 }

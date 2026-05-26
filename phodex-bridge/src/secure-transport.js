@@ -39,6 +39,7 @@ function createBridgeSecureTransport({
   deviceState,
   displayName = "",
   onTrustedPhoneUpdate = null,
+  onSecureSessionReady = null,
   persistTrustedPhone = true,
 }) {
   let currentDeviceState = deviceState;
@@ -382,7 +383,13 @@ function createBridgeSecureTransport({
       activeSession.firstOutboundSeq = nextBridgeOutboundSeq;
     }
 
+    const completedHandshakeMode = pendingHandshake.handshakeMode;
     pendingHandshake = null;
+    onSecureSessionReady?.({
+      phoneDeviceId: activeSession.phoneDeviceId,
+      handshakeMode: completedHandshakeMode,
+      keyEpoch: activeSession.keyEpoch,
+    });
     sendControlMessage({
       kind: "secureReady",
       sessionId,

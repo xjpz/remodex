@@ -6,6 +6,9 @@
 
 import SwiftUI
 
+// Keep native switch rails distinct from primary text tint in dark mode.
+let settingsToggleTintColor = Color.green
+
 // Renders a native grouped List section. Each child of `content` becomes
 // its own List row, so callers should provide top-level rows directly
 // (HStack, Toggle, Picker, Text, Button, NavigationLink, ...). Avoid

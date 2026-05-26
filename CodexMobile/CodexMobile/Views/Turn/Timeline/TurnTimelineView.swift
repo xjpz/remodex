@@ -261,6 +261,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             timelineChangeToken: timelineChangeToken,
             visibleTailCount: visibleTailCount,
             messages: messages,
+            activeTurnID: activeTurnID,
+            isThreadRunning: isThreadRunning,
             completedTurnIDs: completedTurnIDs
         )
     }
@@ -435,7 +437,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             if signature != nextState.renderItemsSignature {
                 nextState.visibleRenderItems = TurnTimelineRenderProjection.project(
                     messages: visible,
-                    completedTurnIDs: completedTurnIDs
+                    completedTurnIDs: completedTurnIDs,
+                    activeTurnID: activeTurnID,
+                    isThreadRunning: isThreadRunning
                 )
                 nextState.renderItemsSignature = signature
                 didChange = true

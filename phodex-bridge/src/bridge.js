@@ -5,7 +5,7 @@
 // Depends on: ws, crypto, os, ./bridge-status, ./codex-desktop-refresher, ./codex-transport, ./rollout-watch, ./voice-handler
 
 const WebSocket = require("ws");
-const { randomBytes } = require("crypto");
+const { createHash, randomBytes } = require("crypto");
 const { execFile, spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
@@ -46,6 +46,7 @@ const { createPushNotificationTracker } = require("./push-notification-tracker")
 const { resolveCodexGeneratedImagesRoot } = require("./codex-home");
 const {
   loadOrCreateBridgeDeviceState,
+  rememberLastSeenClientDeviceKind,
   rememberLastSeenPhoneAppVersion,
   resolveBridgeRelaySession,
 } = require("./secure-device-state");
@@ -213,6 +214,7 @@ function startBridge({
     requestId: null,
     startedAt: 0,
   };
+  let activePhoneSummary = null;
   const secureTransport = createBridgeSecureTransport({
     sessionId,
     relayUrl: relayBaseUrl,
@@ -221,6 +223,13 @@ function startBridge({
     onTrustedPhoneUpdate(nextDeviceState) {
       deviceState = nextDeviceState;
       sendRelayRegistrationUpdate(nextDeviceState);
+    },
+    onSecureSessionReady(session) {
+      activePhoneSummary = buildActivePhoneSummary(session, deviceState);
+      const lastPublishedBridgeStatus = bridgeStatusPublisher.latest();
+      if (lastPublishedBridgeStatus) {
+        publishBridgeStatus(lastPublishedBridgeStatus);
+      }
     },
   });
   // Keeps one stable sender identity across reconnects so buffered replay state
@@ -393,6 +402,9 @@ function startBridge({
     }
 
     lastConnectionStatus = status;
+    if (status !== "connected") {
+      activePhoneSummary = null;
+    }
     publishBridgeStatus({
       state: "running",
       connectionStatus: status,
@@ -1176,6 +1188,20 @@ function startBridge({
   function bridgeManagedInitializeCompatibilityError(params) {
     const clientInfo = params && typeof params === "object" ? params.clientInfo : null;
     const clientName = normalizeNonEmptyString(clientInfo?.name);
+    const clientDeviceKind = classifyClientDeviceKind(clientName);
+    if (clientDeviceKind) {
+      deviceState = rememberLastSeenClientDeviceKind(deviceState, clientDeviceKind);
+      if (activePhoneSummary?.connected) {
+        activePhoneSummary = {
+          ...activePhoneSummary,
+          deviceKind: clientDeviceKind,
+        };
+        const lastPublishedBridgeStatus = bridgeStatusPublisher.latest();
+        if (lastPublishedBridgeStatus) {
+          publishBridgeStatus(lastPublishedBridgeStatus);
+        }
+      }
+    }
     if (clientName !== "codexmobile_ios") {
       return null;
     }
@@ -1344,7 +1370,11 @@ function startBridge({
   }
 
   function publishBridgeStatus(status) {
-    bridgeStatusPublisher.publish(status);
+    bridgeStatusPublisher.publish({
+      ...status,
+      activeDevice: activePhoneSummary,
+      activePhone: activePhoneSummary,
+    });
   }
 
   // Refreshes the relay's trusted-mac index after the QR bootstrap locks in a phone identity.
@@ -1571,6 +1601,47 @@ function buildMacRegistration(deviceState, pairingSession) {
       ? pairingSession.pairingPayload.expiresAt
       : 0,
   };
+}
+
+function buildActivePhoneSummary(session, deviceState = null) {
+  const phoneFingerprint = shortFingerprint(session?.phoneDeviceId);
+  if (!phoneFingerprint) {
+    return null;
+  }
+
+  return {
+    connected: true,
+    phoneFingerprint,
+    deviceKind: normalizeNonEmptyString(deviceState?.lastSeenDeviceKind) || null,
+    handshakeMode: normalizeNonEmptyString(session?.handshakeMode) || null,
+    keyEpoch: Number.isFinite(session?.keyEpoch) ? session.keyEpoch : null,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function classifyClientDeviceKind(clientName) {
+  const normalized = normalizeNonEmptyString(clientName).toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (normalized.includes("android")) {
+    return "android";
+  }
+  if (normalized.includes("ios") || normalized.includes("iphone")) {
+    return "iphone";
+  }
+  if (normalized.includes("macos") || normalized.includes("mac")) {
+    return "mac";
+  }
+  return null;
+}
+
+function shortFingerprint(value) {
+  const normalized = normalizeNonEmptyString(value);
+  if (!normalized) {
+    return null;
+  }
+  return createHash("sha256").update(normalized).digest("hex").slice(0, 8);
 }
 
 function shutdown(codex, getSocket, beforeExit = () => {}) {
