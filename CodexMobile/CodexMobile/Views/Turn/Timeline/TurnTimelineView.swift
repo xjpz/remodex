@@ -12,6 +12,7 @@ private struct TurnTimelineRenderCacheState: Equatable {
     var blockInfoByMessageID: [String: AssistantBlockAccessoryState] = [:]
     var newestStreamingMessageID: String?
     var renderItemsSignature: TurnTimelineRenderItemsCacheSignature?
+    var renderItemsShapeSignature: Int?
     var visibleRenderItems: [TurnTimelineRenderItem] = []
     var blockInfoInputKey: Int?
 }
@@ -120,9 +121,47 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         return messages[startIndex...]
     }
 
-    // Never project inside `body`; stale cache is refreshed by lifecycle handlers.
+    // Renders appended/removed rows immediately if SwiftUI reaches body before the
+    // lifecycle cache refresh. Assistant text-only deltas still use the cached rows.
     private var visibleRenderItems: [TurnTimelineRenderItem] {
-        renderCacheState.visibleRenderItems
+        let visibleSlice = visibleMessages
+        guard renderItemsShapeSignature(for: visibleSlice) != renderCacheState.renderItemsShapeSignature else {
+            return renderCacheState.visibleRenderItems
+        }
+
+        return TurnTimelineRenderProjection.project(
+            messages: Array(visibleSlice),
+            completedTurnIDs: completedTurnIDs,
+            activeTurnID: activeTurnID,
+            isThreadRunning: isThreadRunning
+        )
+    }
+
+    private func renderItemsShapeSignature(for messages: ArraySlice<CodexMessage>) -> Int {
+        var hasher = Hasher()
+        hasher.combine(threadID)
+        hasher.combine(visibleTailCount)
+        hasher.combine(messages.count)
+        hasher.combine(activeTurnID)
+        hasher.combine(isThreadRunning)
+        hasher.combine(completedTurnIDs)
+
+        if let message = messages.first {
+            hasher.combine(message.id)
+            hasher.combine(message.orderIndex)
+        }
+
+        if let message = messages.last {
+            hasher.combine(message.id)
+            hasher.combine(message.role)
+            hasher.combine(message.kind)
+            hasher.combine(message.turnId)
+            hasher.combine(message.deliveryState)
+            hasher.combine(message.isStreaming)
+            hasher.combine(message.orderIndex)
+        }
+
+        return hasher.finalize()
     }
 
     private var hasEarlierMessages: Bool {
@@ -429,6 +468,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         let visible = Array(visibleSlice)
         var nextState = renderCacheState
         var didChange = false
+        let shapeSignature = renderItemsShapeSignature(for: visibleSlice)
 
         // Block-info placement depends on collapsed render items, so keep the
         // projection fresh before deriving accessory state.
@@ -442,6 +482,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                     isThreadRunning: isThreadRunning
                 )
                 nextState.renderItemsSignature = signature
+                nextState.renderItemsShapeSignature = shapeSignature
                 didChange = true
             }
         }
@@ -1330,8 +1371,29 @@ private struct TurnTimelineScrollObserverModifier: ViewModifier {
     }
 }
 
+// Coalesces high-frequency observer callbacks without mutating SwiftUI state from onChange.
+private final class MainQueueUpdateCoalescer {
+    private var isScheduled = false
+    private var pendingAction: (() -> Void)?
+
+    func schedule(_ action: @escaping () -> Void) {
+        pendingAction = action
+        guard !isScheduled else { return }
+        isScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let action = pendingAction
+            pendingAction = nil
+            isScheduled = false
+            action?()
+        }
+    }
+}
+
 // Groups history/loading observers separately from rendering to avoid one huge ViewBuilder expression.
 private struct TurnTimelineHistoryChangeHandlersModifier: ViewModifier {
+    @State private var timelineChangeCoalescer = MainQueueUpdateCoalescer()
+
     let timelineChangeToken: Int
     let messageCount: Int
     let isLoadingRemoteEarlierMessages: Bool
@@ -1349,25 +1411,37 @@ private struct TurnTimelineHistoryChangeHandlersModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
             .onChange(of: timelineChangeToken) { _, _ in
-                onTimelineChange()
+                timelineChangeCoalescer.schedule(onTimelineChange)
             }
             .onChange(of: messageCount) { oldCount, newCount in
-                onMessageCountChange(oldCount, newCount)
+                performAfterSwiftUIUpdate {
+                    onMessageCountChange(oldCount, newCount)
+                }
             }
             .onChange(of: isLoadingRemoteEarlierMessages) { _, newValue in
-                onRemoteEarlierLoadingChange(newValue)
+                performAfterSwiftUIUpdate {
+                    onRemoteEarlierLoadingChange(newValue)
+                }
             }
             .onChange(of: initialTurnsLoaded) { _, didLoad in
                 if didLoad {
-                    onInitialHistoryLoaded()
+                    performAfterSwiftUIUpdate(onInitialHistoryLoaded)
                 }
             }
             .onChange(of: hasRemoteEarlierMessages) { _, newValue in
-                onRemoteEarlierAvailabilityChange(newValue)
+                performAfterSwiftUIUpdate {
+                    onRemoteEarlierAvailabilityChange(newValue)
+                }
             }
             .onChange(of: olderHistoryLoadErrorMessage) { _, newValue in
-                onOlderHistoryErrorChange(newValue)
+                performAfterSwiftUIUpdate {
+                    onOlderHistoryErrorChange(newValue)
+                }
             }
+    }
+
+    private func performAfterSwiftUIUpdate(_ action: @escaping () -> Void) {
+        DispatchQueue.main.async(execute: action)
     }
 }
 
@@ -1396,31 +1470,37 @@ private struct TurnTimelineRenderChangeHandlersModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
             .onChange(of: isThreadRunning) { _, _ in
-                onThreadRunningChange()
+                performAfterSwiftUIUpdate(onThreadRunningChange)
             }
             .onChange(of: isSendInFlight) { _, _ in
-                onSendInFlightChange()
+                performAfterSwiftUIUpdate(onSendInFlightChange)
             }
             .onChange(of: threadID) { _, _ in
-                onThreadIDChange()
+                performAfterSwiftUIUpdate(onThreadIDChange)
             }
             .onChange(of: activeTurnID) { _, _ in
-                onActiveTurnIDChange()
+                performAfterSwiftUIUpdate(onActiveTurnIDChange)
             }
             .onChange(of: latestTurnTerminalState) { _, _ in
-                onTerminalStateChange()
+                performAfterSwiftUIUpdate(onTerminalStateChange)
             }
             .onChange(of: completedTurnIDs) { _, _ in
-                onCompletedTurnIDsChange()
+                performAfterSwiftUIUpdate(onCompletedTurnIDsChange)
             }
             .onChange(of: stoppedTurnIDs) { _, _ in
-                onStoppedTurnIDsChange()
+                performAfterSwiftUIUpdate(onStoppedTurnIDsChange)
             }
             .onChange(of: visibleTailCount) { _, _ in
-                onVisibleTailCountChange()
+                performAfterSwiftUIUpdate(onVisibleTailCountChange)
             }
             .onChange(of: shouldAnchorToAssistantResponse) { _, newValue in
-                onAssistantAnchorChange(newValue)
+                performAfterSwiftUIUpdate {
+                    onAssistantAnchorChange(newValue)
+                }
             }
+    }
+
+    private func performAfterSwiftUIUpdate(_ action: @escaping () -> Void) {
+        DispatchQueue.main.async(execute: action)
     }
 }

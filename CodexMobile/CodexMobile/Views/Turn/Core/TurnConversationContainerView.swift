@@ -49,37 +49,9 @@ struct TurnConversationContainerView: View {
     let onTapOutsideComposer: () -> Void
 
     @State private var isShowingPinnedPlanSheet = false
-    @State private var cachedMessageLayout = TimelineMessageLayout.empty
-    @State private var lastMessageLayoutThreadID: String?
-    @State private var lastMessageLayoutToken: Int = -1
-
-    // Body reads only cached layout; `rebuildMessageLayoutIfNeeded` commits updates off-thread.
-    private var messageLayout: TimelineMessageLayout {
-        cachedMessageLayout
-    }
-
-    // Detects the pending-send append that can arrive just after the timeline
-    // token observer ran, without comparing the full message array.
-    private var messageLayoutInputSignature: Int {
-        var hasher = Hasher()
-        hasher.combine(threadID)
-        hasher.combine(messages.count)
-        if let first = messages.first {
-            hasher.combine(first.id)
-            hasher.combine(first.orderIndex)
-        }
-        if let last = messages.last {
-            hasher.combine(last.id)
-            hasher.combine(last.role)
-            hasher.combine(last.kind)
-            hasher.combine(last.turnId)
-            hasher.combine(last.orderIndex)
-        }
-        return hasher.finalize()
-    }
 
     // Keeps accessory-only chats informative instead of showing a blank viewport.
-    private var timelineEmptyState: AnyView {
+    private func timelineEmptyState(for messageLayout: TimelineMessageLayout) -> AnyView {
         guard messageLayout.timelineMessages.isEmpty else {
             return emptyState
         }
@@ -107,6 +79,13 @@ struct TurnConversationContainerView: View {
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
     var body: some View {
+        // Keep this split synchronous with `messages`: cached layout refreshes can
+        // be starved by rapid assistant streaming and hide a just-sent user row.
+        let messageLayout = Self.buildMessageLayout(
+            from: messages,
+            planSessionSource: planSessionSource
+        )
+
         ZStack(alignment: .top) {
             TurnTimelineView(
                 threadID: threadID,
@@ -145,9 +124,9 @@ struct TurnConversationContainerView: View {
                 onRetryEarlierMessages: onRetryEarlierMessages,
                 onTapOutsideComposer: onTapOutsideComposer
             ) {
-                timelineEmptyState
+                timelineEmptyState(for: messageLayout)
             } composer: {
-                composerWithPinnedPlanAccessory
+                composerWithPinnedPlanAccessory(for: messageLayout)
             }
 
             VStack(spacing: 0) {
@@ -157,19 +136,7 @@ struct TurnConversationContainerView: View {
                 }
             }
         }
-        .onAppear {
-            rebuildMessageLayoutIfNeeded(force: true)
-        }
-        .task(id: timelineChangeToken) {
-            rebuildMessageLayoutIfNeeded()
-        }
-        .onChange(of: threadID) { _, _ in
-            rebuildMessageLayoutIfNeeded(force: true)
-        }
-        .onChange(of: messageLayoutInputSignature) { _, _ in
-            rebuildMessageLayoutIfNeeded(force: true)
-        }
-        .onChange(of: cachedMessageLayout.pinnedTaskPlanMessage?.id) { _, newValue in
+        .onChange(of: messageLayout.pinnedTaskPlanMessage?.id) { _, newValue in
             if newValue == nil {
                 isShowingPinnedPlanSheet = false
             }
@@ -182,7 +149,7 @@ struct TurnConversationContainerView: View {
     }
 
     // Keeps the active plan discoverable without covering the message timeline.
-    private var composerWithPinnedPlanAccessory: some View {
+    private func composerWithPinnedPlanAccessory(for messageLayout: TimelineMessageLayout) -> some View {
         VStack(spacing: 8) {
             if let pinnedTaskPlanMessage = messageLayout.pinnedTaskPlanMessage {
                 PlanExecutionAccessory(message: pinnedTaskPlanMessage) {
@@ -208,22 +175,6 @@ struct TurnConversationContainerView: View {
         }
         .animation(.easeInOut(duration: 0.18), value: messageLayout.pinnedTaskPlanMessage?.id)
         .animation(.easeInOut(duration: 0.18), value: messageLayout.activeStructuredPromptMessage?.id)
-    }
-
-    // Rebuilds the plan/timeline split only when the thread or timeline token really changed.
-    private func rebuildMessageLayoutIfNeeded(force: Bool = false) {
-        guard force
-                || lastMessageLayoutThreadID != threadID
-                || lastMessageLayoutToken != timelineChangeToken else {
-            return
-        }
-
-        lastMessageLayoutThreadID = threadID
-        lastMessageLayoutToken = timelineChangeToken
-        cachedMessageLayout = Self.buildMessageLayout(
-            from: messages,
-            planSessionSource: planSessionSource
-        )
     }
 
     // Separates pinned plan content from renderable timeline rows in one pass.

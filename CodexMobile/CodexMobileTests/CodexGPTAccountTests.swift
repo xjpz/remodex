@@ -599,14 +599,14 @@ final class CodexGPTAccountTests: XCTestCase {
         }
     }
 
-    func testVoiceTranscriptionPreflightRejectsClipsLongerThanTwoMinutes() {
+    func testVoiceTranscriptionPreflightRejectsClipsLongerThan150Seconds() {
         let preflight = CodexVoiceTranscriptionPreflight(
             byteCount: 2_048,
-            durationSeconds: 120.5
+            durationSeconds: 150.5
         )
 
         XCTAssertThrowsError(try preflight.validate()) { error in
-            XCTAssertEqual(error.localizedDescription, "Voice clips must be 120 seconds or less.")
+            XCTAssertEqual(error.localizedDescription, "Voice clips must be 150 seconds or less.")
         }
     }
 

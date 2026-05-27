@@ -37,8 +37,8 @@ struct TurnComposerCollapsibleContextCluster: View {
 
     private let branchLabelColor = Color(.secondaryLabel)
     private var branchTextFont: Font { AppFont.subheadline() }
-    private let toggleControlSize: CGFloat = 30
-    private let toggleChevronSize: CGFloat = 12
+    private let toggleControlSize: CGFloat = 34
+    private let toggleChevronSize: CGFloat = 14
 
     private var runtimeLabelTitle: String {
         if !hasWorkingDirectory {
@@ -94,7 +94,15 @@ struct TurnComposerCollapsibleContextCluster: View {
     private var expandToggleButton: some View {
         Button {
             HapticFeedback.shared.triggerImpactFeedback(style: .light)
-            withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+            // Use a tighter, fully damped spring on collapse so the pills
+            // shrink back into the chevron crisply (no overshoot, no bounce
+            // back through the chevron). Expansion keeps the slightly
+            // springy feel that makes the chips "pop" out.
+            let collapsing = isExpanded
+            let animation: Animation = collapsing
+                ? .spring(response: 0.26, dampingFraction: 1.0)
+                : .spring(response: 0.34, dampingFraction: 0.86)
+            withAnimation(animation) {
                 isExpanded.toggle()
             }
         } label: {
@@ -168,16 +176,18 @@ struct TurnComposerCollapsibleContextCluster: View {
     }
 }
 
-// Scale-from-leading makes the pills appear to grow out of the chevron, while
-// removal fades in place to avoid the row visually sliding across the composer.
-// Because the pills are conditionally rendered, the Menu hosting view is
-// destroyed between states, so the earlier scaleEffect glitch cannot re-appear.
+// Scale-from-leading + opacity is applied symmetrically so the pills row
+// shrinks back into the chevron as a single unit when collapsing. An
+// opacity-only removal looked clean for the row itself but let the inner
+// HStack squeeze its two pills together while the parent reflowed, so the
+// runtime and branch chips visibly overlapped mid-animation. Scaling the
+// whole row uniformly keeps the chips' relative geometry intact while they
+// collapse toward the chevron's edge. A small non-zero target scale (0.01)
+// avoids the degenerate scale=0 frame that previously made the spring's
+// midpoint look like the row was sliding across the composer.
 private extension AnyTransition {
     static var contextClusterReveal: AnyTransition {
-        .asymmetric(
-            insertion: .scale(scale: 0, anchor: .leading).combined(with: .opacity),
-            removal: .opacity
-        )
+        .scale(scale: 0.01, anchor: .leading).combined(with: .opacity)
     }
 }
 

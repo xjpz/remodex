@@ -106,18 +106,25 @@ struct NewChatDraftView: View {
                 }
             }
 
+            // Match the real thread toolbar so the Git/menu controls stay in one visual group
+            // before and after the first message creates the runtime thread.
             if hasSelectedProject {
-                ToolbarItem(placement: .topBarTrailing) {
-                    draftGitActionsButton
-                }
-
                 if #available(iOS 26.0, *) {
-                    ToolbarSpacer(.fixed, placement: .topBarTrailing)
+                    ToolbarItem(placement: .topBarTrailing) {
+                        draftGitActionsButton
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        draftThreadActionsMenu
+                    }
+                } else {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        draftToolbarActionCluster
+                    }
                 }
-            }
-
-            ToolbarItem(placement: .topBarTrailing) {
-                draftThreadActionsMenu
+            } else {
+                ToolbarItem(placement: .topBarTrailing) {
+                    draftThreadActionsMenu
+                }
             }
         }
         .task {
@@ -342,16 +349,39 @@ struct NewChatDraftView: View {
         TurnThreadActionsMenuButton(
             isLoading: false,
             isEnabled: !areDraftToolbarActionsDisabled,
-            actions: [
-                TurnThreadActionMenuItem(
-                    title: "Open Terminal Here",
-                    icon: .system("terminal"),
-                    isEnabled: !areDraftToolbarActionsDisabled && onOpenTerminal != nil
-                ) {
-                    onOpenTerminal?(selectedProjectPath)
-                },
-            ]
+            actions: draftThreadActions
         )
+    }
+
+    private var draftToolbarActionCluster: some View {
+        TurnToolbarActionCluster(
+            isEnabled: isDraftGitActionEnabled,
+            disabledActions: areDraftToolbarActionsDisabled ? Set(TurnGitActionKind.allCases) : viewModel.disabledGitActions,
+            isRunningAction: viewModel.isRunningGitAction,
+            loadingTitle: nil,
+            showsDiscardRuntimeChangesAndSync: viewModel.shouldShowDiscardRuntimeChangesAndSync,
+            gitSyncState: viewModel.gitSyncState,
+            repoDiffTotals: viewModel.gitRepoSync?.repoDiffTotals,
+            isLoadingRepoDiff: isLoadingRepositoryDiff,
+            onTapRepoDiff: areDraftToolbarActionsDisabled ? nil : {
+                presentRepositoryDiff()
+            },
+            onGitAction: handleDraftGitActionSelection,
+            isThreadActionLoading: false,
+            threadActions: draftThreadActions
+        )
+    }
+
+    private var draftThreadActions: [TurnThreadActionMenuItem] {
+        [
+            TurnThreadActionMenuItem(
+                title: "Open Terminal Here",
+                icon: .system("terminal"),
+                isEnabled: !areDraftToolbarActionsDisabled && onOpenTerminal != nil
+            ) {
+                onOpenTerminal?(selectedProjectPath)
+            },
+        ]
     }
 
     private var areDraftToolbarActionsDisabled: Bool {
@@ -560,9 +590,15 @@ struct NewChatDraftView: View {
     private var composer: some View {
         VStack(spacing: 8) {
             if let voiceRecoveryPresentation {
-                ConnectionRecoveryCard(snapshot: voiceRecoveryPresentation.snapshot) {
-                    handleVoiceRecoveryAction(voiceRecoveryPresentation.action)
-                }
+                ConnectionRecoveryCard(
+                    snapshot: voiceRecoveryPresentation.snapshot,
+                    onTap: {
+                        handleVoiceRecoveryAction(voiceRecoveryPresentation.action)
+                    },
+                    onDismiss: {
+                        voiceInput.clearRecovery()
+                    }
+                )
                 .padding(.horizontal, 12)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }

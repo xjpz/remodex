@@ -338,6 +338,7 @@ enum TurnTimelineRenderProjection {
         var preferredFinalIndexByTurn: [String: Int] = [:]
         var phasedFinalIndexByTurn: [String: Int] = [:]
         var fallbackFinalIndexByTurn: [String: Int] = [:]
+        var turnsWithExplicitAssistantPhase = Set<String>()
 
         for index in messages.indices {
             let message = messages[index]
@@ -350,6 +351,9 @@ enum TurnTimelineRenderProjection {
             }
 
             fallbackFinalIndexByTurn[turnID] = index
+            if message.assistantPhase != nil {
+                turnsWithExplicitAssistantPhase.insert(turnID)
+            }
             if isFinalAnswerAssistantPhase(message.assistantPhase) {
                 phasedFinalIndexByTurn[turnID] = index
             }
@@ -358,9 +362,19 @@ enum TurnTimelineRenderProjection {
             }
         }
 
-        return phasedFinalIndexByTurn
-            .merging(preferredFinalIndexByTurn) { phased, _ in phased }
-            .merging(fallbackFinalIndexByTurn) { preferred, _ in preferred }
+        var resolved = phasedFinalIndexByTurn
+        for (turnID, index) in preferredFinalIndexByTurn where resolved[turnID] == nil {
+            // If the stream carries explicit assistant phases, only a final_answer
+            // phase is allowed to own the previous-message disclosure. Commentary
+            // updates are live progress, not a final answer to collapse around.
+            guard !turnsWithExplicitAssistantPhase.contains(turnID) else { continue }
+            resolved[turnID] = index
+        }
+        for (turnID, index) in fallbackFinalIndexByTurn where resolved[turnID] == nil {
+            guard !turnsWithExplicitAssistantPhase.contains(turnID) else { continue }
+            resolved[turnID] = index
+        }
+        return resolved
     }
 
     private struct PreviousMessageSelection {

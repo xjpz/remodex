@@ -1,5 +1,6 @@
 // FILE: session-jsonl-history.js
-// Purpose: Reconstructs a small thread/turns/list page from local Codex session JSONL files.
+// Purpose: Reconstructs a small thread/turns/list page from local Codex session JSONL files,
+// including desktop-local timestamp metadata for mobile history rendering.
 
 const fs = require("fs");
 const { buildApplyPatchFileChangeItem } = require("./apply-patch-changes");
@@ -83,6 +84,7 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
   let activeTurnId = "";
   let sessionThreadId = normalizeString(threadId);
   let sessionCwd = "";
+  let sessionTimeZone = "";
   const skippedCallIds = new Set();
   const toolCallsByCallId = new Map();
   const pendingUserMessages = [];
@@ -115,6 +117,26 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
         || normalizeString(payload?.thread_id)
         || normalizeString(payload?.threadId);
       sessionCwd ||= normalizeString(payload?.cwd);
+      sessionTimeZone ||= normalizeString(payload?.timezone)
+        || normalizeString(payload?.timeZone)
+        || normalizeString(payload?.time_zone);
+      continue;
+    }
+
+    if (entry?.type === "turn_context") {
+      const payload = objectValue(entry.payload);
+      sessionCwd = normalizeString(payload?.cwd) || sessionCwd;
+      sessionTimeZone = normalizeString(payload?.timezone)
+        || normalizeString(payload?.timeZone)
+        || normalizeString(payload?.time_zone)
+        || sessionTimeZone;
+      activeTurnId = normalizeString(payload?.turn_id)
+        || normalizeString(payload?.turnId)
+        || activeTurnId;
+      if (activeTurnId) {
+        const turn = ensureTurn(turns, turnsById, activeTurnId, sessionThreadId, entry.timestamp);
+        applyHistoryTimeZone(turn, sessionTimeZone);
+      }
       continue;
     }
 
@@ -127,6 +149,7 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
           || activeTurnId
           || `turn-line-${index + 1}`;
         const turn = ensureTurn(turns, turnsById, activeTurnId, sessionThreadId, entry.timestamp);
+        applyHistoryTimeZone(turn, sessionTimeZone);
         flushPendingUserMessagesToTurn(turn, pendingUserMessages);
         continue;
       }
@@ -139,6 +162,7 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
           sessionThreadId,
           entry.timestamp
         );
+        applyHistoryTimeZone(turn, sessionTimeZone);
         turn.status = "completed";
         activeTurnId = "";
         continue;
@@ -162,6 +186,7 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
           toolCallsByCallId,
         });
         if (item) {
+          applyHistoryTimeZone(item, sessionTimeZone);
           turn.items.push(item);
         }
         continue;
@@ -170,6 +195,7 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
       if (eventType === "user_message") {
         const explicitTurnId = normalizeString(payload?.turn_id) || normalizeString(payload?.turnId);
         const item = createUserMessageHistoryItem(payload, index + 1, entry.timestamp);
+        applyHistoryTimeZone(item, sessionTimeZone);
         if (!explicitTurnId && !activeTurnId) {
           pushPendingUserMessage(pendingUserMessages, item);
           continue;
@@ -182,6 +208,7 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
           sessionThreadId,
           entry.timestamp
         );
+        applyHistoryTimeZone(turn, sessionTimeZone);
         addHistoryItemToTurn(turn, item);
         continue;
       }
@@ -207,6 +234,7 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
         sessionThreadId,
         entry.timestamp
       );
+      applyHistoryTimeZone(turn, sessionTimeZone);
       const item = normalizeResponseItemForHistory(payload, index + 1, {
         cwd: sessionCwd,
         toolCallsByCallId,
@@ -222,6 +250,7 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
         if (itemTimestamp && !item.timestamp) {
           item.timestamp = itemTimestamp;
         }
+        applyHistoryTimeZone(item, sessionTimeZone);
         addHistoryItemToTurn(turn, item);
       }
     }
@@ -336,6 +365,12 @@ function historyItemTimestamp(item, fallbackTimestamp = "") {
   return firstNonEmptyString([
     normalizeString(item?.createdAt),
     normalizeString(item?.created_at),
+    normalizeString(item?.startedAt),
+    normalizeString(item?.started_at),
+    normalizeString(item?.completedAt),
+    normalizeString(item?.completed_at),
+    normalizeString(item?.endedAt),
+    normalizeString(item?.ended_at),
     normalizeString(item?.timestamp),
     normalizeString(item?.time),
     normalizeString(fallbackTimestamp),
@@ -379,6 +414,7 @@ function flushPendingUserMessagesToTurn(turn, pendingUserMessages) {
   }
 
   for (const item of pendingUserMessages.splice(0)) {
+    applyHistoryTimeZone(item, normalizeString(turn.timeZone) || normalizeString(turn.timezone));
     addHistoryItemToTurn(turn, item);
   }
 }
@@ -401,6 +437,23 @@ function ensureTurn(turns, turnsById, turnId, threadId, timestamp) {
     turn.createdAt = normalizeString(timestamp);
   }
   return turn;
+}
+
+function applyHistoryTimeZone(target, timeZone) {
+  const normalizedTimeZone = normalizeString(timeZone);
+  if (!target || !normalizedTimeZone) {
+    return target;
+  }
+  if (!target.timeZoneIdentifier) {
+    target.timeZoneIdentifier = normalizedTimeZone;
+  }
+  if (!target.timeZone) {
+    target.timeZone = normalizedTimeZone;
+  }
+  if (!target.timezone) {
+    target.timezone = normalizedTimeZone;
+  }
+  return target;
 }
 
 function normalizeResponseItemForHistory(payload, lineNumber, { cwd = "", toolCallsByCallId = new Map() } = {}) {

@@ -1326,6 +1326,49 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(messageIDs, ["status", "final"])
     }
 
+    func testTimelineRenderProjectionDoesNotCollapseCommentaryOnlyTurn() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Check this",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "commentary-1",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "commentary",
+                text: "I am checking the files.",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "commentary-2",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "commentary",
+                text: "The dirty set is small.",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                orderIndex: 3
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: ["turn-1"],
+            isThreadRunning: true
+        )
+
+        XCTAssertEqual(items.map(\.id), ["user", "commentary-1", "commentary-2"])
+    }
+
     func testRemoveDuplicateAssistantMessagesByTurnAndText() {
         let now = Date()
         let messages = [
@@ -2612,6 +2655,55 @@ final class TurnTimelineReducerTests: XCTestCase {
 
         let reordered = TurnTimelineReducer.enforceIntraTurnOrder(in: messages)
         // Single-item turn: normal role-based ordering applies.
+        XCTAssertEqual(reordered.map(\.id), [
+            "user-1",
+            "thinking-1",
+            "assistant-1",
+        ])
+    }
+
+    func testEnforceIntraTurnOrderFloatsLateSingleMirroredUserToTurnStart() {
+        let now = Date()
+        var order = 0
+        func nextOrder() -> Int { order += 1; return order }
+
+        let messages = [
+            makeMessage(
+                id: "thinking-1",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning started",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "thinking-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Assistant output already arrived",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "assistant-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "user-1",
+                threadID: "thread",
+                role: .user,
+                kind: .chat,
+                text: "let's hope now it will",
+                createdAt: now.addingTimeInterval(-1),
+                turnID: "turn-1",
+                orderIndex: nextOrder()
+            ),
+        ]
+
+        let reordered = TurnTimelineReducer.enforceIntraTurnOrder(in: messages)
+
         XCTAssertEqual(reordered.map(\.id), [
             "user-1",
             "thinking-1",

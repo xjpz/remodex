@@ -732,7 +732,21 @@ extension CodexService {
             throw CodexServiceError.invalidResponse("skills/list response missing result.data[].skills")
         }
 
-        let dedupedByName = Dictionary(grouping: decodedSkills) { $0.normalizedName }
+        var allSkills = decodedSkills
+        if !normalizedCwds.isEmpty {
+            var globalParams: RPCObject = [:]
+            if forceReload {
+                globalParams["forceReload"] = .bool(true)
+            }
+            // Some runtimes return only cwd-scoped skills when `cwds` is present; merge the
+            // global list so personal skills remain discoverable from project threads.
+            if let globalResponse = try? await sendRequest(method: "skills/list", params: .object(globalParams)),
+               let globalSkills = decodeSkillMetadata(from: globalResponse.result) {
+                allSkills.append(contentsOf: globalSkills)
+            }
+        }
+
+        let dedupedByName = Dictionary(grouping: allSkills) { $0.normalizedName }
             .compactMap { _, bucket -> CodexSkillMetadata? in
                 bucket.first(where: { $0.enabled }) ?? bucket.first
             }
@@ -1733,6 +1747,7 @@ extension CodexService {
         mentionMentions: [CodexTurnMention] = [],
         fileMentions: [String] = [],
         shouldAppendUserMessage: Bool = true,
+        preAppendedUserMessageID: String? = nil,
         collaborationMode: CodexCollaborationModeKind? = nil
     ) async throws {
         let normalizedThreadID = normalizedInterruptIdentifier(threadId) ?? threadId
@@ -1744,8 +1759,12 @@ extension CodexService {
             threadId: normalizedThreadID,
             collaborationMode: effectiveRequestedCollaborationMode
         )
-        let pendingMessageId = shouldAppendUserMessage
-            ? appendUserMessage(
+        let normalizedPreAppendedUserMessageID = normalizedInterruptIdentifier(preAppendedUserMessageID)
+        let pendingMessageId: String
+        if let normalizedPreAppendedUserMessageID {
+            pendingMessageId = normalizedPreAppendedUserMessageID
+        } else if shouldAppendUserMessage {
+            pendingMessageId = appendUserMessage(
                 threadId: normalizedThreadID,
                 text: displayTextForOutgoingTurn(
                     userInput: userInput,
@@ -1764,7 +1783,9 @@ extension CodexService {
                     return normalized.isEmpty ? nil : normalized
                 }
             )
-            : ""
+        } else {
+            pendingMessageId = ""
+        }
         var resolvedExpectedTurnID = normalizedInterruptIdentifier(expectedTurnId)
         if resolvedExpectedTurnID == nil {
             do {

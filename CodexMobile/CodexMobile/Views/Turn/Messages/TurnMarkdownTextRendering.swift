@@ -144,6 +144,7 @@ struct StreamingAssistantMarkdownTextView: View {
     @State private var displayedSegments: StreamingMarkdownBlockSegments
     @State private var targetText: String
     @State private var revealTask: Task<Void, Never>?
+    @State private var textAdoptionTask: Task<Void, Never>?
 
     init(
         text: String,
@@ -183,7 +184,7 @@ struct StreamingAssistantMarkdownTextView: View {
                 .isEmpty
                 && !nextText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 && !shouldAnimateInitialReveal(for: nextText)
-            adoptText(
+            scheduleTextAdoption(
                 nextText,
                 animated: animatesReveal && !reduceMotion && !shouldSnapFirstVisibleChunk
             )
@@ -194,6 +195,8 @@ struct StreamingAssistantMarkdownTextView: View {
             }
         }
         .onDisappear {
+            textAdoptionTask?.cancel()
+            textAdoptionTask = nil
             cancelReveal()
         }
     }
@@ -224,6 +227,19 @@ struct StreamingAssistantMarkdownTextView: View {
 
     // Smoothly reveals appended text instead of dropping in throttled bursts.
     // Snaps for non-append updates and tiny first chunks that do not disturb layout.
+    private func scheduleTextAdoption(_ nextText: String, animated: Bool) {
+        textAdoptionTask?.cancel()
+        // Streaming text can change repeatedly in one SwiftUI frame. Coalescing the
+        // local @State writes keeps reveal state current without tripping onChange's
+        // per-frame mutation guard.
+        textAdoptionTask = Task { @MainActor in
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            adoptText(nextText, animated: animated)
+            textAdoptionTask = nil
+        }
+    }
+
     private func adoptText(_ nextText: String, animated: Bool) {
         targetText = nextText
 

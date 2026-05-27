@@ -199,6 +199,49 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
         XCTAssertEqual(history[0].turnId, turnID)
     }
 
+    func testHistoryCompletedAtAliasAndTimezoneRestoreMessageTimestamp() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let expectedDate = ISO8601DateFormatter().date(from: "2026-05-19T00:14:00Z")
+
+        let history = service.decodeMessagesFromThreadRead(
+            threadId: threadID,
+            threadObject: [
+                "createdAt": .string("2026-03-12T10:00:00Z"),
+                "timezone": .string("America/New_York"),
+                "turns": .array([
+                    .object([
+                        "id": .string(turnID),
+                        "completedAt": .string("2026-05-19T00:14:00Z"),
+                        "items": .array([
+                            .object([
+                                "id": .string("assistant-item"),
+                                "type": .string("message"),
+                                "role": .string("assistant"),
+                                "content": .array([
+                                    .object([
+                                        "type": .string("output_text"),
+                                        "text": .string("Done."),
+                                    ]),
+                                ]),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+            ]
+        )
+
+        XCTAssertEqual(history.count, 1)
+        XCTAssertNotNil(expectedDate)
+        XCTAssertEqual(
+            history[0].createdAt.timeIntervalSince1970,
+            expectedDate!.timeIntervalSince1970,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(history[0].timeZoneIdentifier, "America/New_York")
+    }
+
     func testHistoryRawExecCommandToolCallRestoresCommandRow() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
@@ -1379,6 +1422,37 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
         XCTAssertEqual(userRows[0].deliveryState, .confirmed)
         XCTAssertEqual(userRows[0].text, "one last time")
         XCTAssertEqual(userRows[0].skillMentions, ["check-code"])
+    }
+
+    func testMirroredOpeningUserMessageAnchorsBeforeExistingTurnOutput() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.appendMessage(
+            CodexMessage(
+                id: "assistant-first",
+                threadId: threadID,
+                role: .assistant,
+                text: "Already streaming from desktop",
+                turnId: turnID,
+                itemId: "assistant-item",
+                isStreaming: true,
+                orderIndex: 10
+            )
+        )
+
+        service.appendConfirmedMirroredUserMessage(
+            threadId: threadID,
+            turnId: turnID,
+            text: "let's hope now it will"
+        )
+
+        let messages = service.messages(for: threadID)
+
+        XCTAssertEqual(messages.map(\.role), [.user, .assistant])
+        XCTAssertLessThan(messages[0].orderIndex, messages[1].orderIndex)
+        XCTAssertEqual(messages[0].text, "let's hope now it will")
     }
 
     func testThreadReadDecodesTurnIdAliasAndRejectsEpochHistoryTimestamp() {

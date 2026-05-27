@@ -11,7 +11,7 @@ struct UserMessageBubble: View {
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage(UserBubbleColor.storageKey) private var userBubbleColorRawValue = UserBubbleColor.defaultStoredRawValue
     private static let bubbleCornerRadius: CGFloat = 22
-    private static let darkColoredBubbleOpacity = 0.75
+    private static let darkColoredBubbleOpacity = 0.7
 
     let message: CodexMessage
     let text: String
@@ -105,7 +105,7 @@ struct UserMessageBubble: View {
         case .failed:
             return "Failed"
         case .confirmed:
-            return message.createdAt.formatted(date: .omitted, time: .shortened)
+            return message.formattedTimelineTime()
         }
     }
 

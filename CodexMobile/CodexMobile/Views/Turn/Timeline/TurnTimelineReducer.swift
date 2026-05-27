@@ -120,6 +120,17 @@ enum TurnTimelineReducer {
     // Detects steer-like flows where a later user prompt is appended inside the same turn.
     // In those cases the original event order is authoritative for rendering.
     private static func hasInterleavedUserFlow(_ turnMessages: [CodexMessage]) -> Bool {
+        let userCount = turnMessages.reduce(into: 0) { count, message in
+            if message.role == .user {
+                count += 1
+            }
+        }
+        guard userCount > 1 else {
+            // Desktop mirrors can deliver the only opening prompt after assistant output.
+            // A single user row is still the turn opener, not a steer.
+            return false
+        }
+
         let ordered = turnMessages.sorted { $0.orderIndex < $1.orderIndex }
         var seenNonUser = false
 

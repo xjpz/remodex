@@ -57,6 +57,8 @@ struct FileChangeSummaryBox: View {
     let detailBodyText: String
     let messageID: String
 
+    @Environment(\.colorScheme) private var colorScheme
+
     // Default to expanded so the recap stays informative without an extra tap;
     // collapse remains available for long lists or visual decluttering.
     @State private var isExpanded: Bool = true
@@ -116,10 +118,7 @@ struct FileChangeSummaryBox: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            .regularMaterial,
-            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-        )
+        .background { cardBackground }
         .overlay {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(softDividerColor, lineWidth: 0.5)
@@ -147,6 +146,18 @@ struct FileChangeSummaryBox: View {
     }
 
     @ViewBuilder
+    private var cardBackground: some View {
+        if colorScheme == .dark {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(.regularMaterial)
+                .opacity(0.5)
+        } else {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color(.systemBackground))
+        }
+    }
+
+    @ViewBuilder
     private var header: some View {
         HStack(spacing: 6) {
             Image("changes")
@@ -157,7 +168,7 @@ struct FileChangeSummaryBox: View {
                 .foregroundStyle(.secondary)
 
             Text("File changes")
-                .font(AppFont.footnote(weight: .medium))
+                .font(AppFont.subheadline(weight: .regular))
                 .foregroundStyle(.secondary)
 
             if totalAdditions > 0 || totalDeletions > 0 {
@@ -220,6 +231,6 @@ struct FileChangeSummaryBox: View {
     }
 
     private var softDividerColor: Color {
-        Color(.separator).opacity(0.6)
+        Color(.separator).opacity(colorScheme == .dark ? 0.8 : 1.0)
     }
 }

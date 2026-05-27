@@ -1355,14 +1355,23 @@ extension CodexService {
                 messagesByThread[threadId]?[existingIndex].createdAt = createdAt
                 didMutate = true
             }
+            if moveMirroredOpeningUserBeforeTurnOutputIfNeeded(
+                threadId: threadId,
+                turnId: turnId,
+                messageIndex: existingIndex
+            ) {
+                didMutate = true
+            }
             guard didMutate else {
                 return
             }
+            messagesByThread[threadId]?.sort(by: { $0.orderIndex < $1.orderIndex })
             persistMessages()
             updateCurrentOutput(for: threadId)
             return
         }
 
+        let orderIndex = reserveMirroredOpeningUserOrderIndex(threadId: threadId, turnId: turnId)
         appendMessage(
             CodexMessage(
                 threadId: threadId,
@@ -1371,9 +1380,87 @@ extension CodexService {
                 fileMentions: fileMentions,
                 createdAt: createdAt ?? Date(),
                 turnId: turnId,
-                deliveryState: .confirmed
+                deliveryState: .confirmed,
+                orderIndex: orderIndex
             )
         )
+    }
+
+    // Desktop rollout mirrors can deliver assistant output before the opening user event.
+    // Reserve the first same-turn slot so the phone timeline matches the Mac transcript.
+    private func reserveMirroredOpeningUserOrderIndex(threadId: String, turnId: String?) -> Int? {
+        guard let turnAnchor = mirroredOpeningUserAnchor(threadId: threadId, turnId: turnId) else {
+            return nil
+        }
+
+        guard let indices = messagesByThread[threadId]?.indices else {
+            return turnAnchor
+        }
+
+        for index in indices {
+            guard let currentOrder = messagesByThread[threadId]?[index].orderIndex,
+                  currentOrder >= turnAnchor else {
+                continue
+            }
+            messagesByThread[threadId]?[index].orderIndex = currentOrder + 1
+        }
+        CodexMessageOrderCounter.seed(from: messagesByThread)
+        return turnAnchor
+    }
+
+    // Repositions an already-created mirrored opener without moving real steer prompts.
+    private func moveMirroredOpeningUserBeforeTurnOutputIfNeeded(
+        threadId: String,
+        turnId: String?,
+        messageIndex: Int
+    ) -> Bool {
+        guard let threadMessages = messagesByThread[threadId],
+              threadMessages.indices.contains(messageIndex),
+              let turnAnchor = mirroredOpeningUserAnchor(
+                threadId: threadId,
+                turnId: turnId,
+                existingMessageID: threadMessages[messageIndex].id
+              ),
+              threadMessages[messageIndex].orderIndex > turnAnchor else {
+            return false
+        }
+
+        let previousOrder = threadMessages[messageIndex].orderIndex
+        for index in threadMessages.indices where index != messageIndex {
+            guard let currentOrder = messagesByThread[threadId]?[index].orderIndex,
+                  currentOrder >= turnAnchor,
+                  currentOrder < previousOrder else {
+                continue
+            }
+            messagesByThread[threadId]?[index].orderIndex = currentOrder + 1
+        }
+        messagesByThread[threadId]?[messageIndex].orderIndex = turnAnchor
+        return true
+    }
+
+    // Returns the first output slot only when this turn has no other user row.
+    // Multiple user rows mean an in-turn steer, where chronological order is intentional.
+    private func mirroredOpeningUserAnchor(
+        threadId: String,
+        turnId: String?,
+        existingMessageID: String? = nil
+    ) -> Int? {
+        guard let turnId, !turnId.isEmpty,
+              let threadMessages = messagesByThread[threadId] else {
+            return nil
+        }
+
+        var firstOutputOrder: Int?
+        for message in threadMessages where message.turnId == turnId {
+            if message.id == existingMessageID {
+                continue
+            }
+            if message.role == .user {
+                return nil
+            }
+            firstOutputOrder = min(firstOutputOrder ?? message.orderIndex, message.orderIndex)
+        }
+        return firstOutputOrder
     }
 
     // Appends a system message in the current thread timeline.

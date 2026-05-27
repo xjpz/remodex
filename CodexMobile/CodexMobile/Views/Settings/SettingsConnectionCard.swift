@@ -11,7 +11,10 @@ struct SettingsConnectionCard: View {
     let onEditComputerName: () -> Void
 
     var body: some View {
-        SettingsCard(title: "Connection") {
+        SettingsCard(
+            title: "Device",
+            footer: keepAwakeFooter
+        ) {
             if let trustedPairPresentation = codex.trustedPairPresentation {
                 SettingsTrustedComputerCard(
                     presentation: trustedPairPresentation,
@@ -19,48 +22,31 @@ struct SettingsConnectionCard: View {
                     onEditName: onEditComputerName
                 )
             } else {
-                Text("No paired device")
-                    .font(AppFont.subheadline(weight: .semibold))
-                    .foregroundStyle(.primary)
+                SettingsInlineMessage(text: "No paired device yet. Scan the QR code from your Mac to connect.")
             }
 
             if connectionPhaseShowsProgress {
-                HStack(spacing: 8) {
+                HStack(spacing: 10) {
                     ProgressView()
+                        .controlSize(.small)
                     Text(connectionProgressLabel)
-                        .font(AppFont.caption())
+                        .font(AppFont.subheadline())
                         .foregroundStyle(.secondary)
                 }
             }
 
             if case .retrying(_, let message) = codex.connectionRecoveryState,
                !message.isEmpty {
-                Text(message)
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
+                SettingsInlineMessage(text: message)
             }
 
             if let error = codex.lastErrorMessage, !error.isEmpty {
-                Text(error)
-                    .font(AppFont.caption())
-                    .foregroundStyle(.red)
+                SettingsInlineMessage(text: error, tint: .red)
             }
 
             if codex.supportsKeepAwakeWhileBridgeRuns {
                 Toggle("Keep device reachable", isOn: keepMacAwakeWhileBridgeRunsBinding)
                     .tint(settingsToggleTintColor)
-
-                    Text(codex.keepMacAwakeWhileBridgeRuns
-                     ? "Uses the host device's keep-awake support while the bridge is running so the device stays reachable even if the display turns off. Best while charging."
-                     : "The device can go back to sleeping normally when the bridge is idle.")
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
-
-                if !codex.isConnected {
-                    Text("Saved on this iPhone. It will sync to the paired device the next time the bridge reconnects.")
-                        .font(AppFont.caption())
-                        .foregroundStyle(.secondary)
-                }
             }
 
             if codex.isConnected {
@@ -75,6 +61,20 @@ struct SettingsConnectionCard: View {
                 }
             }
         }
+    }
+
+    private var keepAwakeFooter: String? {
+        guard codex.supportsKeepAwakeWhileBridgeRuns else { return nil }
+
+        if codex.keepMacAwakeWhileBridgeRuns {
+            return "Keeps your Mac reachable while the bridge is running. Best while charging."
+        }
+
+        if !codex.isConnected {
+            return "Preference is saved on this iPhone and syncs when the bridge reconnects."
+        }
+
+        return nil
     }
 
     private var keepMacAwakeWhileBridgeRunsBinding: Binding<Bool> {
@@ -101,32 +101,30 @@ struct SettingsConnectionCard: View {
     private var connectionStatusLabel: String {
         switch codex.connectionPhase {
         case .offline:
-            return "offline"
+            return "Offline"
         case .connecting:
-            return "connecting"
+            return "Connecting"
         case .loadingChats:
-            return "loading chats"
+            return "Loading"
         case .syncing:
-            return "syncing"
+            return "Syncing"
         case .connected:
-            return "connected"
+            return "Connected"
         }
     }
 
     private var connectionProgressLabel: String {
         switch codex.connectionPhase {
         case .connecting:
-            return "Connecting to relay..."
+            return "Connecting to relay…"
         case .loadingChats:
-            return "Loading chats..."
+            return "Loading chats…"
         case .syncing:
-            return "Syncing workspace..."
+            return "Syncing workspace…"
         case .offline, .connected:
             return ""
         }
     }
-
-    // MARK: - Actions
 
     private func disconnectRelay() {
         Task { @MainActor in
@@ -134,5 +132,4 @@ struct SettingsConnectionCard: View {
             codex.clearSavedRelaySession()
         }
     }
-
 }
