@@ -149,6 +149,150 @@ test("parseSessionJsonlTurns attaches pre-task user messages to following task",
   assert.equal(turns[0].items[0].text, "from mac");
 });
 
+test("parseSessionJsonlTurns deduplicates mirrored mobile user messages", () => {
+  const content = [
+    JSON.stringify({
+      timestamp: "2026-05-24T19:30:07.522Z",
+      type: "session_meta",
+      payload: {
+        id: "thread-jsonl-mobile",
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-24T19:30:10.900Z",
+      type: "event_msg",
+      payload: {
+        type: "task_started",
+        turn_id: "turn-jsonl-mobile",
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-24T19:30:10.911Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "review these changes" }],
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-24T19:30:10.915Z",
+      type: "event_msg",
+      payload: {
+        type: "user_message",
+        message: "review these changes",
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-24T19:30:12.000Z",
+      type: "response_item",
+      payload: {
+        id: "assistant-final",
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "done" }],
+      },
+    }),
+  ].join("\n");
+
+  const turns = parseSessionJsonlTurns(content, { threadId: "thread-jsonl-mobile" });
+
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].id, "turn-jsonl-mobile");
+  const userItems = turns[0].items.filter((item) => item.role === "user");
+  assert.equal(userItems.length, 1);
+  assert.equal(userItems[0].type, "user_message");
+  assert.equal(userItems[0].text, "review these changes");
+  assert.equal(userItems[0].createdAt, "2026-05-24T19:30:10.915Z");
+  assert.equal(userItems[0].timestamp, "2026-05-24T19:30:10.915Z");
+});
+
+test("parseSessionJsonlTurns deduplicates raw skill text against structured skill input", () => {
+  const content = [
+    JSON.stringify({
+      timestamp: "2026-05-24T21:52:47.000Z",
+      type: "session_meta",
+      payload: {
+        id: "thread-jsonl-skill",
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-24T21:52:51.100Z",
+      type: "event_msg",
+      payload: {
+        type: "task_started",
+        turn_id: "turn-jsonl-skill",
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-24T21:52:51.133Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_text", text: "one last time" },
+          { type: "skill", id: "check-code", name: "check-code" },
+        ],
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-24T21:52:51.133Z",
+      type: "event_msg",
+      payload: {
+        type: "user_message",
+        message: "$check-code one last time",
+      },
+    }),
+  ].join("\n");
+
+  const turns = parseSessionJsonlTurns(content, { threadId: "thread-jsonl-skill" });
+  const userItems = turns[0].items.filter((item) => item.role === "user");
+
+  assert.equal(userItems.length, 1);
+  assert.equal(userItems[0].type, "message");
+  assert.equal(userItems[0].content[0].text, "one last time");
+  assert.deepEqual(userItems[0].content[1], { type: "skill", id: "check-code", name: "check-code" });
+  assert.equal(userItems[0].createdAt, "2026-05-24T21:52:51.133Z");
+});
+
+test("parseSessionJsonlTurns preserves explicit timestamp aliases over entry timestamp", () => {
+  const content = [
+    JSON.stringify({
+      timestamp: "2026-05-24T21:52:51.900Z",
+      type: "session_meta",
+      payload: {
+        id: "thread-jsonl-timestamps",
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-24T21:52:52.000Z",
+      type: "event_msg",
+      payload: {
+        type: "task_started",
+        turn_id: "turn-jsonl-timestamps",
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-24T21:52:53.000Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        created_at: "2026-05-24T21:52:51.133Z",
+        content: [{ type: "input_text", text: "timed prompt" }],
+      },
+    }),
+  ].join("\n");
+
+  const turns = parseSessionJsonlTurns(content, { threadId: "thread-jsonl-timestamps" });
+  const userItems = turns[0].items.filter((item) => item.role === "user");
+
+  assert.equal(userItems.length, 1);
+  assert.equal(userItems[0].createdAt, "2026-05-24T21:52:51.133Z");
+  assert.equal(userItems[0].timestamp, "2026-05-24T21:52:51.133Z");
+});
+
 test("readThreadTurnsListPageFromSessionJsonl caps fallback pages to five turns", () => {
   const filePath = "/tmp/thread-cap.jsonl";
   const lines = [
@@ -439,6 +583,58 @@ test("parseSessionJsonlTurns adds readable messages for generic tool calls", () 
       toolName: "view_image",
     },
   ]);
+});
+
+test("parseSessionJsonlTurns restores view_image tool output as imageView without inline data", () => {
+  const content = [
+    JSON.stringify({
+      timestamp: "2026-05-22T14:52:03.000Z",
+      type: "event_msg",
+      payload: {
+        type: "task_started",
+        turn_id: "turn-view-image",
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-22T14:52:04.000Z",
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "view_image",
+        call_id: "call-view-image",
+        arguments: JSON.stringify({
+          path: "/Users/test/Library/Application Support/CleanShot/media/screenshot.png",
+        }),
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-22T14:52:05.000Z",
+      type: "response_item",
+      payload: {
+        type: "function_call_output",
+        call_id: "call-view-image",
+        output: [
+          {
+            type: "input_image",
+            image_url: "data:image/png;base64,AAAA",
+          },
+        ],
+      },
+    }),
+  ].join("\n");
+
+  const turns = parseSessionJsonlTurns(content, { threadId: "thread-view-image" });
+
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].items.length, 2);
+  assert.deepEqual(turns[0].items.map((item) => item.type), ["tool_call", "imageView"]);
+  assert.equal(turns[0].items[1].id, "call-view-image-image-view");
+  assert.equal(
+    turns[0].items[1].path,
+    "/Users/test/Library/Application Support/CleanShot/media/screenshot.png"
+  );
+  assert.equal(Object.hasOwn(turns[0].items[1], "output"), false);
+  assert.equal(turns[0].items[1].remodexJsonlToolOutputImage, true);
 });
 
 test("parseSessionJsonlTurns restores completed desktop Plan items without duplicating proposed_plan messages", () => {
