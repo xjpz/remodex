@@ -605,6 +605,95 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertNil(service.threadRunBadgeState(for: threadID))
     }
 
+    func testDeletingRunningThreadClearsRuntimeState() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        service.threads = [
+            CodexThread(id: threadID, title: "Running chat", cwd: "/tmp/remodex"),
+        ]
+        service.runningThreadIDs.insert(threadID)
+        service.activeTurnIdByThread[threadID] = turnID
+        service.threadIdByTurnID[turnID] = threadID
+        service.activeTurnId = turnID
+        service.latestTurnTerminalStateByThread[threadID] = .completed
+        service.readyThreadIDs.insert(threadID)
+
+        service.deleteThreadLocally(threadID)
+
+        XCTAssertFalse(service.runningThreadIDs.contains(threadID))
+        XCTAssertNil(service.activeTurnID(for: threadID))
+        XCTAssertNil(service.threadIdByTurnID[turnID])
+        XCTAssertNil(service.activeTurnId)
+        XCTAssertNil(service.latestTurnTerminalState(for: threadID))
+        XCTAssertNil(service.threadRunBadgeState(for: threadID))
+        XCTAssertFalse(service.threads.contains { $0.id == threadID })
+    }
+
+    func testDisplayIslandDoesNotMarkDisconnectedRunReadyWithoutTerminalState() {
+        let service = makeService()
+        let coordinator = RemodexDisplayIslandCoordinator()
+        let threadID = "thread-\(UUID().uuidString)"
+        let startedAt = Date(timeIntervalSince1970: 1_000)
+        service.threads = [
+            CodexThread(id: threadID, title: "Running chat", cwd: "/tmp/remodex"),
+        ]
+        service.runningThreadIDs.insert(threadID)
+
+        let runningSnapshot = coordinator.makeReconciledSnapshot(codex: service, now: startedAt)
+        XCTAssertEqual(runningSnapshot.runningConversations.map(\.id), [threadID])
+
+        service.runningThreadIDs.remove(threadID)
+        let disconnectedSnapshot = coordinator.makeReconciledSnapshot(
+            codex: service,
+            now: startedAt.addingTimeInterval(1)
+        )
+
+        XCTAssertTrue(disconnectedSnapshot.runningConversations.isEmpty)
+        XCTAssertTrue(disconnectedSnapshot.completedConversations.isEmpty)
+        XCTAssertTrue(disconnectedSnapshot.failedConversations.isEmpty)
+
+        service.latestTurnTerminalStateByThread[threadID] = .completed
+        let completedSnapshot = coordinator.makeReconciledSnapshot(
+            codex: service,
+            now: startedAt.addingTimeInterval(2)
+        )
+        XCTAssertEqual(completedSnapshot.completedConversations.map(\.id), [threadID])
+    }
+
+    func testDisplayIslandDoesNotMarkActiveRunReadyAfterCompletion() {
+        let service = makeService()
+        let coordinator = RemodexDisplayIslandCoordinator()
+        let threadID = "thread-\(UUID().uuidString)"
+        let startedAt = Date(timeIntervalSince1970: 1_000)
+        service.threads = [
+            CodexThread(id: threadID, title: "Active chat", cwd: "/tmp/remodex"),
+        ]
+        service.activeThreadId = threadID
+        service.runningThreadIDs.insert(threadID)
+
+        let runningSnapshot = coordinator.makeReconciledSnapshot(codex: service, now: startedAt)
+        XCTAssertEqual(runningSnapshot.runningConversations.map(\.id), [threadID])
+
+        service.runningThreadIDs.remove(threadID)
+        service.latestTurnTerminalStateByThread[threadID] = .completed
+        let activeCompletedSnapshot = coordinator.makeReconciledSnapshot(
+            codex: service,
+            now: startedAt.addingTimeInterval(1)
+        )
+
+        XCTAssertTrue(activeCompletedSnapshot.runningConversations.isEmpty)
+        XCTAssertTrue(activeCompletedSnapshot.completedConversations.isEmpty)
+        XCTAssertTrue(activeCompletedSnapshot.failedConversations.isEmpty)
+
+        service.activeThreadId = nil
+        let laterInactiveSnapshot = coordinator.makeReconciledSnapshot(
+            codex: service,
+            now: startedAt.addingTimeInterval(2)
+        )
+        XCTAssertTrue(laterInactiveSnapshot.completedConversations.isEmpty)
+    }
+
     func testThreadHasActiveOrRunningTurnUsesRunningFallback() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"

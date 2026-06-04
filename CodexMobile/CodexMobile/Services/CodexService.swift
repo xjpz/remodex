@@ -179,6 +179,11 @@ struct CodexMissingNotificationThreadPrompt: Identifiable, Equatable, Sendable {
     let threadId: String
 }
 
+struct CodexExternalThreadOpenRequest: Identifiable, Equatable, Sendable {
+    let id = UUID()
+    let threadId: String
+}
+
 enum CodexThreadRunBadgeState: Hashable, Sendable {
     case running
     case ready
@@ -413,6 +418,7 @@ final class CodexService {
     var modelsErrorMessage: String?
     var notificationAuthorizationStatus: UNAuthorizationStatus = .notDetermined
     var pendingNotificationOpenThreadID: String?
+    var externalThreadOpenRequest: CodexExternalThreadOpenRequest?
     var supportsStructuredSkillInput = true
     var supportsStructuredMentionInput = true
     // Runtime compatibility flag for `turn/start.collaborationMode` plan turns.

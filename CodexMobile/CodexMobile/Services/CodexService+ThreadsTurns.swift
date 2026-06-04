@@ -15,6 +15,22 @@ private enum ThreadListHydrationPolicy {
     static let requestTimeoutNanoseconds: UInt64 = 12_000_000_000
 }
 
+private enum StaleInterruptResolution: Equatable {
+    case none
+    case completed
+    case terminalUnknown
+    case startingWithoutTurnID
+
+    var shouldClearRunningState: Bool {
+        switch self {
+        case .completed, .terminalUnknown:
+            return true
+        case .none, .startingWithoutTurnID:
+            return false
+        }
+    }
+}
+
 struct CodexPreAppendedTurnMessage: Sendable {
     let messageID: String
     let automaticTitleSeed: String?
@@ -566,6 +582,7 @@ extension CodexService {
         guard let normalizedTurnID else {
             throw CodexServiceError.invalidInput("turn/interrupt requires a non-empty turnId")
         }
+        var latestAttemptedTurnID = normalizedTurnID
 
         let resolvedThreadID = normalizedThreadID
             ?? threadIdByTurnID[normalizedTurnID]
@@ -600,27 +617,16 @@ extension CodexService {
             }
 
             if let resolvedThreadID,
-               shouldRetryInterruptWithRefreshedTurnID(finalError),
-               let refreshedTurnID = try await resolveInFlightTurnID(threadId: resolvedThreadID),
-               refreshedTurnID != normalizedTurnID {
+               shouldRetryInterruptWithRefreshedTurnID(finalError) {
                 do {
-                    try await sendInterruptRequest(
-                        turnId: refreshedTurnID,
-                        threadId: resolvedThreadID,
-                        useSnakeCaseParams: false
-                    )
-                    setActiveTurnID(refreshedTurnID, for: resolvedThreadID)
-                    threadIdByTurnID[refreshedTurnID] = resolvedThreadID
-                    lastErrorMessage = nil
-                    return
-                } catch {
-                    finalError = error
-                    if shouldRetryInterruptWithSnakeCaseParams(error) {
+                    if let refreshedTurnID = try await resolveInFlightTurnID(threadId: resolvedThreadID),
+                       refreshedTurnID != normalizedTurnID {
+                        latestAttemptedTurnID = refreshedTurnID
                         do {
                             try await sendInterruptRequest(
                                 turnId: refreshedTurnID,
                                 threadId: resolvedThreadID,
-                                useSnakeCaseParams: true
+                                useSnakeCaseParams: false
                             )
                             setActiveTurnID(refreshedTurnID, for: resolvedThreadID)
                             threadIdByTurnID[refreshedTurnID] = resolvedThreadID
@@ -628,9 +634,49 @@ extension CodexService {
                             return
                         } catch {
                             finalError = error
+                            if shouldRetryInterruptWithSnakeCaseParams(error) {
+                                do {
+                                    try await sendInterruptRequest(
+                                        turnId: refreshedTurnID,
+                                        threadId: resolvedThreadID,
+                                        useSnakeCaseParams: true
+                                    )
+                                    setActiveTurnID(refreshedTurnID, for: resolvedThreadID)
+                                    threadIdByTurnID[refreshedTurnID] = resolvedThreadID
+                                    lastErrorMessage = nil
+                                    return
+                                } catch {
+                                    finalError = error
+                                }
+                            }
                         }
                     }
+                } catch {
+                    let refreshResolution = staleInterruptResolution(for: error)
+                    if refreshResolution == .startingWithoutTurnID {
+                        preserveStartingRunAfterStaleInterrupt(
+                            threadId: resolvedThreadID,
+                            staleTurnId: latestAttemptedTurnID
+                        )
+                        lastErrorMessage = userFacingTurnErrorMessageForFooter(from: error)
+                        throw error
+                    }
+                    if staleInterruptResolution(for: finalError) == .none {
+                        finalError = error
+                    }
                 }
+            }
+
+            let staleResolution = staleInterruptResolution(for: finalError)
+            if let resolvedThreadID,
+               staleResolution.shouldClearRunningState {
+                clearRunningStateAfterStaleInterrupt(
+                    threadId: resolvedThreadID,
+                    turnId: latestAttemptedTurnID,
+                    resolution: staleResolution
+                )
+                lastErrorMessage = nil
+                return
             }
 
             lastErrorMessage = userFacingTurnErrorMessageForFooter(from: finalError)
@@ -1374,6 +1420,22 @@ extension CodexService {
                     return false
                 }
 
+                if let runningTurnID = snapshot.interruptibleTurnID,
+                   turnTerminalState(for: runningTurnID) != nil {
+                    clearRunningState(for: normalizedThreadID)
+                    setProtectedRunningFallback(false, for: normalizedThreadID)
+                    if let existingTurnID = activeTurnID(for: normalizedThreadID) {
+                        setActiveTurnID(nil, for: normalizedThreadID)
+                        if threadIdByTurnID[existingTurnID] == normalizedThreadID {
+                            threadIdByTurnID.removeValue(forKey: existingTurnID)
+                        }
+                        if activeTurnId == existingTurnID {
+                            activeTurnId = nil
+                        }
+                    }
+                    return true
+                }
+
                 if let runningTurnID = snapshot.interruptibleTurnID {
                     markThreadAsRunning(normalizedThreadID)
                     noteDesktopMirroredRunningActivity(for: normalizedThreadID)
@@ -2028,6 +2090,57 @@ extension CodexService {
             || normalizedMessage.contains("not in progress")
             || normalizedMessage.contains("not running")
             || normalizedMessage.contains("not active")
+    }
+
+    // Classifies stale Stop outcomes so cleanup does not invent success for generic terminal messages.
+    private func staleInterruptResolution(for error: Error) -> StaleInterruptResolution {
+        if let serviceError = error as? CodexServiceError,
+           case .invalidInput(let message) = serviceError,
+           message.lowercased().contains("not published an interruptible turn id") {
+            return .startingWithoutTurnID
+        }
+
+        guard let normalizedMessage = rawRPCMessage(from: error)?.lowercased() else {
+            return .none
+        }
+
+        if normalizedMessage.contains("already completed") {
+            return .completed
+        }
+        if isStaleTurnRuntimeMessage(normalizedMessage) {
+            return .terminalUnknown
+        }
+        return .none
+    }
+
+    // Drops the stale turn id while keeping the thread marked as starting/running.
+    func preserveStartingRunAfterStaleInterrupt(threadId: String, staleTurnId: String?) {
+        if let staleTurnId,
+           activeTurnID(for: threadId) == staleTurnId {
+            setActiveTurnID(nil, for: threadId)
+        }
+        if let staleTurnId,
+           threadIdByTurnID[staleTurnId] == threadId {
+            threadIdByTurnID.removeValue(forKey: staleTurnId)
+        }
+        if activeTurnId == staleTurnId {
+            activeTurnId = nil
+        }
+        setProtectedRunningFallback(true, for: threadId)
+        demoteVisibleRunningStateToProtectedFallback(for: threadId)
+    }
+
+    // Collapses a stale Stop attempt without showing an error after the runtime says the run ended.
+    private func clearRunningStateAfterStaleInterrupt(
+        threadId: String,
+        turnId: String?,
+        resolution: StaleInterruptResolution
+    ) {
+        if resolution == .completed {
+            recordTurnTerminalState(threadId: threadId, turnId: turnId, state: .completed)
+        }
+        noteTurnFinished(turnId: turnId)
+        markTurnCompleted(threadId: threadId, turnId: turnId)
     }
 
     func isInternalRuntimeCompatibilityMessage(_ normalizedMessage: String) -> Bool {

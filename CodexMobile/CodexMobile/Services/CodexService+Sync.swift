@@ -550,9 +550,15 @@ extension CodexService {
 
     // Centralizes local-only thread cleanup so repo-group deletion can reuse it safely.
     private func removeThreadLocally(_ threadId: String, persistAsDeleted: Bool, persistMessages: Bool = true) {
-        clearRunningState(for: threadId)
-        removeThreadTimelineState(for: threadId)
+        if let turnId = activeTurnID(for: threadId) {
+            setActiveTurnID(nil, for: threadId)
+            threadIdByTurnID.removeValue(forKey: turnId)
+            if activeTurnId == turnId { activeTurnId = nil }
+        }
+        threadIdByTurnID = threadIdByTurnID.filter { $0.value != threadId }
+
         clearOutcomeBadge(for: threadId)
+        latestTurnTerminalStateByThread.removeValue(forKey: threadId)
         persistThreadRename(nil, for: threadId)
 
         // Drop local-only runtime overrides once a chat is fully removed from the device.
@@ -560,6 +566,10 @@ extension CodexService {
         clearThreadServiceTierOverride(for: threadId)
 
         threads.removeAll { $0.id == threadId }
+
+        clearRunningState(for: threadId)
+        removeThreadTimelineState(for: threadId)
+
         messagesByThread.removeValue(forKey: threadId)
         if persistMessages {
             persistCurrentMacMessages()
@@ -571,13 +581,6 @@ extension CodexService {
         streamingSystemMessageByItemID = streamingSystemMessageByItemID.filter { key, _ in
             !key.hasPrefix("\(threadId)|item:")
         }
-
-        if let turnId = activeTurnID(for: threadId) {
-            setActiveTurnID(nil, for: threadId)
-            threadIdByTurnID.removeValue(forKey: turnId)
-            if activeTurnId == turnId { activeTurnId = nil }
-        }
-        threadIdByTurnID = threadIdByTurnID.filter { $0.value != threadId }
 
         if activeThreadId == threadId { activeThreadId = nil }
 
