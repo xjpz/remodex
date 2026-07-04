@@ -41,8 +41,6 @@
 	<false/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
-	<key>NSSupportsLiveActivities</key>
-	<true/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
@@ -64,6 +62,8 @@
 	<string>Remodex needs photo library access to let you save rendered diagrams and attachments.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>CodexMobile needs photo library access to let you attach images to your messages.</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>PHODEX_CHATGPT_CALLBACK_SCHEME</key>
 	<string>$(PHODEX_CHATGPT_CALLBACK_SCHEME)</string>
 	<key>PHODEX_DEFAULT_RELAY_URL</key>

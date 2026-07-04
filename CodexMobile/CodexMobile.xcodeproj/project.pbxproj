@@ -190,7 +190,7 @@
 		B7A1C2D3E4F5061728394052 /* SidebarThreadGroupingTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SidebarThreadGroupingTests.swift; sourceTree = "<group>"; };
 		BA83C07BD6661A63FFD1400F /* RemodexLaunchIntent.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RemodexLaunchIntent.swift; sourceTree = "<group>"; };
 		C04E214C2F71D4DB00AA3193 /* StoreKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = StoreKit.framework; path = System/Library/Frameworks/StoreKit.framework; sourceTree = SDKROOT; };
-		C09A76AE2F4B8D7B003B3F3A /* Modex.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Modex.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		C09A76AE2F4B8D7B003B3F3A /* CodexMobile.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CodexMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C0B9CCCCC45E47616AB452FA /* RemodexMenuBarApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RemodexMenuBarApp.swift; sourceTree = "<group>"; };
 		C1D2E3F40516273849A5B6C7 /* CodexServiceIncomingCommandExecutionTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexServiceIncomingCommandExecutionTests.swift; sourceTree = "<group>"; };
 		C31FD4BBF43CBB431839BBF8 /* RemodexWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = RemodexWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -396,7 +396,7 @@
 		C09A76AF2F4B8D7B003B3F3A /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				C09A76AE2F4B8D7B003B3F3A /* Modex.app */,
+				C09A76AE2F4B8D7B003B3F3A /* CodexMobile.app */,
 				FBC8EB1341C49A392A43BFB3 /* CodexMobileTests.xctest */,
 				F0EE6A924EE6B288E7D0DFE1 /* CodexMobileUITests.xctest */,
 				92DE4487B55C077AF7694484 /* RemodexMenuBar.app */,
@@ -578,7 +578,7 @@
 				D1A000000000000000000114 /* TreeSitterYAMLRunestone */,
 			);
 			productName = CodexMobile;
-			productReference = C09A76AE2F4B8D7B003B3F3A /* Modex.app */;
+			productReference = C09A76AE2F4B8D7B003B3F3A /* CodexMobile.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -817,7 +817,7 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = HR24WHR326;
+				DEVELOPMENT_TEAM = AGQDQFK98K;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "$(PRODUCT_NAME)";
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
@@ -835,7 +835,7 @@
 			buildSettings = {
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = HR24WHR326;
+				DEVELOPMENT_TEAM = AGQDQFK98K;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "$(PRODUCT_NAME)";
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
@@ -889,7 +889,7 @@
 			buildSettings = {
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = HR24WHR326;
+				DEVELOPMENT_TEAM = AGQDQFK98K;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "$(PRODUCT_NAME)";
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
@@ -909,7 +909,7 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = HR24WHR326;
+				DEVELOPMENT_TEAM = AGQDQFK98K;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "$(PRODUCT_NAME)";
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
@@ -958,7 +958,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = HR24WHR326;
+				DEVELOPMENT_TEAM = AGQDQFK98K;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -1022,7 +1022,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				DEVELOPMENT_TEAM = HR24WHR326;
+				DEVELOPMENT_TEAM = AGQDQFK98K;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -1075,9 +1075,9 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-ttttMARKETING_VERSION = 2.0;
-ttttPRODUCT_BUNDLE_IDENTIFIER = cc.xjpz.Remodex;
-ttttPRODUCT_NAME = Modex;
+				PRODUCT_BUNDLE_IDENTIFIER = cc.xjpz.Remodex;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				MARKETING_VERSION = 2.0;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -1123,9 +1123,9 @@ ttttPRODUCT_NAME = Modex;
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-ttttMARKETING_VERSION = 2.0;
-ttttPRODUCT_BUNDLE_IDENTIFIER = cc.xjpz.Remodex;
-ttttPRODUCT_NAME = Modex;
+				PRODUCT_BUNDLE_IDENTIFIER = cc.xjpz.Remodex;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				MARKETING_VERSION = 2.0;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -1150,7 +1150,7 @@ ttttPRODUCT_NAME = Modex;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = HR24WHR326;
+				DEVELOPMENT_TEAM = AGQDQFK98K;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "BuildSupport/RemodexMenuBar-Info.plist";
@@ -1184,7 +1184,7 @@ ttttPRODUCT_NAME = Modex;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = HR24WHR326;
+				DEVELOPMENT_TEAM = AGQDQFK98K;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "BuildSupport/RemodexMenuBar-Info.plist";
