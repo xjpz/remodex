@@ -20,6 +20,7 @@ const {
   persistBridgePreferences,
   resolveJsonlTurnsListRolloutPathForFallback,
   sanitizeLiveGeneratedImageMessageForRelay,
+  isContextualUserItemNotification,
   sanitizeThreadHistoryImagesForRelay,
 } = require("../src/bridge");
 
@@ -181,6 +182,22 @@ test("normalizeRelayBoundJsonRpcMessage keeps server-origin approval requests", 
   });
 
   assert.equal(normalizeRelayBoundJsonRpcMessage(raw), raw);
+});
+
+test("normalizeRelayBoundJsonRpcMessage accepts a pre-parsed passthrough envelope", () => {
+  const parsedMessage = {
+    method: "turn/completed",
+    params: {
+      threadId: "thread-preparsed",
+      turnId: "turn-preparsed",
+    },
+  };
+  const raw = JSON.stringify(parsedMessage);
+
+  assert.equal(
+    normalizeRelayBoundJsonRpcMessage(raw, { parsedMessage }),
+    raw
+  );
 });
 
 test("disableUnsupportedReasoningSummaryForTurnStart disables summaries for Codex Spark", () => {
@@ -842,6 +859,96 @@ test("fetchAdaptiveThreadTurnsListForRelay does not copy malformed page fields i
   });
 });
 
+test("isContextualUserItemNotification drops only contextual live user items", () => {
+  const contextualItem = {
+    id: "ctx-item",
+    type: "userMessage",
+    content: [{
+      type: "input_text",
+      text: "# AGENTS.md instructions for /Users/me/proj\n<INSTRUCTIONS>rules</INSTRUCTIONS>",
+    }],
+  };
+
+  assert.equal(isContextualUserItemNotification({
+    method: "item/started",
+    params: { threadId: "t", item: contextualItem },
+  }), true);
+  assert.equal(isContextualUserItemNotification({
+    method: "item/completed",
+    params: { threadId: "t", item: contextualItem },
+  }), true);
+
+  // Real prompts, assistant items, and other methods must pass through.
+  assert.equal(isContextualUserItemNotification({
+    method: "item/started",
+    params: {
+      threadId: "t",
+      item: { id: "real", type: "userMessage", content: [{ type: "input_text", text: "ciao" }] },
+    },
+  }), false);
+  assert.equal(isContextualUserItemNotification({
+    method: "item/started",
+    params: { threadId: "t", item: { id: "a", type: "agentMessage", text: "hi" } },
+  }), false);
+  assert.equal(isContextualUserItemNotification({
+    method: "turn/started",
+    params: { threadId: "t", item: contextualItem },
+  }), false);
+});
+
+test("sanitizeThreadHistoryImagesForRelay drops injected context user items from history", () => {
+  const rawMessage = JSON.stringify({
+    id: "req-thread-context",
+    result: {
+      thread: {
+        id: "thread-context",
+        turns: [
+          {
+            id: "turn-1",
+            items: [
+              {
+                id: "item-agents",
+                type: "message",
+                role: "user",
+                content: [{
+                  type: "input_text",
+                  text: "# AGENTS.md instructions for /Users/me/proj\n\n<INSTRUCTIONS>\nrules\n</INSTRUCTIONS>",
+                }],
+              },
+              {
+                id: "item-env",
+                type: "message",
+                role: "user",
+                content: [{
+                  type: "input_text",
+                  text: "<environment_context>\n  <cwd>/Users/me/proj</cwd>\n</environment_context>",
+                }],
+              },
+              {
+                id: "item-real",
+                type: "user_message",
+                content: [{ type: "input_text", text: "minchia compa" }],
+              },
+              {
+                id: "item-reply",
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "Dimmi tutto" }],
+              },
+            ],
+          },
+        ],
+      },
+    },
+  });
+
+  const sanitized = JSON.parse(
+    sanitizeThreadHistoryImagesForRelay(rawMessage, "thread/read")
+  );
+  const itemIds = sanitized.result.thread.turns[0].items.map((item) => item.id);
+  assert.deepEqual(itemIds, ["item-real", "item-reply"]);
+});
+
 test("sanitizeThreadHistoryImagesForRelay replaces inline history images with lightweight references", () => {
   const rawMessage = JSON.stringify({
     id: "req-thread-read",
@@ -980,6 +1087,107 @@ test("sanitizeThreadHistoryImagesForRelay converts desktop apply_patch history t
     additions: 1,
     deletions: 1,
   }]);
+});
+
+test("sanitizeThreadHistoryImagesForRelay restores JSONL context when thread/read only has final text", (t) => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-history-jsonl-context-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+  t.after(() => {
+    if (previousCodexHome == null) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  });
+
+  const threadId = "thread-jsonl-context";
+  const turnId = "turn-jsonl-context";
+  const sessionsDir = path.join(codexHome, "sessions", "2026", "07", "05");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(sessionsDir, `rollout-2026-07-05T17-40-00-${threadId}.jsonl`),
+    [
+      JSON.stringify({
+        type: "session_meta",
+        payload: { id: threadId },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "task_started",
+          turn_id: turnId,
+        },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "user_message",
+          turn_id: turnId,
+          message: "fix the completed-open history",
+        },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "exec_command",
+          call_id: "call-jsonl-context-command",
+          arguments: JSON.stringify({ cmd: "git diff --check" }),
+        },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          id: "jsonl-final-context",
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "Done." }],
+        },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          turn_id: turnId,
+        },
+      }),
+    ].join("\n"),
+    "utf8"
+  );
+
+  const sanitized = JSON.parse(sanitizeThreadHistoryImagesForRelay(JSON.stringify({
+    id: "req-thread-jsonl-context",
+    result: {
+      thread: {
+        id: threadId,
+        turns: [
+          {
+            id: turnId,
+            items: [
+              {
+                id: "server-final-context",
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "Done." }],
+              },
+            ],
+          },
+        ],
+      },
+    },
+  }), "thread/read"));
+
+  const items = sanitized.result.thread.turns[0].items;
+  assert.deepEqual(items.map((item) => item.type), [
+    "user_message",
+    "commandExecution",
+    "message",
+  ]);
+  assert.equal(items[0].text, "fix the completed-open history");
+  assert.equal(items[1].command, "git diff --check");
+  assert.equal(items[2].id, "server-final-context");
 });
 
 test("sanitizeThreadHistoryImagesForRelay augments app-server history with JSONL fileChange blocks", (t) => {
@@ -1446,11 +1654,14 @@ test("sanitizeThreadHistoryImagesForRelay restores JSONL view_image output previ
   );
   const items = sanitized.result.thread.turns[0].items;
 
-  assert.equal(items.length, 2);
-  assert.equal(items[1].type, "imageView");
-  assert.equal(items[1].path, imagePath);
-  assert.equal(items[1].remodexJsonlToolOutputImage, true);
-  assert.equal(Object.hasOwn(items[1], "output"), false);
+  assert.equal(items.length, 3);
+  assert.equal(items[0].type, "tool_call");
+  assert.equal(items[0].message, "Open image …/media/screenshot.png");
+  assert.equal(items[1].type, "message");
+  assert.equal(items[2].type, "imageView");
+  assert.equal(items[2].path, imagePath);
+  assert.equal(items[2].remodexJsonlToolOutputImage, true);
+  assert.equal(Object.hasOwn(items[2], "output"), false);
 });
 
 test("sanitizeThreadHistoryImagesForRelay restores JSONL cwd without file changes", (t) => {
@@ -1508,6 +1719,82 @@ test("sanitizeThreadHistoryImagesForRelay restores JSONL cwd without file change
   assert.equal(sanitized.result.thread.cwd, cwd);
   assert.equal(sanitized.result.thread.current_working_directory, cwd);
   assert.equal(sanitized.result.thread.turns[0].items.length, 1);
+});
+
+test("sanitizeThreadHistoryImagesForRelay refreshes JSONL cwd when a newer same-thread rollout appears", (t) => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-history-cwd-newer-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+  t.after(() => {
+    if (previousCodexHome == null) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  });
+
+  const threadId = "thread-jsonl-cwd-newer";
+  const sessionsDir = path.join(codexHome, "sessions", "2026", "05", "19");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+
+  const writeRollout = (fileName, cwd, mtime) => {
+    const rolloutPath = path.join(sessionsDir, fileName);
+    fs.writeFileSync(
+      rolloutPath,
+      JSON.stringify({
+        type: "session_meta",
+        payload: {
+          id: threadId,
+          cwd,
+        },
+      }),
+      "utf8"
+    );
+    const timestamp = new Date(mtime);
+    fs.utimesSync(rolloutPath, timestamp, timestamp);
+  };
+
+  const readThreadCwd = () => JSON.parse(sanitizeThreadHistoryImagesForRelay(JSON.stringify({
+    id: "req-thread-cwd-newer",
+    result: {
+      thread: {
+        id: threadId,
+        cwd: "/tmp/stale",
+        turns: [
+          {
+            id: "turn-cwd-newer",
+            items: [
+              {
+                id: "assistant-cwd-newer",
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "Done." }],
+              },
+            ],
+          },
+        ],
+      },
+    },
+  }), "thread/read")).result.thread.cwd;
+
+  const firstCwd = "/Users/test/FirstProject";
+  const secondCwd = "/Users/test/SecondProject";
+  assert.equal(readThreadCwd(), "/tmp/stale");
+
+  writeRollout(
+    `rollout-2026-05-19T19-45-00-${threadId}.jsonl`,
+    firstCwd,
+    "2026-05-19T19:45:00.000Z"
+  );
+  assert.equal(readThreadCwd(), firstCwd);
+
+  writeRollout(
+    `rollout-2026-05-19T19-46-00-${threadId}.jsonl`,
+    secondCwd,
+    "2026-05-19T19:46:00.000Z"
+  );
+  assert.equal(readThreadCwd(), secondCwd);
 });
 
 test("sanitizeThreadHistoryImagesForRelay annotates generated image calls with local paths", () => {
@@ -2167,6 +2454,54 @@ test("sanitizeThreadHistoryImagesForRelay keeps the newest forty turns when comp
       ...turns.slice(5).map((turn) => turn.id),
     ]
   );
+});
+
+test("sanitizeThreadHistoryImagesForRelay compacts oversized raw histories before sanitizing turns", () => {
+  const imageData = `data:image/png;base64,${"A".repeat(100 * 1024)}`;
+  const turns = Array.from({ length: 50 }, (_, index) => ({
+    id: `turn-${index + 1}`,
+    items: [
+      {
+        id: `item-${index + 1}`,
+        type: "user_message",
+        content: [
+          { type: "input_text", text: `prompt ${index + 1}` },
+          { type: "image", image_url: imageData },
+        ],
+      },
+    ],
+  }));
+  const rawMessage = JSON.stringify({
+    id: "req-thread-pretrim",
+    result: {
+      thread: {
+        id: "thread-pretrim",
+        turns,
+      },
+    },
+  });
+
+  assert.equal(Buffer.byteLength(rawMessage, "utf8") > 4 * 1024 * 1024, true);
+
+  const sanitized = JSON.parse(
+    sanitizeThreadHistoryImagesForRelay(rawMessage, "thread/read")
+  );
+
+  assert.equal(sanitized.result.thread.historyTailTruncatedForRelay, true);
+  assert.equal(sanitized.result.thread.remodexHistoryCompacted, true);
+  assert.equal(sanitized.result.thread.remodexOmittedTurnCount, 10);
+  assert.equal(sanitized.result.thread.remodexKeptTurnCount, 40);
+  assert.deepEqual(
+    sanitized.result.thread.turns.map((turn) => turn.id),
+    [
+      "remodex-history-compacted-turn-1",
+      ...turns.slice(10).map((turn) => turn.id),
+    ]
+  );
+  assert.deepEqual(sanitized.result.thread.turns[1].items[0].content[1], {
+    type: "image",
+    url: "remodex://history-image-elided",
+  });
 });
 
 test("sanitizeThreadHistoryImagesForRelay truncates the newest oversized text item to its tail", () => {

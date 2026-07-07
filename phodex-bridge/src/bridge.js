@@ -53,9 +53,15 @@ const {
 const { createBridgeSecureTransport } = require("./secure-transport");
 const { createRolloutLiveMirrorController } = require("./rollout-live-mirror");
 const {
+  isContextualUserText,
+  isUserRoleItem,
+  readUserItemText,
+} = require("./desktop-ipc-shared");
+const {
   createDesktopIpcActionFollower,
   seedConversationStateFromThreadRead,
 } = require("./desktop-ipc-action-follower");
+const { createDesktopIpcLiveOwner } = require("./desktop-ipc-live-owner");
 const { version: bridgePackageVersion = "" } = require("../package.json");
 const {
   MINIMUM_SUPPORTED_IOS_APP_VERSION,
@@ -84,6 +90,10 @@ const RELAY_TURNS_LIST_SAFE_RETRY_LIMIT = 5;
 const RELAY_JSONL_TURNS_LIST_CACHE_TTL_MS = 30_000;
 const RELAY_JSONL_ARTIFACT_CACHE_TTL_MS = 2_000;
 const RELAY_JSONL_ARTIFACT_CACHE_MAX_ENTRIES = 128;
+// Session cwd is stable for a rollout file, but the same thread can later get a
+// newer rollout with a different cwd; cache entries are validated against file identity.
+const RELAY_JSONL_THREAD_CWD_CACHE_TTL_MS = 5 * 60_000;
+const RELAY_JSONL_THREAD_EMPTY_CWD_CACHE_TTL_MS = 30_000;
 const BRIDGE_PACKAGE_UPDATE_COMMAND = "npm install -g remodex@latest";
 const BRIDGE_PACKAGE_UPDATE_TIMEOUT_MS = 180_000;
 const BRIDGE_RESTART_AFTER_UPDATE_DELAY_MS = 750;
@@ -107,6 +117,7 @@ const RELAY_TURNS_LIST_PAGINATION_RESULT_KEYS = [
   "previous_cursor",
 ];
 const jsonlArtifactItemsCacheByThread = new Map();
+const jsonlThreadCwdCacheByThread = new Map();
 const FORWARDED_REQUEST_METHODS_MAX_SIZE = 500;
 const JSONL_ROLLOUT_PATH_CACHE_MAX_SIZE = 200;
 
@@ -160,6 +171,9 @@ function startBridge({
   const notificationSecret = randomBytes(24).toString("hex");
   const desktopRefresher = new CodexDesktopRefresher({
     enabled: config.refreshEnabled,
+    // With IPC live sync streaming content, deep-link refreshes are only needed
+    // to navigate Desktop onto the phone-driven thread, not to reload content.
+    navigationOnly: config.desktopIpcLiveSyncEnabled,
     debounceMs: config.refreshDebounceMs,
     refreshCommand: config.refreshCommand,
     bundleId: config.codexBundleId,
@@ -194,6 +208,7 @@ function startBridge({
   const bridgeManagedCodexRequestWaiters = new Map();
   const forwardedRequestMethodsById = new Map();
   const relaySanitizedResponseMethodsById = new Map();
+  const desktopIpcLiveOwnerObservedInboundKeys = new Set();
   const jsonlTurnsListRolloutCacheByThread = new Map();
   const jsonlTurnsListRolloutMissCacheByThread = new Map();
   const trackedForwardedRequestMethods = new Set([
@@ -247,6 +262,16 @@ function startBridge({
   const rolloutLiveMirror = !config.codexEndpoint
     ? createRolloutLiveMirrorController({
       sendApplicationResponse,
+      // One live source per thread: the IPC follower (Desktop-owned threads)
+      // and the bridge's own app-server stream (phone-owned threads) are both
+      // authoritative over the rollout file tail. The follower only counts
+      // while its Desktop stream is FRESH: a cache Desktop went silent on must
+      // not keep the rollout fallback muted, or a reopened running thread
+      // shows "finished" and never recovers until the next broadcast.
+      shouldSuppressThread: (threadId) => (
+        Boolean(desktopIpcActionFollower?.hasFreshLiveThreadState(threadId))
+        || Boolean(desktopIpcLiveOwner?.isThreadOwned(threadId))
+      ),
     })
     : null;
   const desktopIpcActionFollower = !config.codexEndpoint
@@ -255,7 +280,26 @@ function startBridge({
       readConversationState: async (threadId) => seedConversationStateFromThreadRead(
         await sendCodexRequest("thread/read", { threadId })
       ),
+      forwardToLocalCodex: (rawMessage) => {
+        observeDesktopIpcLiveOwnerInbound(rawMessage);
+        forwardInboundRequestToCodex(rawMessage);
+      },
+      // Threads streamed by the bridge's own app-server must never be held,
+      // served from Desktop echoes, or routed over the IPC bus.
+      isLocallyOwnedThread: (threadId) => Boolean(desktopIpcLiveOwner?.isThreadOwned(threadId)),
+      normalizeTurnStartParams: normalizeTurnStartParamsForCodex,
       socketPath: config.desktopIpcSocketPath || undefined,
+    })
+    : null;
+  const desktopIpcLiveOwner = !config.codexEndpoint
+    ? createDesktopIpcLiveOwner({
+      enabled: config.desktopIpcLiveSyncEnabled !== false,
+      sendApplicationResponse,
+      sendCodexRequest,
+      sendRawCodexMessage: (rawMessage) => codex.send(rawMessage),
+      normalizeTurnStartParams: normalizeTurnStartParamsForCodex,
+      socketPath: config.desktopIpcSocketPath || undefined,
+      snapshotDebounceMs: config.desktopIpcSnapshotDebounceMs,
     })
     : null;
   let contextUsageWatcher = null;
@@ -347,6 +391,7 @@ function startBridge({
     stopContextUsageWatcher();
     rolloutLiveMirror?.stopAll();
     desktopIpcActionFollower?.stopAll();
+    desktopIpcLiveOwner?.stopAll();
   }
 
   function stopBridge() {
@@ -533,16 +578,20 @@ function startBridge({
   connectRelay();
 
   codex.onMessage((message) => {
-    if (handleBridgeManagedCodexResponse(message)) {
+    // Streaming deltas make this the hottest path in the bridge: parse the
+    // envelope once and share the read-only object with every observer.
+    const parsedMessage = parseBridgeMessage(message);
+    if (handleBridgeManagedCodexResponse(message, parsedMessage)) {
       return;
     }
-    updatePendingAuthLoginFromCodexMessage(message);
-    trackCodexHandshakeState(message);
-    desktopRefresher.handleOutbound(message);
-    pushNotificationTracker.handleOutbound(message);
-    rememberThreadFromMessage("codex", message);
+    updatePendingAuthLoginFromCodexMessage(message, parsedMessage);
+    trackCodexHandshakeState(message, parsedMessage);
+    desktopRefresher.handleOutbound(message, parsedMessage);
+    desktopIpcLiveOwner?.observeOutbound(message, parsedMessage);
+    pushNotificationTracker.handleOutbound(message, parsedMessage);
+    rememberThreadFromMessage("codex", message, parsedMessage);
     secureTransport.queueOutboundApplicationMessage(
-      sanitizeRelayBoundCodexMessage(message),
+      sanitizeRelayBoundCodexMessage(message, parsedMessage),
       sendRelayWireMessage
     );
   });
@@ -579,16 +628,17 @@ function startBridge({
 
   // Routes decrypted app payloads through the same bridge handlers as before.
   function handleApplicationMessage(rawMessage) {
-    if (handleBridgeManagedHandshakeMessage(rawMessage, sendApplicationResponse)) {
+    const parsedMessage = parseBridgeMessage(rawMessage);
+    if (handleBridgeManagedHandshakeMessage(rawMessage, sendApplicationResponse, parsedMessage)) {
       return;
     }
-    if (handleBridgeManagedAccountRequest(rawMessage, sendApplicationResponse)) {
+    if (handleBridgeManagedAccountRequest(rawMessage, sendApplicationResponse, parsedMessage)) {
       return;
     }
-    if (voiceHandler.handleVoiceRequest(rawMessage, sendApplicationResponse)) {
+    if (voiceHandler.handleVoiceRequest(rawMessage, sendApplicationResponse, parsedMessage)) {
       return;
     }
-    if (handleThreadContextRequest(rawMessage, sendApplicationResponse)) {
+    if (handleThreadContextRequest(rawMessage, sendApplicationResponse, parsedMessage)) {
       return;
     }
     if (handleWorkspaceRequest(rawMessage, sendApplicationResponse)) {
@@ -618,18 +668,66 @@ function startBridge({
     })) {
       return;
     }
-    desktopRefresher.handleInbound(rawMessage);
-    rolloutLiveMirror?.observeInbound(rawMessage);
-    if (desktopIpcActionFollower?.observeInbound(rawMessage)) {
+    desktopRefresher.handleInbound(rawMessage, parsedMessage);
+    rolloutLiveMirror?.observeInbound(rawMessage, parsedMessage);
+    if (desktopIpcActionFollower?.observeInbound(rawMessage, parsedMessage)) {
       return;
     }
+    observeDesktopIpcLiveOwnerInbound(rawMessage, parsedMessage);
     if (handleBridgeManagedThreadTurnsListRequest(rawMessage, sendApplicationResponse)) {
       return;
     }
+    forwardInboundRequestToCodex(rawMessage);
+  }
+
+  function forwardInboundRequestToCodex(rawMessage) {
     const codexRequest = disableUnsupportedReasoningSummaryForTurnStart(rawMessage);
     rememberForwardedRequestMethod(rawMessage);
     rememberThreadFromMessage("phone", codexRequest);
     codex.send(codexRequest);
+  }
+
+  // Held Desktop-ownership probes can later fall back locally, so observe each
+  // phone request at most once in the live owner even if it passes both paths.
+  function observeDesktopIpcLiveOwnerInbound(rawMessage, parsedMessage = null) {
+    if (!desktopIpcLiveOwner) {
+      return;
+    }
+    const inboundKey = desktopIpcLiveOwnerInboundKey(rawMessage, parsedMessage);
+    if (inboundKey) {
+      if (desktopIpcLiveOwnerObservedInboundKeys.has(inboundKey)) {
+        return;
+      }
+      desktopIpcLiveOwnerObservedInboundKeys.add(inboundKey);
+      evictOldestEntries(desktopIpcLiveOwnerObservedInboundKeys, FORWARDED_REQUEST_METHODS_MAX_SIZE);
+    }
+    desktopIpcLiveOwner.observeInbound(rawMessage, parsedMessage);
+  }
+
+  function desktopIpcLiveOwnerInboundKey(rawMessage, parsedMessage = null) {
+    const parsed = parsedMessage ?? safeParseJSON(rawMessage);
+    const method = typeof parsed?.method === "string" ? parsed.method : "";
+    if (!method || parsed?.id == null) {
+      return "";
+    }
+    // extractThreadId only understands turn/thread start and completion params;
+    // archive, steer, interrupt, and compact requests need the generic fields so
+    // same-id requests for different threads never share a dedupe key.
+    const threadId = extractThreadId(method, parsed.params)
+      || readString(parsed?.params?.threadId)
+      || readString(parsed?.params?.thread_id)
+      || readString(parsed?.params?.conversationId)
+      || readString(parsed?.params?.conversation_id)
+      || "";
+    return `${method}:${threadId}:${String(parsed.id)}`;
+  }
+
+  function parseBridgeMessage(rawMessage) {
+    try {
+      return JSON.parse(rawMessage);
+    } catch {
+      return null;
+    }
   }
 
   // Encrypts bridge-generated responses instead of letting the relay see plaintext.
@@ -794,11 +892,9 @@ function startBridge({
 
   // Handles the bridge-owned auth status wrappers without exposing tokens to the phone.
   // This dispatcher stays synchronous so non-account messages can continue down the normal routing chain.
-  function handleBridgeManagedAccountRequest(rawMessage, sendResponse) {
-    let parsed = null;
-    try {
-      parsed = JSON.parse(rawMessage);
-    } catch {
+  function handleBridgeManagedAccountRequest(rawMessage, sendResponse, parsedMessage = null) {
+    const parsed = parsedMessage || parseBridgeMessage(rawMessage);
+    if (!parsed) {
       return false;
     }
 
@@ -953,16 +1049,25 @@ function startBridge({
   }
 
   // Replaces huge inline desktop-history images with lightweight references before relay encryption.
-  function sanitizeRelayBoundCodexMessage(rawMessage) {
+  function sanitizeRelayBoundCodexMessage(rawMessage, parsedMessage = null) {
     pruneExpiredForwardedRequestMethods();
     const normalizedMessage = normalizeRelayBoundJsonRpcMessage(rawMessage, {
       pendingRequestMethodsById: relaySanitizedResponseMethodsById,
+      parsedMessage,
     });
     if (!normalizedMessage) {
       return null;
     }
 
-    const parsed = safeParseJSON(normalizedMessage);
+    // Streaming deltas hit this path dozens of times per second; when the
+    // envelope passed through normalization untouched, reuse the parse the
+    // caller already paid for instead of re-parsing the same bytes.
+    const parsed = normalizedMessage === rawMessage && parsedMessage
+      ? parsedMessage
+      : safeParseJSON(normalizedMessage);
+    if (isContextualUserItemNotification(parsed)) {
+      return null;
+    }
     const responseId = parsed?.id;
     if (responseId == null) {
       return sanitizeLiveGeneratedImageMessageForRelay(normalizedMessage);
@@ -977,9 +1082,9 @@ function startBridge({
     return sanitizeThreadHistoryImagesForRelay(normalizedMessage, trackedRequest.method, trackedRequest);
   }
 
-  function updatePendingAuthLoginFromCodexMessage(rawMessage) {
+  function updatePendingAuthLoginFromCodexMessage(rawMessage, parsedMessage = null) {
     pruneExpiredForwardedRequestMethods();
-    const parsed = safeParseJSON(rawMessage);
+    const parsed = parsedMessage ?? safeParseJSON(rawMessage);
     const responseId = parsed?.id;
     if (responseId != null) {
       const trackedRequest = forwardedRequestMethodsById.get(String(responseId));
@@ -1052,6 +1157,7 @@ function startBridge({
     evictOldestEntries(jsonlArtifactItemsCacheByThread, RELAY_JSONL_ARTIFACT_CACHE_MAX_ENTRIES);
     evictOldestEntries(jsonlTurnsListRolloutCacheByThread, JSONL_ROLLOUT_PATH_CACHE_MAX_SIZE);
     evictOldestEntries(jsonlTurnsListRolloutMissCacheByThread, JSONL_ROLLOUT_PATH_CACHE_MAX_SIZE);
+    evictOldestEntries(jsonlThreadCwdCacheByThread, JSONL_ROLLOUT_PATH_CACHE_MAX_SIZE);
   }
 
   function safeParseJSON(value) {
@@ -1062,8 +1168,8 @@ function startBridge({
     }
   }
 
-  function rememberThreadFromMessage(source, rawMessage) {
-    const context = extractBridgeMessageContext(rawMessage);
+  function rememberThreadFromMessage(source, rawMessage, parsedMessage = null) {
+    const context = extractBridgeMessageContext(rawMessage, parsedMessage);
     if (!context.threadId) {
       return;
     }
@@ -1140,11 +1246,9 @@ function startBridge({
   // The spawned/shared Codex app-server stays warm across phone reconnects.
   // When iPhone reconnects it sends initialize again, but forwarding that to the
   // already-initialized Codex transport only produces "Already initialized".
-  function handleBridgeManagedHandshakeMessage(rawMessage, sendResponse = sendApplicationResponse) {
-    let parsed = null;
-    try {
-      parsed = JSON.parse(rawMessage);
-    } catch {
+  function handleBridgeManagedHandshakeMessage(rawMessage, sendResponse = sendApplicationResponse, parsedMessage = null) {
+    const parsed = parsedMessage || parseBridgeMessage(rawMessage);
+    if (!parsed) {
       return false;
     }
 
@@ -1249,11 +1353,9 @@ function startBridge({
   }
 
   // Learns whether the underlying Codex transport has already completed its own MCP handshake.
-  function trackCodexHandshakeState(rawMessage) {
-    let parsed = null;
-    try {
-      parsed = JSON.parse(rawMessage);
-    } catch {
+  function trackCodexHandshakeState(rawMessage, parsedMessage = null) {
+    const parsed = parsedMessage ?? safeParseJSON(rawMessage);
+    if (!parsed) {
       return;
     }
 
@@ -1317,11 +1419,9 @@ function startBridge({
 
   // Intercepts responses for bridge-private requests so only user-visible app-server traffic
   // is forwarded back through secure transport.
-  function handleBridgeManagedCodexResponse(rawMessage) {
-    let parsed = null;
-    try {
-      parsed = JSON.parse(rawMessage);
-    } catch {
+  function handleBridgeManagedCodexResponse(rawMessage, parsedMessage = null) {
+    const parsed = parsedMessage ?? safeParseJSON(rawMessage);
+    if (!parsed) {
       return false;
     }
 
@@ -1686,17 +1786,26 @@ function disableUnsupportedReasoningSummaryForTurnStart(rawMessage) {
   });
 }
 
+function normalizeTurnStartParamsForCodex(params) {
+  const normalizedRawMessage = disableUnsupportedReasoningSummaryForTurnStart(JSON.stringify({
+    method: "turn/start",
+    params,
+  }));
+  const parsed = parseBridgeJSON(normalizedRawMessage);
+  return parsed?.params && typeof parsed.params === "object" && !Array.isArray(parsed.params)
+    ? parsed.params
+    : params;
+}
+
 function readTurnStartModel(params) {
   return normalizeNonEmptyString(params?.model).toLowerCase()
     || normalizeNonEmptyString(params?.collaborationMode?.settings?.model).toLowerCase()
     || normalizeNonEmptyString(params?.collaboration_mode?.settings?.model).toLowerCase();
 }
 
-function extractBridgeMessageContext(rawMessage) {
-  let parsed = null;
-  try {
-    parsed = JSON.parse(rawMessage);
-  } catch {
+function extractBridgeMessageContext(rawMessage, parsedMessage = null) {
+  const parsed = parsedMessage ?? parseBridgeJSON(rawMessage);
+  if (!parsed) {
     return { method: "", threadId: null, turnId: null };
   }
 
@@ -2287,8 +2396,10 @@ function measureSanitizedTurnsListResponseBytes(response, sanitizeForRelay, requ
 // Keeps app-server responses in the JSON-RPC shape that the App Store iOS client decodes.
 function normalizeRelayBoundJsonRpcMessage(rawMessage, {
   pendingRequestMethodsById = null,
+  // Optional pre-parsed envelope shared by the caller; treated as read-only.
+  parsedMessage = null,
 } = {}) {
-  const parsed = parseBridgeJSON(rawMessage);
+  const parsed = parsedMessage ?? parseBridgeJSON(rawMessage);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     return null;
   }
@@ -2407,11 +2518,32 @@ function sanitizeThreadHistoryImagesForRelay(rawMessage, requestMethod, requestC
     || normalizeNonEmptyString(thread.id)
     || normalizeNonEmptyString(thread.threadId)
     || normalizeNonEmptyString(thread.thread_id);
-  const { turns: sanitizedTurns, didSanitize } = sanitizeRelayHistoryTurns(thread.turns, threadId);
-  const { thread: threadWithJsonlMetadata, didAugment: didAugmentThreadMetadata } = augmentRelayThreadWithJsonlMetadata(thread, threadId);
-  const { turns: augmentedTurns, didAugment } = augmentRelayHistoryTurnsWithJsonlArtifacts(sanitizedTurns, threadId);
 
-  if (!didSanitize && !didAugment && !didAugmentThreadMetadata) {
+  // Oversized histories get their turn window trimmed before the per-turn sanitize
+  // and augment passes so full-history work is not spent on turns the payload
+  // budget discards anyway. The byte-budget trim below still enforces the cap.
+  const didPreTrimTurnWindow = Buffer.byteLength(rawMessage, "utf8") > RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES
+    && thread.turns.length > RELAY_HISTORY_RECENT_TURN_TARGET;
+  const workingTurns = didPreTrimTurnWindow
+    ? thread.turns.slice(-RELAY_HISTORY_RECENT_TURN_TARGET)
+    : thread.turns;
+  const workingThread = didPreTrimTurnWindow ? { ...thread, turns: workingTurns } : thread;
+  const trimOptions = didPreTrimTurnWindow
+    ? {
+      preOmittedTurnCount: thread.turns.length - workingTurns.length,
+      compactionIdSource: thread.turns[0],
+    }
+    : {};
+
+  const { turns: sanitizedTurns, didSanitize } = sanitizeRelayHistoryTurns(workingTurns, threadId);
+  const { thread: threadWithJsonlMetadata, didAugment: didAugmentThreadMetadata } = augmentRelayThreadWithJsonlMetadata(workingThread, threadId);
+  const { turns: augmentedTurns, didAugment } = augmentRelayHistoryTurnsWithJsonlArtifacts(
+    sanitizedTurns,
+    threadId,
+    { includeHistoryItems: true }
+  );
+
+  if (!didSanitize && !didAugment && !didAugmentThreadMetadata && !didPreTrimTurnWindow) {
     const trimmedPayload = trimThreadPayloadForRelay(parsed, thread);
     return trimmedPayload == null ? rawMessage : trimmedPayload;
   }
@@ -2427,7 +2559,7 @@ function sanitizeThreadHistoryImagesForRelay(rawMessage, requestMethod, requestC
     },
   });
 
-  return trimThreadPayloadForRelay(parseBridgeJSON(sanitizedPayload), null) ?? sanitizedPayload;
+  return trimThreadPayloadForRelay(parseBridgeJSON(sanitizedPayload), null, trimOptions) ?? sanitizedPayload;
 }
 
 function sanitizeThreadTurnsListForRelay(rawMessage, requestContext = {}) {
@@ -2495,21 +2627,90 @@ function readJsonlThreadCwd(threadId) {
     return "";
   }
 
+  const sessionsRoot = resolveSessionsRoot();
+  const cacheKey = buildJsonlThreadCacheKey(sessionsRoot, normalizedThreadId);
+
   try {
-    const rolloutPath = findRecentRolloutFileForContextRead(resolveSessionsRoot(), { threadId: normalizedThreadId });
+    const rolloutPath = findRecentRolloutFileForContextRead(sessionsRoot, { threadId: normalizedThreadId });
     if (!rolloutPath) {
       return "";
     }
 
-    const metadata = parseSessionJsonlMetadata(fs.readFileSync(rolloutPath, "utf8"));
-    const cwd = normalizeNonEmptyString(metadata?.cwd);
-    return cwd && path.isAbsolute(cwd) ? cwd : "";
+    const cached = readCachedJsonlThreadCwd(cacheKey, rolloutPath);
+    if (cached) {
+      return cached.cwd;
+    }
+
+    return readAndCacheJsonlThreadCwd(cacheKey, rolloutPath);
   } catch {
     return "";
   }
 }
 
-function augmentRelayHistoryTurnsWithJsonlArtifacts(turns, threadId = "") {
+function readCachedJsonlThreadCwd(cacheKey, rolloutPath) {
+  const cached = jsonlThreadCwdCacheByThread.get(cacheKey);
+  if (!cached || cached.rolloutPath !== rolloutPath) {
+    return null;
+  }
+
+  const stat = statJsonlRollout(rolloutPath);
+  if (!stat) {
+    jsonlThreadCwdCacheByThread.delete(cacheKey);
+    return null;
+  }
+
+  if (stat.mtimeMs !== cached.mtimeMs || stat.size !== cached.size) {
+    return null;
+  }
+
+  const ttl = cached.cwd ? RELAY_JSONL_THREAD_CWD_CACHE_TTL_MS : RELAY_JSONL_THREAD_EMPTY_CWD_CACHE_TTL_MS;
+  if (Date.now() - cached.checkedAt > ttl) {
+    return null;
+  }
+
+  return { cwd: cached.cwd };
+}
+
+function readAndCacheJsonlThreadCwd(cacheKey, rolloutPath, stat = null) {
+  const rolloutStat = stat || statJsonlRollout(rolloutPath);
+  if (!rolloutStat) {
+    jsonlThreadCwdCacheByThread.delete(cacheKey);
+    return "";
+  }
+
+  let cwd = "";
+  try {
+    const metadata = parseSessionJsonlMetadata(fs.readFileSync(rolloutPath, "utf8"));
+    const parsedCwd = normalizeNonEmptyString(metadata?.cwd);
+    cwd = parsedCwd && path.isAbsolute(parsedCwd) ? parsedCwd : "";
+  } catch {
+    cwd = "";
+  }
+
+  rememberJsonlThreadCwdCache(cacheKey, {
+    rolloutPath,
+    cwd,
+    mtimeMs: rolloutStat.mtimeMs,
+    size: rolloutStat.size,
+    checkedAt: Date.now(),
+  });
+  return cwd;
+}
+
+function rememberJsonlThreadCwdCache(cacheKey, entry) {
+  jsonlThreadCwdCacheByThread.set(cacheKey, entry);
+  while (jsonlThreadCwdCacheByThread.size > JSONL_ROLLOUT_PATH_CACHE_MAX_SIZE) {
+    const oldestKey = jsonlThreadCwdCacheByThread.keys().next().value;
+    if (oldestKey == null) {
+      break;
+    }
+    jsonlThreadCwdCacheByThread.delete(oldestKey);
+  }
+}
+
+function augmentRelayHistoryTurnsWithJsonlArtifacts(turns, threadId = "", {
+  includeHistoryItems = false,
+} = {}) {
   const normalizedThreadId = normalizeNonEmptyString(threadId);
   if (!normalizedThreadId || !Array.isArray(turns) || turns.length === 0) {
     return { turns, didAugment: false };
@@ -2532,6 +2733,12 @@ function augmentRelayHistoryTurnsWithJsonlArtifacts(turns, threadId = "") {
 
     const items = Array.isArray(turn.items) ? turn.items : [];
     let nextItems = items;
+    if (includeHistoryItems && artifacts.historyItems?.length > 0) {
+      const merged = mergeRelayHistoryItemsWithJsonlItems(items, artifacts.historyItems, normalizedThreadId);
+      if (merged.items !== items) {
+        nextItems = merged.items;
+      }
+    }
     if (artifacts.fileChangeItem && !hasEquivalentFileChangeItem(nextItems, artifacts.fileChangeItem)) {
       nextItems = nextItems === items ? [...items] : nextItems;
       nextItems.push(artifacts.fileChangeItem);
@@ -2593,6 +2800,10 @@ function readJsonlArtifactItemsByTurnId(threadId) {
 }
 
 function buildJsonlArtifactItemsCacheKey(sessionsRoot, threadId) {
+  return buildJsonlThreadCacheKey(sessionsRoot, threadId);
+}
+
+function buildJsonlThreadCacheKey(sessionsRoot, threadId) {
   return `${sessionsRoot}\0${threadId}`;
 }
 
@@ -2602,7 +2813,7 @@ function readCachedJsonlArtifactItems(cacheKey, threadId) {
     return null;
   }
 
-  const stat = statJsonlArtifactRollout(cached.rolloutPath);
+  const stat = statJsonlRollout(cached.rolloutPath);
   if (!stat) {
     jsonlArtifactItemsCacheByThread.delete(cacheKey);
     return null;
@@ -2646,6 +2857,7 @@ function readAndCacheJsonlArtifactItems(cacheKey, rolloutPath, threadId, stat = 
       ));
       const artifacts = {
         fileChangeItem: null,
+        historyItems: turnItems.filter(shouldMergeJsonlHistoryItemIntoThreadRead),
         imageViewItems: [],
         progressPlanItem: null,
       };
@@ -2678,7 +2890,12 @@ function readAndCacheJsonlArtifactItems(cacheKey, rolloutPath, threadId, stat = 
           id: normalizeNonEmptyString(item.id) || `remodex-jsonl-image-view-${turnId}-${index + 1}`,
         }));
 
-      if (artifacts.fileChangeItem || artifacts.progressPlanItem || artifacts.imageViewItems.length > 0) {
+      if (
+        artifacts.fileChangeItem
+        || artifacts.progressPlanItem
+        || artifacts.imageViewItems.length > 0
+        || artifacts.historyItems.length > 0
+      ) {
         artifactsByTurnId.set(turnId, artifacts);
       }
     }
@@ -2697,7 +2914,7 @@ function readAndCacheJsonlArtifactItems(cacheKey, rolloutPath, threadId, stat = 
   return artifactsByTurnId;
 }
 
-function statJsonlArtifactRollout(rolloutPath) {
+function statJsonlRollout(rolloutPath) {
   try {
     return fs.statSync(rolloutPath);
   } catch {
@@ -2714,6 +2931,145 @@ function rememberJsonlArtifactItemsCache(cacheKey, entry) {
     }
     jsonlArtifactItemsCacheByThread.delete(oldestKey);
   }
+}
+
+// Fills sparse app-server thread/read turns from local JSONL while preserving server-rich duplicates.
+function mergeRelayHistoryItemsWithJsonlItems(existingItems, jsonlItems, threadId = "") {
+  if (!Array.isArray(existingItems) || !Array.isArray(jsonlItems) || jsonlItems.length === 0) {
+    return { items: existingItems, didMerge: false };
+  }
+
+  const candidates = existingItems.map((item) => ({
+    item,
+    used: false,
+  }));
+  const mergedItems = [];
+  let didMerge = false;
+
+  for (const rawJsonlItem of jsonlItems) {
+    const jsonlItem = sanitizeJsonlHistoryItemForRelayMerge(rawJsonlItem, threadId);
+    const existingIndex = candidates.findIndex((candidate) => (
+      !candidate.used && areEquivalentRelayHistoryItems(candidate.item, jsonlItem)
+    ));
+    if (existingIndex === -1) {
+      mergedItems.push(jsonlItem);
+      didMerge = true;
+      continue;
+    }
+
+    candidates[existingIndex].used = true;
+    mergedItems.push(candidates[existingIndex].item);
+  }
+
+  for (const candidate of candidates) {
+    if (!candidate.used) {
+      mergedItems.push(candidate.item);
+      didMerge = true;
+    }
+  }
+
+  if (!didMerge && mergedItems.every((item, index) => item === existingItems[index])) {
+    return { items: existingItems, didMerge: false };
+  }
+
+  return { items: mergedItems, didMerge: true };
+}
+
+function sanitizeJsonlHistoryItemForRelayMerge(item, threadId) {
+  const sanitizedTurn = sanitizeRelayHistoryTurn({ items: [item] }, threadId);
+  return sanitizedTurn?.items?.[0] || item;
+}
+
+function shouldMergeJsonlHistoryItemIntoThreadRead(item) {
+  const itemType = normalizeHistoryItemToken(item?.type);
+  if (!itemType) {
+    return false;
+  }
+
+  // These already have specialized lightweight restoration paths below.
+  if (itemType === "filechange" || itemType === "imageview" || itemType === "plan") {
+    return false;
+  }
+
+  // Raw outputs can be huge/noisy; readable tool rows and command rows carry the useful context.
+  return itemType !== "toolcalloutput" && itemType !== "functioncalloutput";
+}
+
+function areEquivalentRelayHistoryItems(first, second) {
+  const firstIdentity = relayHistoryItemIdentity(first);
+  const secondIdentity = relayHistoryItemIdentity(second);
+  if (firstIdentity && secondIdentity && firstIdentity === secondIdentity) {
+    return true;
+  }
+
+  const firstCallId = relayHistoryItemCallId(first);
+  const secondCallId = relayHistoryItemCallId(second);
+  if (firstCallId && secondCallId && firstCallId === secondCallId) {
+    return true;
+  }
+
+  const firstText = relayHistoryItemText(first);
+  const secondText = relayHistoryItemText(second);
+  if (!firstText || !secondText || firstText !== secondText) {
+    return false;
+  }
+
+  return relayHistoryItemKindsCompatible(first, second);
+}
+
+function relayHistoryItemKindsCompatible(first, second) {
+  const firstType = normalizeHistoryItemToken(first?.type);
+  const secondType = normalizeHistoryItemToken(second?.type);
+  if (firstType && secondType && firstType === secondType) {
+    return true;
+  }
+
+  const firstRole = normalizeNonEmptyString(first?.role).toLowerCase();
+  const secondRole = normalizeNonEmptyString(second?.role).toLowerCase();
+  if (firstRole && secondRole && firstRole === secondRole) {
+    return true;
+  }
+
+  return isRelayMessageLikeHistoryType(firstType) && isRelayMessageLikeHistoryType(secondType);
+}
+
+function isRelayMessageLikeHistoryType(itemType) {
+  return itemType === "message"
+    || itemType === "assistantmessage"
+    || itemType === "usermessage";
+}
+
+function relayHistoryItemIdentity(item) {
+  return normalizeNonEmptyString(item?.id)
+    || normalizeNonEmptyString(item?.itemId)
+    || normalizeNonEmptyString(item?.item_id);
+}
+
+function relayHistoryItemCallId(item) {
+  return normalizeNonEmptyString(item?.call_id)
+    || normalizeNonEmptyString(item?.callId);
+}
+
+function relayHistoryItemText(item) {
+  if (!item || typeof item !== "object" || Array.isArray(item)) {
+    return "";
+  }
+
+  for (const key of ["text", "message", "summary", "output", "outputText", "output_text", "command"]) {
+    const value = normalizeNonEmptyString(item[key]);
+    if (value) {
+      return value;
+    }
+  }
+
+  if (Array.isArray(item.content)) {
+    return item.content
+      .map(relayHistoryItemText)
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  return "";
 }
 
 function hasEquivalentFileChangeItem(items, incomingItem) {
@@ -2832,7 +3188,19 @@ function sanitizeRelayHistoryTurn(turn, threadId = "") {
   const turnThreadId = normalizeNonEmptyString(threadId)
     || normalizeNonEmptyString(turn.threadId)
     || normalizeNonEmptyString(turn.thread_id);
-  const sanitizedItems = turn.items.map((item) => {
+  const sanitizedItems = turn.items.filter((item) => {
+    // Injected context (AGENTS.md instructions, environment_context) is stored
+    // as user-role items in app-server history; Codex UIs hide it at render
+    // time, so mobile history must not receive it as user bubbles.
+    if (!isUserRoleItem(item)) {
+      return true;
+    }
+    const kept = !isContextualUserText(readUserItemText(item));
+    if (!kept) {
+      turnDidChange = true;
+    }
+    return kept;
+  }).map((item) => {
     if (!item || typeof item !== "object") {
       return item;
     }
@@ -2884,6 +3252,27 @@ function sanitizeRelayHistoryTurn(turn, threadId = "") {
       items: sanitizedItems,
     }
     : turn;
+}
+
+// Live item lifecycle events can carry the injected context user items too;
+// dropping the whole notification keeps the phone timeline clean without
+// rewriting the payload on the hot path.
+const LIVE_ITEM_LIFECYCLE_METHODS = new Set([
+  "item/started",
+  "item/updated",
+  "item/completed",
+]);
+
+function isContextualUserItemNotification(parsed) {
+  const method = typeof parsed?.method === "string" ? parsed.method : "";
+  if (!LIVE_ITEM_LIFECYCLE_METHODS.has(method)) {
+    return false;
+  }
+  const item = parsed?.params?.item;
+  if (!isUserRoleItem(item)) {
+    return false;
+  }
+  return isContextualUserText(readUserItemText(item));
 }
 
 function convertApplyPatchHistoryItem(item) {
@@ -3197,11 +3586,16 @@ function parseBridgeJSON(value) {
   }
 }
 
-function trimThreadPayloadForRelay(parsed, explicitThread = undefined) {
+function trimThreadPayloadForRelay(parsed, explicitThread = undefined, options = {}) {
   const thread = explicitThread ?? parsed?.result?.thread;
   if (!parsed || !thread || typeof thread !== "object" || !Array.isArray(thread.turns)) {
     return null;
   }
+
+  // Callers that pre-trimmed the turn window pass the dropped count and the original
+  // first turn here so compaction markers keep reporting whole-thread numbers.
+  const preOmittedTurnCount = Math.max(0, options.preOmittedTurnCount ?? 0);
+  const compactionIdSource = options.compactionIdSource ?? null;
 
   let workingThread = thread;
   let encoded = encodeRelayThreadPayload(parsed, workingThread);
@@ -3210,7 +3604,16 @@ function trimThreadPayloadForRelay(parsed, explicitThread = undefined) {
   }
 
   if (Buffer.byteLength(encoded, "utf8") <= RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES) {
-    return explicitThread === undefined ? null : encoded;
+    if (preOmittedTurnCount <= 0) {
+      return explicitThread === undefined ? null : encoded;
+    }
+    const compactedThread = buildRelayHistoryCompactedThread(
+      thread,
+      buildRelayCompactedHistoryTurns(thread.turns, thread.turns, preOmittedTurnCount, compactionIdSource),
+      preOmittedTurnCount,
+      thread.turns.length
+    );
+    return encodeRelayThreadPayload(parsed, compactedThread) ?? encoded;
   }
 
   const turns = thread.turns;
@@ -3223,8 +3626,8 @@ function trimThreadPayloadForRelay(parsed, explicitThread = undefined) {
     }
     const candidateThread = buildRelayHistoryCompactedThread(
       thread,
-      buildRelayCompactedHistoryTurns(turns, trimmedTurns),
-      Math.max(0, turns.length - trimmedTurns.length),
+      buildRelayCompactedHistoryTurns(turns, trimmedTurns, preOmittedTurnCount, compactionIdSource),
+      preOmittedTurnCount + Math.max(0, turns.length - trimmedTurns.length),
       trimmedTurns.length
     );
     encoded = encodeRelayThreadPayload(parsed, candidateThread);
@@ -3244,9 +3647,9 @@ function trimThreadPayloadForRelay(parsed, explicitThread = undefined) {
   while (trimmedItems.length > 1) {
     trimmedItems = trimmedItems.slice(1);
     const compactedTurnPrefix = buildRelayHistoryCompactionTurn(
-      Math.max(0, turns.length - 1),
+      preOmittedTurnCount + Math.max(0, turns.length - 1),
       1,
-      thread
+      compactionIdSource ?? thread
     );
     const candidateThread = buildRelayHistoryCompactedThread(
       thread,
@@ -3257,7 +3660,7 @@ function trimThreadPayloadForRelay(parsed, explicitThread = undefined) {
         ...newestTurn,
         items: trimmedItems,
       }],
-      Math.max(0, turns.length - 1),
+      preOmittedTurnCount + Math.max(0, turns.length - 1),
       1
     );
     encoded = encodeRelayThreadPayload(parsed, candidateThread);
@@ -3279,13 +3682,13 @@ function trimThreadPayloadForRelay(parsed, explicitThread = undefined) {
   let candidateThread = buildRelayHistoryCompactedThread(
     thread,
     [
-      ...buildRelayCompactedHistoryTurns(turns, [newestTurn]).slice(0, -1),
+      ...buildRelayCompactedHistoryTurns(turns, [newestTurn], preOmittedTurnCount, compactionIdSource).slice(0, -1),
       {
         ...newestTurn,
         items: [truncatedItem],
       },
     ],
-    Math.max(0, turns.length - 1),
+    preOmittedTurnCount + Math.max(0, turns.length - 1),
     1
   );
   encoded = encodeRelayThreadPayload(parsed, candidateThread);
@@ -3296,13 +3699,13 @@ function trimThreadPayloadForRelay(parsed, explicitThread = undefined) {
   candidateThread = buildRelayHistoryCompactedThread(
     thread,
     [
-      ...buildRelayCompactedHistoryTurns(turns, [newestTurn]).slice(0, -1),
+      ...buildRelayCompactedHistoryTurns(turns, [newestTurn], preOmittedTurnCount, compactionIdSource).slice(0, -1),
       {
         ...newestTurn,
         items: [compactHistoryItemForRelay(mostRecentItem, RELAY_HISTORY_TEXT_TAIL_LIMIT_CHARS)],
       },
     ],
-    Math.max(0, turns.length - 1),
+    preOmittedTurnCount + Math.max(0, turns.length - 1),
     1
   );
   return encodeRelayThreadPayload(parsed, candidateThread);
@@ -3368,12 +3771,12 @@ function buildRelayHistoryCompactedThread(thread, turns, omittedTurnCount, keptT
   };
 }
 
-function buildRelayCompactedHistoryTurns(allTurns, keptTurns) {
-  const omittedTurnCount = Math.max(0, allTurns.length - keptTurns.length);
+function buildRelayCompactedHistoryTurns(allTurns, keptTurns, preOmittedTurnCount = 0, idSourceOverride = null) {
+  const omittedTurnCount = preOmittedTurnCount + Math.max(0, allTurns.length - keptTurns.length);
   const compactionTurn = buildRelayHistoryCompactionTurn(
     omittedTurnCount,
     keptTurns.length,
-    allTurns[0]
+    idSourceOverride ?? allTurns[0]
   );
   return compactionTurn ? [compactionTurn, ...keptTurns] : keptTurns;
 }
@@ -3566,6 +3969,7 @@ module.exports = {
   disableUnsupportedReasoningSummaryForTurnStart,
   fetchAdaptiveThreadTurnsListForRelay,
   hasRelayConnectionGoneStale,
+  isContextualUserItemNotification,
   normalizeRelayBoundJsonRpcMessage,
   persistBridgePreferences,
   resolveJsonlTurnsListRolloutPathForFallback,
