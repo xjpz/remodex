@@ -60,30 +60,15 @@ struct TurnComposerView: View {
     let rateLimitsErrorMessage: String?
     let shouldAutoRefreshUsageStatus: Bool
 
-    let showsGitBranchSelector: Bool
-    let isGitBranchSelectorEnabled: Bool
-    let availableGitBranchTargets: [String]
-    let gitBranchesCheckedOutElsewhere: Set<String>
-    let gitWorktreePathsByBranch: [String: String]
-    let selectedGitBaseBranch: String
-    let currentGitBranch: String
-    let gitDefaultBranch: String
-    let isLoadingGitBranchTargets: Bool
-    let isSwitchingGitBranch: Bool
-    let isCreatingGitWorktree: Bool
-    let onSelectGitBranch: (String) -> Void
-    let onCreateGitBranch: (String) -> Void
-    let onSelectGitBaseBranch: (String) -> Void
-    let onRefreshGitBranches: () -> Void
+    let gitState: TurnComposerGitState
+    let gitActions: TurnComposerGitActions
     let onRefreshUsageStatus: () async -> Void
 
     let onSelectAccessMode: (CodexAccessMode) -> Void
-    let canHandOffToWorktree: Bool
     let onTapAddImage: () -> Void
     let onTapTakePhoto: () -> Void
     let onTapVoice: () -> Void
     let onCancelVoiceRecording: () -> Void
-    let onTapCreateWorktree: () -> Void
     let onSetPlanModeArmed: (Bool) -> Void
     let onRemoveAttachment: (String) -> Void
     let onStopTurn: (String?) -> Void
@@ -121,10 +106,23 @@ struct TurnComposerView: View {
     // Square hit target for the resting capsule's "+" and mic controls, matched
     // to the send button so they're just as easy to tap despite smaller glyphs.
     private let collapsedControlTapTarget: CGFloat = 32
+    private let expandedPlainTextMaxVisibleLines: CGFloat = 6
+    private let expandedAccessoryTextMaxVisibleLines: CGFloat = 4
 
     @State private var composerInputHeight: CGFloat = 32
     @State private var inputChangeTask: Task<Void, Never>?
     @State private var isShowingQueuedDraftsSheet = false
+
+    @Environment(\.pinnedPlanAccessory) private var pinnedPlanAccessory
+
+    // Whether the carousel row (chevron, file changes, plan, queued) has
+    // anything to show; mirrors the pills rendered by TurnComposerSecondaryBar.
+    private var hasSecondaryBarContent: Bool {
+        hasWorkingDirectory
+            || activeFileChangeStatus != nil
+            || pinnedPlanAccessory != nil
+            || !accessoryState.queuedDrafts.isEmpty
+    }
 
     private var showsSendButton: Bool {
         !isThreadRunning || accessoryState.hasSendableContent(input: input)
@@ -188,32 +186,24 @@ struct TurnComposerView: View {
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
 
-            if showsSecondaryBar && !accessoryState.showsVoiceRecordingCapsule {
+            // Gated here (not inside the bar) so the VStack never keeps an
+            // empty child whose spacing could leave a stray gap above the
+            // input. The row stays visible while the composer rests as a
+            // collapsed capsule and hides only when the keyboard takes the
+            // space or a voice recording is in progress.
+            if showsSecondaryBar,
+               !accessoryState.showsVoiceRecordingCapsule,
+               !isInputFocused.wrappedValue,
+               hasSecondaryBarContent {
                 TurnComposerSecondaryBar(
-                    isInputFocused: isInputFocused.wrappedValue,
                     isEmptyThread: isEmptyThread,
                     hasWorkingDirectory: hasWorkingDirectory,
                     isWorktreeProject: isWorktreeProject,
                     activeFileChangeStatus: activeFileChangeStatus,
                     queuedDraftCount: accessoryState.queuedDrafts.count,
                     onTapQueuedDrafts: { isShowingQueuedDraftsSheet = true },
-                    showsGitBranchSelector: showsGitBranchSelector,
-                    isGitBranchSelectorEnabled: isGitBranchSelectorEnabled,
-                    availableGitBranchTargets: availableGitBranchTargets,
-                    gitBranchesCheckedOutElsewhere: gitBranchesCheckedOutElsewhere,
-                    gitWorktreePathsByBranch: gitWorktreePathsByBranch,
-                    selectedGitBaseBranch: selectedGitBaseBranch,
-                    currentGitBranch: currentGitBranch,
-                    gitDefaultBranch: gitDefaultBranch,
-                    isLoadingGitBranchTargets: isLoadingGitBranchTargets,
-                    isSwitchingGitBranch: isSwitchingGitBranch,
-                    isCreatingGitWorktree: isCreatingGitWorktree,
-                    onSelectGitBranch: onSelectGitBranch,
-                    onCreateGitBranch: onCreateGitBranch,
-                    onSelectGitBaseBranch: onSelectGitBaseBranch,
-                    onRefreshGitBranches: onRefreshGitBranches,
-                    canHandOffToWorktree: canHandOffToWorktree,
-                    onTapCreateWorktree: onTapCreateWorktree
+                    gitState: gitState,
+                    gitActions: gitActions
                 )
             }
 
@@ -279,6 +269,7 @@ struct TurnComposerView: View {
                             runtimeState: runtimeState,
                             runtimeActions: runtimeActions,
                             isCollapsed: showsCollapsedComposer,
+                            maxVisibleLines: expandedInputMaxVisibleLines,
                             onPasteImageData: { imageDataItems in
                                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                                 onPasteImageData(imageDataItems)
@@ -419,6 +410,15 @@ struct TurnComposerView: View {
     // text line when Dynamic Type grows past them.
     private var collapsedRowContentHeight: CGFloat {
         max(collapsedInputHeight, collapsedControlTapTarget)
+    }
+
+    // Attachments and mention chips already consume vertical keyboard space, so
+    // switch the text field to internal scrolling sooner to keep the whole
+    // composer card above the keyboard in compact draft screens.
+    private var expandedInputMaxVisibleLines: CGFloat {
+        accessoryState.hasTopAccessoryContent
+            ? expandedAccessoryTextMaxVisibleLines
+            : expandedPlainTextMaxVisibleLines
     }
 
     // Collapsed: half the resting height (6pt padding + content + 6pt padding)
@@ -800,29 +800,17 @@ private struct ComposerPreviewContent: View {
             isLoadingRateLimits: false,
             rateLimitsErrorMessage: nil,
             shouldAutoRefreshUsageStatus: false,
-            showsGitBranchSelector: false,
-            isGitBranchSelectorEnabled: false,
-            availableGitBranchTargets: [],
-            gitBranchesCheckedOutElsewhere: [],
-            gitWorktreePathsByBranch: [:],
-            selectedGitBaseBranch: "",
-            currentGitBranch: "main",
-            gitDefaultBranch: "main",
-            isLoadingGitBranchTargets: false,
-            isSwitchingGitBranch: false,
-            isCreatingGitWorktree: false,
-            onSelectGitBranch: { _ in },
-            onCreateGitBranch: { _ in },
-            onSelectGitBaseBranch: { _ in },
-            onRefreshGitBranches: {},
+            gitState: TurnComposerGitState(
+                currentGitBranch: "main",
+                gitDefaultBranch: "main"
+            ),
+            gitActions: TurnComposerGitActions(),
             onRefreshUsageStatus: {},
             onSelectAccessMode: { _ in },
-            canHandOffToWorktree: false,
             onTapAddImage: {},
             onTapTakePhoto: {},
             onTapVoice: {},
             onCancelVoiceRecording: {},
-            onTapCreateWorktree: {},
             onSetPlanModeArmed: { _ in },
             onRemoveAttachment: { _ in },
             onStopTurn: { _ in },
