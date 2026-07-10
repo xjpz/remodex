@@ -6,11 +6,10 @@
 
 const {
   cloneJSON,
-  isContextualUserText,
   normalizeToken,
   readString,
   readText,
-  visibleUserPromptText,
+  sanitizeUserInputEntries: sanitizeSharedUserInputEntries,
 } = require("./desktop-ipc-shared");
 
 const DESKTOP_IPC_ACTION_SOURCE = "desktop-ipc-action-follower";
@@ -805,36 +804,7 @@ const SKIPPED_ITEM = Symbol("remodex-skipped-item");
 // Drops injected context fragments (AGENTS.md instructions, IDE wrappers) and
 // strips prompt-request wrappers so only the real user request reaches mobile.
 function sanitizeUserInputEntries(entries) {
-  if (!Array.isArray(entries)) {
-    return [];
-  }
-  const sanitized = [];
-  for (const entry of entries) {
-    if (typeof entry === "string") {
-      const visible = visibleUserPromptText(entry);
-      if (visible) {
-        sanitized.push(visible);
-      }
-      continue;
-    }
-    if (!entry || typeof entry !== "object") {
-      continue;
-    }
-    const text = readString(entry.text);
-    if (!text) {
-      sanitized.push(entry);
-      continue;
-    }
-    if (isContextualUserText(text)) {
-      continue;
-    }
-    const visible = visibleUserPromptText(text);
-    if (!visible) {
-      continue;
-    }
-    sanitized.push(visible === text ? entry : { ...entry, text: visible });
-  }
-  return sanitized;
+  return sanitizeSharedUserInputEntries(entries);
 }
 
 // Desktop IPC uses richer tool aliases than the mobile app-server timeline.
@@ -854,6 +824,12 @@ function projectItemForMobile(item, itemType = normalizeToken(item?.type)) {
   }
 
   const projected = cloneJSON(item);
+  // Desktop/Litter stores internal update_plan snapshots as todo-list items.
+  // They are progress state, not user-actionable proposed-plan results. Preserve
+  // that semantic across both thread/read projection and lifecycle notifications.
+  if (itemType === "todolist") {
+    projected.remodexProgressPlan = true;
+  }
   if (!isGenericToolCallItemType(itemType)) {
     return projected;
   }

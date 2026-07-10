@@ -307,7 +307,7 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(projection.messages.map(\.id), ["thinking-1", "tool-1"])
     }
 
-    func testTimelineRenderProjectionGroupsLongContiguousToolRuns() {
+    func testTimelineRenderProjectionCollapsesHistoricalToolBurstToLatestRow() {
         let now = Date()
         let toolMessages = (1...7).map { index in
             makeMessage(
@@ -331,14 +331,162 @@ final class TurnTimelineReducerTests: XCTestCase {
         }
 
         XCTAssertEqual(group.messages.map(\.id), toolMessages.map(\.id))
-        XCTAssertEqual(group.hiddenCount, 2)
-        XCTAssertEqual(group.pinnedMessages.map(\.id), ["tool-1", "tool-2", "tool-3", "tool-4", "tool-5"])
-        XCTAssertEqual(group.overflowMessages.map(\.id), ["tool-6", "tool-7"])
+        XCTAssertEqual(group.hiddenCount, 6)
+        XCTAssertEqual(group.overflowMessages.map(\.id), ["tool-1", "tool-2", "tool-3", "tool-4", "tool-5", "tool-6"])
+        XCTAssertEqual(group.latestMessage?.id, "tool-7")
     }
 
-    func testTimelineRenderProjectionKeepsShortToolRunsExpanded() {
+    func testTimelineRenderProjectionShowsOnlyLatestToolCallForActiveBurst() {
         let now = Date()
-        let toolMessages = (1...5).map { index in
+        let toolMessages = (1...7).map { index in
+            makeMessage(
+                id: "tool-\(index)",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Tool \(index)",
+                createdAt: now.addingTimeInterval(Double(index)),
+                turnID: "turn-1",
+                itemID: "item-\(index)",
+                isStreaming: index == 7
+            )
+        }
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: toolMessages,
+            activeTurnID: "turn-1",
+            isThreadRunning: true
+        )
+
+        guard items.count == 1,
+              case .toolBurst(let group) = items[0] else {
+            return XCTFail("Expected one active tool burst")
+        }
+
+        XCTAssertEqual(group.hiddenCount, 6)
+        XCTAssertEqual(group.overflowMessages.map(\.id), ["tool-1", "tool-2", "tool-3", "tool-4", "tool-5", "tool-6"])
+        XCTAssertEqual(group.latestMessage?.id, "tool-7")
+    }
+
+    func testTimelineRenderProjectionPreservesToolOrderAcrossAssistantCommentary() {
+        let now = Date()
+        let firstBurst = (1...5).map { index in
+            makeMessage(
+                id: "tool-\(index)",
+                threadID: "thread",
+                role: .system,
+                kind: index.isMultiple(of: 2) ? .toolActivity : .commandExecution,
+                text: "Tool \(index)",
+                createdAt: now.addingTimeInterval(Double(index)),
+                turnID: "turn-1"
+            )
+        }
+        let commentary = makeMessage(
+            id: "commentary",
+            threadID: "thread",
+            role: .assistant,
+            text: "Between bursts",
+            createdAt: now.addingTimeInterval(6),
+            turnID: "turn-1"
+        )
+        let secondBurst = (6...10).map { index in
+            makeMessage(
+                id: "tool-\(index)",
+                threadID: "thread",
+                role: .system,
+                kind: index.isMultiple(of: 2) ? .toolActivity : .commandExecution,
+                text: "Tool \(index)",
+                createdAt: now.addingTimeInterval(Double(index + 1)),
+                turnID: "turn-1"
+            )
+        }
+        let messages = firstBurst + [commentary] + secondBurst
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+
+        guard items.count == 3,
+              case .toolBurst(let projectedFirstBurst) = items[0],
+              case .message(let projectedCommentary) = items[1],
+              case .toolBurst(let projectedSecondBurst) = items[2] else {
+            return XCTFail("Expected two independent tool bursts around commentary")
+        }
+        XCTAssertEqual(projectedFirstBurst.messages.map(\.id), firstBurst.map(\.id))
+        XCTAssertEqual(projectedCommentary.id, commentary.id)
+        XCTAssertEqual(projectedSecondBurst.messages.map(\.id), secondBurst.map(\.id))
+    }
+
+    func testTimelineRenderProjectionDoesNotTreatHistoricalTailAsLiveWithoutActiveTurnID() {
+        let now = Date()
+        let toolMessages = (1...7).map { index in
+            makeMessage(
+                id: "historical-tool-\(index)",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Historical tool \(index)",
+                createdAt: now.addingTimeInterval(Double(index)),
+                turnID: "completed-turn",
+                itemID: "historical-item-\(index)"
+            )
+        }
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: toolMessages,
+            activeTurnID: nil,
+            isThreadRunning: true
+        )
+
+        guard items.count == 1,
+              case .toolBurst(let group) = items[0] else {
+            return XCTFail("Expected one historical tool burst")
+        }
+
+        XCTAssertEqual(group.hiddenCount, 6)
+        XCTAssertEqual(group.latestMessage?.id, "historical-tool-7")
+    }
+
+    func testTimelineRenderProjectionUsesTurnlessFallbackInsideLatestUserBlock() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Run the checks",
+                createdAt: now,
+                turnID: nil
+            ),
+        ] + (1...5).map { index in
+            makeMessage(
+                id: "turnless-tool-\(index)",
+                threadID: "thread",
+                role: .system,
+                kind: .toolActivity,
+                text: "Tool \(index)",
+                createdAt: now.addingTimeInterval(Double(index)),
+                turnID: nil,
+                itemID: "turnless-item-\(index)"
+            )
+        }
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            activeTurnID: nil,
+            isThreadRunning: true
+        )
+
+        guard items.count == 2,
+              case .toolBurst(let group) = items[1] else {
+            return XCTFail("Expected user plus one live turnless burst")
+        }
+
+        XCTAssertEqual(group.hiddenCount, 4)
+        XCTAssertEqual(group.latestMessage?.id, "turnless-tool-5")
+    }
+
+    func testTimelineRenderProjectionKeepsUpToFourToolRunsExpanded() {
+        let now = Date()
+        let toolMessages = (1...4).map { index in
             makeMessage(
                 id: "tool-\(index)",
                 threadID: "thread",
@@ -352,7 +500,7 @@ final class TurnTimelineReducerTests: XCTestCase {
         }
 
         let items = TurnTimelineRenderProjection.project(messages: toolMessages)
-        XCTAssertEqual(items.count, 5)
+        XCTAssertEqual(items.count, 4)
 
         let messageIDs = items.compactMap { item -> String? in
             if case .message(let message) = item {
@@ -523,6 +671,138 @@ final class TurnTimelineReducerTests: XCTestCase {
             ),
             Set(["final"])
         )
+    }
+
+    func testTimelineProjectionInfersOlderCompletedTurnFromFinalAnswerPhaseDuringColdReopen() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "old-user",
+                threadID: "thread",
+                role: .user,
+                text: "Fix mirroring",
+                createdAt: now,
+                turnID: "old-turn",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "old-commentary",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "commentary",
+                text: "The focused suite passes.",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "old-turn",
+                itemID: "old-commentary-item",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "old-tool",
+                threadID: "thread",
+                role: .system,
+                kind: .toolActivity,
+                text: "Read files",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "old-turn",
+                itemID: "old-tool-item",
+                orderIndex: 3
+            ),
+            makeMessage(
+                id: "old-final",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "final_answer",
+                text: "Mirroring is fixed.",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "old-turn",
+                itemID: "old-final-item",
+                orderIndex: 4
+            ),
+            makeMessage(
+                id: "active-user",
+                threadID: "thread",
+                role: .user,
+                text: "Check again",
+                createdAt: now.addingTimeInterval(4),
+                turnID: "active-turn",
+                orderIndex: 5
+            ),
+            makeMessage(
+                id: "active-commentary",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "commentary",
+                text: "Checking now.",
+                createdAt: now.addingTimeInterval(5),
+                turnID: "active-turn",
+                itemID: "active-commentary-item",
+                isStreaming: true,
+                orderIndex: 6
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: [],
+            activeTurnID: nil,
+            isThreadRunning: true
+        )
+
+        let previousGroups = items.compactMap { item -> TurnTimelinePreviousMessagesGroup? in
+            guard case .previousMessages(let group) = item else { return nil }
+            return group
+        }
+        XCTAssertEqual(previousGroups.count, 1)
+        XCTAssertEqual(previousGroups[0].finalMessageID, "old-final")
+        XCTAssertEqual(previousGroups[0].messages.map(\.id), ["old-commentary", "old-tool"])
+        XCTAssertTrue(items.contains { item in
+            guard case .message(let message) = item else { return false }
+            return message.id == "active-commentary"
+        })
+    }
+
+    func testTimelineProjectionDoesNotInferCompletionForActiveFinalAnswer() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "commentary",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "commentary",
+                text: "Still finishing.",
+                createdAt: now,
+                turnID: "active-turn",
+                itemID: "commentary-item",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "final_answer",
+                text: "Final text arrived before task completion.",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "active-turn",
+                itemID: "final-item",
+                orderIndex: 2
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: [],
+            activeTurnID: nil,
+            isThreadRunning: true
+        )
+
+        XCTAssertFalse(items.contains { item in
+            if case .previousMessages = item { return true }
+            return false
+        })
+        XCTAssertEqual(items.compactMap { item -> String? in
+            guard case .message(let message) = item else { return nil }
+            return message.id
+        }, ["commentary", "final"])
     }
 
     func testTimelineProjectionKeepsPreviousMessagesChronologicalForMultiAssistantTurns() {
@@ -1155,6 +1435,120 @@ final class TurnTimelineReducerTests: XCTestCase {
         let items = TurnTimelineRenderProjection.project(messages: messages)
 
         XCTAssertEqual(items.map(\.id), ["file-change-previous-turn", "file-change-new-turn"])
+    }
+
+    func testTimelineProjectionKeepsFileChangesWithDifferentTurnIDsSeparateInsideUserBlock() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Build the feature",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "file-change-original-turn",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +2 -1
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "file-change-replaced-turn",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/Composer.swift
+                Kind: update
+                Totals: +3 -0
+                """,
+                createdAt: now.addingTimeInterval(2),
+                turnID: "replacement-turn-id",
+                orderIndex: 3
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+
+        XCTAssertEqual(
+            items.map(\.id),
+            ["user", "file-change-original-turn", "file-change-replaced-turn"]
+        )
+    }
+
+    func testTimelineProjectionKeepsFileChangesSeparateAcrossUserBlocks() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user-1",
+                threadID: "thread",
+                role: .user,
+                text: "First change",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "file-change-1",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/First.swift
+                Kind: update
+                Totals: +2 -1
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "user-2",
+                threadID: "thread",
+                role: .user,
+                text: "Second change",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-2",
+                orderIndex: 3
+            ),
+            makeMessage(
+                id: "file-change-2",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/Second.swift
+                Kind: update
+                Totals: +3 -0
+                """,
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-2",
+                orderIndex: 4
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+
+        XCTAssertEqual(items.map(\.id), ["user-1", "file-change-1", "user-2", "file-change-2"])
     }
 
     func testTimelineProjectionMergesAdjacentFinalFileChangeRowsIntoOneTable() {
@@ -2854,6 +3248,48 @@ final class TurnTimelineReducerTests: XCTestCase {
         ])
     }
 
+    func testEnforceIntraTurnOrderDoesNotPermuteOlderTurnAcrossNewerTurnBoundary() {
+        let messages = [
+            makeMessage(id: "user-1", threadID: "thread", role: .user, text: "one", turnID: "turn-1", orderIndex: 1),
+            makeMessage(id: "assistant-1", threadID: "thread", role: .assistant, text: "answer one", turnID: "turn-1", orderIndex: 2),
+            makeMessage(id: "user-2", threadID: "thread", role: .user, text: "two", turnID: "turn-2", orderIndex: 3),
+            makeMessage(id: "assistant-2", threadID: "thread", role: .assistant, text: "answer two", turnID: "turn-2", orderIndex: 4),
+            makeMessage(id: "late-reasoning-1", threadID: "thread", role: .system, kind: .thinking, text: "late", turnID: "turn-1", orderIndex: 5),
+        ]
+
+        let reordered = TurnTimelineReducer.enforceIntraTurnOrder(in: messages)
+
+        XCTAssertEqual(reordered.map(\.id), messages.map(\.id))
+    }
+
+    func testEnforceIntraTurnOrderUsesSequenceInsteadOfAssistantTimestamp() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "assistant-first",
+                threadID: "thread",
+                role: .assistant,
+                text: "first",
+                createdAt: now.addingTimeInterval(10),
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "assistant-second",
+                threadID: "thread",
+                role: .assistant,
+                text: "second",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 2
+            ),
+        ]
+
+        let reordered = TurnTimelineReducer.enforceIntraTurnOrder(in: messages)
+
+        XCTAssertEqual(reordered.map(\.id), ["assistant-first", "assistant-second"])
+    }
+
     func testEnforceIntraTurnOrderStillReordersSingleItemTurn() {
         let now = Date()
         var order = 0
@@ -3791,6 +4227,218 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertNil(blockInfo[0]?.copyText)
     }
 
+    func testAssistantBlockInfoKeepsCopyAtEndOfTrailingToolCallBlock() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "assistant",
+                threadID: "thread",
+                role: .assistant,
+                text: "Completed response",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "tool",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Run wait",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1"
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: nil,
+            isThreadRunning: false,
+            latestTurnTerminalState: .completed,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertNil(blockInfo[0])
+        XCTAssertEqual(blockInfo[1]?.allowsCopy, true)
+        XCTAssertEqual(blockInfo[1]?.copyText, "Completed response")
+    }
+
+    func testToolBurstAccessoryResolverMovesCopyAndRunningStateToGroupFooter() {
+        let messages = (1...5).map { index in
+            makeMessage(
+                id: "tool-\(index)",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Tool \(index)",
+                turnID: "turn-1"
+            )
+        }
+        let group = TurnTimelineToolBurstGroup(messages: messages)
+        guard let hostID = group.latestMessage?.id else {
+            return XCTFail("Expected the tool burst to expose its latest message as footer host")
+        }
+        let state = AssistantBlockAccessoryState(
+            copyText: "Completed response",
+            showsRunningIndicator: true,
+            allowsCopy: true,
+            blockDiffText: "diff payload"
+        )
+
+        let footerState = TurnTimelineToolBurstAccessoryResolver.copyFooterState(
+            for: group,
+            statesByMessageID: [hostID: state],
+            suppressesRunningIndicator: false
+        )
+        let globallySuppressedState = TurnTimelineToolBurstAccessoryResolver.copyFooterState(
+            for: group,
+            statesByMessageID: [hostID: state],
+            suppressesRunningIndicator: true
+        )
+        let rowState = state.suppressingCopyAndRunningAccessory()
+
+        XCTAssertEqual(footerState?.copyText, "Completed response")
+        XCTAssertEqual(footerState?.showsRunningIndicator, true)
+        XCTAssertEqual(globallySuppressedState?.copyText, "Completed response")
+        XCTAssertEqual(globallySuppressedState?.showsRunningIndicator, false)
+        XCTAssertNil(rowState.copyText)
+        XCTAssertEqual(rowState.allowsCopy, false)
+        XCTAssertEqual(rowState.showsRunningIndicator, false)
+        XCTAssertEqual(rowState.blockDiffText, "diff payload")
+    }
+
+    func testAssistantBlockInfoDoesNotMoveCopyAcrossTurnBoundary() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "assistant-old-turn",
+                threadID: "thread",
+                role: .assistant,
+                text: "Completed response",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "tool-new-turn",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Run wait",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-2"
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: nil,
+            isThreadRunning: false,
+            latestTurnTerminalState: .completed,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertEqual(blockInfo[0]?.allowsCopy, true)
+        XCTAssertNil(blockInfo[1])
+    }
+
+    func testAssistantBlockInfoHidesCopyWhenMirroringSplitsTheActiveTurnIdentity() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "assistant-synthetic-turn",
+                threadID: "thread",
+                role: .assistant,
+                text: "Still working on the current request",
+                createdAt: now,
+                turnID: "synthetic-turn"
+            ),
+            makeMessage(
+                id: "tool-canonical-turn",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Read the next file",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "canonical-turn"
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: "canonical-turn",
+            isThreadRunning: true,
+            latestTurnTerminalState: nil,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertNil(blockInfo[0])
+        XCTAssertNil(blockInfo[1])
+    }
+
+    func testAssistantBlockInfoDoesNotBridgeTurnsThroughTurnlessRow() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "assistant-old-turn",
+                threadID: "thread",
+                role: .assistant,
+                text: "Completed response",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "turnless-tool",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Run wait",
+                createdAt: now.addingTimeInterval(1),
+                turnID: nil
+            ),
+            makeMessage(
+                id: "tool-new-turn",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Run status",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-2"
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: nil,
+            isThreadRunning: false,
+            latestTurnTerminalState: .completed,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertEqual(blockInfo[0]?.allowsCopy, true)
+        XCTAssertNil(blockInfo[1])
+        XCTAssertNil(blockInfo[2])
+    }
+
+    func testAssistantBlockInfoDoesNotShowCopyForToolOnlyBlock() {
+        let message = makeMessage(
+            id: "tool-only",
+            threadID: "thread",
+            role: .system,
+            kind: .toolActivity,
+            text: "Search files",
+            turnID: "turn-1"
+        )
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: [message],
+            activeTurnID: nil,
+            isThreadRunning: false,
+            latestTurnTerminalState: .completed,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertNil(blockInfo[0])
+    }
+
     func testAssistantBlockInfoHidesCopyWhileStopControlIsVisible() {
         let now = Date()
         let messages = [
@@ -3956,6 +4604,54 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(initialStates["thinking-placeholder"]?.showsRunningIndicator, true)
         XCTAssertNil(rehousedStates["thinking-placeholder"])
         XCTAssertEqual(rehousedStates["assistant-1"]?.showsRunningIndicator, true)
+    }
+
+    func testHiddenAccessoryStateDoesNotCrossStableTurnBoundary() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "assistant-turn-1",
+                threadID: "thread",
+                role: .assistant,
+                text: "Finished first turn",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "thinking-turn-2",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-2",
+                isStreaming: true
+            ),
+        ]
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: "turn-2",
+            isThreadRunning: true,
+            latestTurnTerminalState: nil,
+            stoppedTurnIDs: []
+        )
+        let initialStates = [String: AssistantBlockAccessoryState](
+            uniqueKeysWithValues: zip(messages, blockInfo).compactMap { message, state in
+                guard let state else { return nil }
+                return (message.id, state)
+            }
+        )
+        let renderItems = TurnTimelineRenderProjection.project(messages: messages)
+
+        let rehousedStates = TurnTimelineView<EmptyView, EmptyView>.rehomeHiddenAccessoryStates(
+            initialStates,
+            messages: messages,
+            renderItems: renderItems
+        )
+
+        XCTAssertEqual(renderItems.map(\.id), ["assistant-turn-1"])
+        XCTAssertNotEqual(rehousedStates["assistant-turn-1"]?.showsRunningIndicator, true)
+        XCTAssertEqual(rehousedStates["thinking-turn-2"]?.showsRunningIndicator, true)
     }
 
     func testEmptyStreamingAssistantPlaceholderDoesNotRenderAfterUserSend() {

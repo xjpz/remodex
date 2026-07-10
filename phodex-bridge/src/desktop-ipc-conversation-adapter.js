@@ -8,12 +8,13 @@ const { randomUUID } = require("crypto");
 
 const {
   cloneJSON,
+  hasVisiblePlanUpdate,
   isContextualUserText,
   isUserRoleItem: isUserMessageItem,
   normalizeToken,
   readString,
   requestIdKey,
-  visibleUserPromptText,
+  sanitizeUserInputEntries: sanitizeSharedUserInputEntries,
 } = require("./desktop-ipc-shared");
 
 const LOCAL_HOST_ID = "local";
@@ -268,6 +269,11 @@ function applyAppServerMessageToConversationState({
       if (!threadId || !shouldOwnThread(threadId)) {
         return null;
       }
+      const explanation = readString(message.params?.explanation);
+      const plan = Array.isArray(message.params?.plan) ? cloneJSON(message.params.plan) : [];
+      if (!hasVisiblePlanUpdate(explanation, plan)) {
+        return { threadId, changed: false };
+      }
       const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
       const turn = ensureTurn(conversation, resolveTurnIdForParams({
         conversation,
@@ -279,8 +285,9 @@ function applyAppServerMessageToConversationState({
         upsertItem(turn, {
           id: `todo-list-${message.params?.turnId || now()}`,
           type: "todo-list",
-          explanation: message.params?.explanation ?? null,
-          plan: Array.isArray(message.params?.plan) ? cloneJSON(message.params.plan) : [],
+          explanation: explanation || null,
+          plan,
+          remodexProgressPlan: true,
         });
       }
       conversation.updatedAt = now();
@@ -699,36 +706,7 @@ function extractUserText(entries) {
 }
 
 function sanitizeUserInputEntries(entries) {
-  if (!Array.isArray(entries)) {
-    return [];
-  }
-  const sanitized = [];
-  for (const entry of entries) {
-    if (typeof entry === "string") {
-      const visible = visibleUserPromptText(entry);
-      if (visible) {
-        sanitized.push(visible);
-      }
-      continue;
-    }
-    if (!entry || typeof entry !== "object") {
-      continue;
-    }
-    const text = typeof entry.text === "string" ? entry.text : "";
-    if (!text) {
-      sanitized.push(cloneJSON(entry));
-      continue;
-    }
-    const visible = visibleUserPromptText(text);
-    if (!visible) {
-      continue;
-    }
-    sanitized.push(visible === text ? cloneJSON(entry) : {
-      ...cloneJSON(entry),
-      text: visible,
-    });
-  }
-  return sanitized;
+  return sanitizeSharedUserInputEntries(entries).map(cloneJSON);
 }
 
 function sanitizeUserMessageItem(item) {

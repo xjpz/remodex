@@ -58,6 +58,11 @@ extension CodexService {
 
             CodexMessageOrderCounter.seed(from: loadedMessages)
             messagesByThread = loadedMessages
+            let potentiallyPoisonedHistoryThreadIDs = threadsWithAuthoritativeLocalHistoryStart
+                .union(exhaustedOlderThreadHistoryCursorByThreadID.keys)
+            for threadId in potentiallyPoisonedHistoryThreadIDs {
+                repairEmptyThreadHistoryLoadStateIfNeeded(threadId: threadId)
+            }
             composerDraftsByThreadID = composerDraftPersistence.load(
                 macDeviceId: normalizedMacDeviceId,
                 includeLegacyFallback: includeLegacyFallback
@@ -180,7 +185,9 @@ extension CodexService {
                    [String: CodexTurnTerminalState].self,
                    from: savedTurnTerminalStates
                ) {
-                terminalStateByTurnID = decodedTurnTerminalStates
+                terminalStateByTurnID = decodedTurnTerminalStates.filter { turnId, _ in
+                    !CodexSyntheticIdentifiers.isProjectedDesktopTurnID(turnId)
+                }
             } else {
                 terminalStateByTurnID = [:]
             }

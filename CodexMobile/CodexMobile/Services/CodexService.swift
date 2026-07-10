@@ -383,6 +383,9 @@ final class CodexService {
     var lastErrorMessage: String?
     var keepMacAwakeWhileBridgeRuns = false
     var runtimeDebugLogEntries: [String] = []
+    @ObservationIgnored var compactRuntimeItemCompletedCount = 0
+    @ObservationIgnored var compactRuntimeItemCompletedTypes: [String: Int] = [:]
+    @ObservationIgnored var compactRuntimeItemCompletedFlushTask: Task<Void, Never>?
     var connectionRecoveryState: CodexConnectionRecoveryState = .idle
     // Per-thread queued drafts for client-side turn queueing while a run is active.
     var queuedTurnDraftsByThread: [String: [QueuedTurnDraft]] = [:]
@@ -451,6 +454,14 @@ final class CodexService {
     var relayMacIdentityPublicKey: String?
     var relayProtocolVersion: Int = codexSecureProtocolVersion
     var lastAppliedBridgeOutboundSeq = 0
+    var lastAppliedBridgeReplayEpoch: String?
+    @ObservationIgnored var pendingCanonicalHistoryRefreshAfterReplayDiscontinuity = false
+    // A Desktop/rollout source handoff needs replace semantics for the mirrored
+    // tail, not an append-only merge that leaves stale synthetic rows behind.
+    @ObservationIgnored var pendingCanonicalSourceReplacementThreadIDs: Set<String> = []
+    // A bounded JSONL first paint is useful immediately but remains provisional
+    // until the app-server returns its exact cursor-backed page.
+    @ObservationIgnored var provisionalPaginatedHistoryThreadIDs: Set<String> = []
     // Mirrors the bridge package version currently running on the Mac, if the bridge reports it.
     var bridgeInstalledVersion: String?
     // Mirrors the latest published bridge package version, when the bridge can resolve it.
@@ -595,6 +606,8 @@ final class CodexService {
     @ObservationIgnored var canonicalHistoryReconcileTaskByThreadID: [String: Task<Void, Never>] = [:]
     // Tracks delayed retry timers for canonical reconcile so teardown can cancel the backoff too.
     @ObservationIgnored var canonicalHistoryReconcileRetryTaskByThreadID: [String: Task<Void, Never>] = [:]
+    // Increases retry spacing for chats whose first history page remains unavailable.
+    @ObservationIgnored var canonicalHistoryReconcileRetryAttemptByThreadID: [String: Int] = [:]
     // Coalesces sidebar/bootstrap thread/list refreshes so launch paths do not duplicate the same fetch.
     @ObservationIgnored var threadListFetchTaskByLimit: [Int: (id: UUID, task: Task<[CodexThread], Error>)] = [:]
     var isAppInForeground = true
@@ -833,15 +846,20 @@ final class CodexService {
         self.relayMacDeviceId = SecureStore.readString(for: CodexSecureKeys.relayMacDeviceId)
         self.relayMacIdentityPublicKey = SecureStore.readString(for: CodexSecureKeys.relayMacIdentityPublicKey)
         if let rawProtocolVersion = SecureStore.readString(for: CodexSecureKeys.relayProtocolVersion),
-           let parsedProtocolVersion = Int(rawProtocolVersion) {
+           let parsedProtocolVersion = Int(rawProtocolVersion),
+           parsedProtocolVersion == codexSecureProtocolVersion {
             self.relayProtocolVersion = parsedProtocolVersion
         } else {
+            // Protocol capability belongs to this app build, not stale pairing
+            // metadata. A version bump keeps the trusted identity but requires
+            // the bridge to update before the next encrypted reconnect.
             self.relayProtocolVersion = codexSecureProtocolVersion
         }
         if let rawLastAppliedSeq = SecureStore.readString(for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq),
            let parsedLastAppliedSeq = Int(rawLastAppliedSeq) {
             self.lastAppliedBridgeOutboundSeq = parsedLastAppliedSeq
         }
+        self.lastAppliedBridgeReplayEpoch = SecureStore.readString(for: CodexSecureKeys.relayBridgeReplayEpoch)
         migrateCurrentTrustedMacDeviceIdIfNeeded()
         migrateLegacyMacScopedDefaultsIfNeeded()
         loadCurrentMacScopedDefaultsState()
@@ -1100,6 +1118,7 @@ final class CodexService {
             networkPathMonitor?.cancel()
             trustedSessionResolveTask?.cancel()
             messagePersistenceDebounceTask?.cancel()
+            compactRuntimeItemCompletedFlushTask?.cancel()
             coalescedRevertRefreshTask?.cancel()
             threadListSyncTask?.cancel()
             activeThreadSyncTask?.cancel()
