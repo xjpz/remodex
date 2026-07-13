@@ -164,21 +164,29 @@ extension TurnTimelineView {
         activeTurnID: String? = nil,
         isThreadRunning: Bool = false
     ) -> [String: AssistantBlockAccessoryState] {
-        let collapsedFinalMessageIDs = TurnTimelineRenderProjection.collapsedFinalMessageIDs(
+        let collapseMetadata = TurnTimelineRenderProjection.collapseMetadata(
             in: messages,
             completedTurnIDs: completedTurnIDs,
             activeTurnID: activeTurnID,
             isThreadRunning: isThreadRunning
         )
+        return rehomeCollapsedFinalAccessoryStates(
+            statesByMessageID,
+            messages: messages,
+            collapsedFinalMessageIDs: collapseMetadata.collapsedFinalMessageIDs,
+            hiddenMessageIDs: collapseMetadata.collapsedPreviousMessageIDs
+        )
+    }
+
+    static func rehomeCollapsedFinalAccessoryStates(
+        _ statesByMessageID: [String: AssistantBlockAccessoryState],
+        messages: [CodexMessage],
+        collapsedFinalMessageIDs: Set<String>,
+        hiddenMessageIDs: Set<String>
+    ) -> [String: AssistantBlockAccessoryState] {
         guard !collapsedFinalMessageIDs.isEmpty else {
             return statesByMessageID
         }
-        let hiddenMessageIDs = TurnTimelineRenderProjection.collapsedPreviousMessageIDs(
-            in: messages,
-            completedTurnIDs: completedTurnIDs,
-            activeTurnID: activeTurnID,
-            isThreadRunning: isThreadRunning
-        )
 
         var updated = statesByMessageID
         for finalIndex in messages.indices where collapsedFinalMessageIDs.contains(messages[finalIndex].id) {
@@ -282,6 +290,12 @@ extension TurnTimelineView {
                 ids.insert(message.id)
             case .toolBurst(let group):
                 ids.formUnion(group.visibleMessages.map(\.id))
+            case .commandGroup(let group):
+                // Commands remain valid accessory hosts even while the disclosure is
+                // collapsed; expanding it renders those exact rows. Treating only the
+                // visible trace as a host would move command copy/running state onto the
+                // reasoning summary that happened to precede the last command.
+                ids.formUnion(group.orderedMessages.map(\.id))
             case .previousMessages:
                 break
             }

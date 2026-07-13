@@ -306,7 +306,7 @@ extension CodexService {
         case "item/reasoning/summaryTextDelta",
              "item/reasoning/summaryPartAdded",
              "item/reasoning/textDelta":
-            appendReasoningDelta(from: paramsObject)
+            appendReasoningDelta(from: paramsObject, method: method)
 
         case "item/fileChange/outputDelta":
             appendFileChangeDelta(from: paramsObject)
@@ -362,6 +362,12 @@ extension CodexService {
         case "thread/tokenUsage/updated":
             handleThreadTokenUsageUpdated(paramsObject)
 
+        case "thread/goal/updated":
+            handleThreadGoalUpdated(paramsObject)
+
+        case "thread/goal/cleared":
+            handleThreadGoalCleared(paramsObject)
+
         case "account/updated":
             handleGPTAccountUpdated(paramsObject)
 
@@ -415,6 +421,8 @@ extension CodexService {
         "thread/name/updated",
         "thread/status/changed",
         "thread/tokenUsage/updated",
+        "thread/goal/updated",
+        "thread/goal/cleared",
         "serverRequest/resolved",
     ]
 
@@ -495,7 +503,7 @@ extension CodexService {
 
         // A re-delivered turn/started for an already-finished turn is replay noise,
         // so the terminal-turn check applies to it as well.
-        if let turnId, turnTerminalState(for: turnId) != nil {
+        if let turnId, turnTerminalState(for: turnId, threadId: threadId) != nil {
             return true
         }
 
@@ -688,26 +696,53 @@ extension CodexService {
         let isDesktopMirroredTurn = isDesktopMirroredBridgeEvent(paramsObject)
         let isBackgroundDiscoveryTurn = isBackgroundDiscoveryBridgeEvent(paramsObject)
         let isReplayedEvent = isReplayedBridgeEvent(paramsObject)
+        let preservesRunningSourceEpoch = paramsObject?["remodexTurnIdentityContinuity"]?.boolValue == true
+        let wasThreadRunning = threadId.map(threadHasActiveOrRunningTurn) ?? false
+        let previousActiveTurnID = threadId.flatMap { activeTurnIdByThread[$0] }
 
         // Replay/mirror paths can re-deliver turn/started for turns that already
-        // ended. A live background snapshot is the exception when the earlier
-        // state was only a guessed interruption, or when the projected id is
-        // globally ambiguous (`ipc-turn-N` is reused by every thread).
-        if let terminalState = turnTerminalState(for: turnID) {
-            let isProjectedDesktopTurn = turnID.map(
-                CodexSyntheticIdentifiers.isProjectedDesktopTurnID
-            ) ?? false
+        // ended. A live background snapshot is the exception only when the
+        // earlier state was a guessed interruption; projected ids are tracked
+        // with their thread so reuse in another chat stays independent.
+        if let terminalState = turnTerminalState(for: turnID, threadId: threadId) {
             let mayReviveLiveBackgroundTurn = !isReplayedEvent
                 && isBackgroundDiscoveryTurn
-                && (isProjectedDesktopTurn || terminalState == .stopped)
+                && terminalState == .stopped
             guard mayReviveLiveBackgroundTurn else { return }
 
-            if let turnID, terminalStateByTurnID.removeValue(forKey: turnID) != nil {
-                persistTurnTerminalStates()
+            if let turnID {
+                if CodexSyntheticIdentifiers.isProjectedDesktopTurnID(turnID),
+                   let threadId {
+                    projectedTerminalStateByThreadID[threadId]?.removeValue(forKey: turnID)
+                    if projectedTerminalStateByThreadID[threadId]?.isEmpty == true {
+                        projectedTerminalStateByThreadID.removeValue(forKey: threadId)
+                    }
+                } else if terminalStateByTurnID.removeValue(forKey: turnID) != nil {
+                    persistTurnTerminalStates()
+                }
             }
         }
 
         if let threadId, !isReplayedEvent {
+            let preservesReconnectRun = pendingReconnectRunContinuityThreadIDs
+                .remove(threadId) != nil
+            let previousStartedTurnID = lastRunStartTurnIDByThread[threadId]
+            let previousKnownTurnID = previousStartedTurnID ?? previousActiveTurnID
+            let repeatsKnownTurn = turnID != nil && turnID == previousKnownTurnID
+            let startsDistinctIdentifiedTurn = turnID != nil
+                && previousKnownTurnID != nil
+                && turnID != previousKnownTurnID
+            if !preservesRunningSourceEpoch
+                && !repeatsKnownTurn
+                && !(preservesReconnectRun && !startsDistinctIdentifiedTurn)
+                && (!wasThreadRunning || startsDistinctIdentifiedTurn) {
+                runStartGenerationByThread[threadId, default: 0] += 1
+            }
+            if let turnID {
+                lastRunStartTurnIDByThread[threadId] = turnID
+            } else if !wasThreadRunning && !preservesReconnectRun {
+                lastRunStartTurnIDByThread.removeValue(forKey: threadId)
+            }
             markThreadAsRunning(threadId)
             if isDesktopMirroredTurn {
                 markDesktopMirroredRunning(for: threadId)
@@ -756,14 +791,23 @@ extension CodexService {
                 confirmLatestPendingUserMessage(threadId: threadId, turnId: completedTurnID)
             }
             let resolvedTurnID = completedTurnID ?? activeTurnIdByThread[threadId]
+            let currentActiveTurnID = activeTurnIdByThread[threadId]
+            let completesCurrentThreadRun = resolvedTurnID == nil
+                || currentActiveTurnID == nil
+                || resolvedTurnID == currentActiveTurnID
             let terminalState = parseTurnTerminalState(
                 from: paramsObject,
                 turnFailureMessage: turnFailureMessage
             )
-            recordTurnTerminalState(threadId: threadId, turnId: resolvedTurnID, state: terminalState)
-            noteTurnFinished(turnId: resolvedTurnID)
+            recordTurnTerminalState(
+                threadId: threadId,
+                turnId: resolvedTurnID,
+                state: terminalState,
+                updatesThreadState: completesCurrentThreadRun
+            )
+            noteTurnFinished(threadId: threadId, turnId: resolvedTurnID)
             markTurnCompleted(threadId: threadId, turnId: resolvedTurnID)
-            if terminalState == .completed {
+            if completesCurrentThreadRun, terminalState == .completed {
                 if !shouldRemainLifecycleOnly {
                     Task { @MainActor [weak self] in
                         await self?.captureTurnEndWorkspaceCheckpointIfPossible(
@@ -774,18 +818,21 @@ extension CodexService {
                 }
                 markReadyIfUnread(threadId: threadId)
                 notifyRunCompletionIfNeeded(threadId: threadId, turnId: resolvedTurnID, result: .completed)
-            } else if terminalState == .failed {
+            } else if completesCurrentThreadRun, terminalState == .failed {
                 discardTurnStartWorkspaceCheckpointCopyIfNeeded(turnId: resolvedTurnID)
                 markFailedIfUnread(threadId: threadId)
                 notifyRunCompletionIfNeeded(threadId: threadId, turnId: resolvedTurnID, result: .failed)
             } else {
+                // A late completion for an older overlapping turn must not
+                // capture B's still-changing workspace as A's final diff.
+                // Drop A's pending start copy so it cannot remain retained.
                 discardTurnStartWorkspaceCheckpointCopyIfNeeded(turnId: resolvedTurnID)
             }
-            if !shouldRemainLifecycleOnly {
+            if completesCurrentThreadRun && !shouldRemainLifecycleOnly {
                 requestImmediateSync(threadId: threadId)
                 requestThreadHistoryReconcile(threadId: threadId)
             }
-            if terminalState == .completed, !shouldRemainLifecycleOnly {
+            if completesCurrentThreadRun, terminalState == .completed, !shouldRemainLifecycleOnly {
                 scheduleAppReviewPromptAfterSuccessfulRun(threadId: threadId, turnId: resolvedTurnID)
             }
 
@@ -857,7 +904,7 @@ extension CodexService {
                 appendSystemMessage(threadId: threadId, text: "Error: \(userFacingErrorMessage)", turnId: turnId)
             }
             recordTurnTerminalState(threadId: threadId, turnId: resolvedTurnID, state: .failed)
-            noteTurnFinished(turnId: resolvedTurnID)
+            noteTurnFinished(threadId: threadId, turnId: resolvedTurnID)
             markTurnCompleted(threadId: threadId, turnId: resolvedTurnID)
             discardTurnStartWorkspaceCheckpointCopyIfNeeded(turnId: resolvedTurnID)
             markFailedIfUnread(threadId: threadId)
@@ -879,6 +926,22 @@ extension CodexService {
 
         guard let usage = extractContextWindowUsage(from: usageObject) else { return }
         contextWindowUsageByThread[threadId] = usage
+    }
+
+    // Mirrors the app-server persisted goal state. Goals are thread-scoped state,
+    // not timeline items, so this never touches the transcript.
+    private func handleThreadGoalUpdated(_ paramsObject: IncomingParamsObject?) {
+        guard let goal = CodexThreadGoal(object: paramsObject?["goal"]?.objectValue) else {
+            return
+        }
+        goalByThreadID[goal.threadId] = goal
+    }
+
+    private func handleThreadGoalCleared(_ paramsObject: IncomingParamsObject?) {
+        guard let threadId = extractThreadID(from: paramsObject), !threadId.isEmpty else {
+            return
+        }
+        goalByThreadID.removeValue(forKey: threadId)
     }
 
     private func handleThreadStatusChanged(_ paramsObject: IncomingParamsObject?) {
@@ -937,7 +1000,7 @@ extension CodexService {
                     turnId: activeTurnIdForThread,
                     state: terminalState
                 )
-                noteTurnFinished(turnId: activeTurnIdForThread)
+                noteTurnFinished(threadId: threadId, turnId: activeTurnIdForThread)
                 if let completionResult = runCompletionResult(for: terminalState) {
                     notifyRunCompletionIfNeeded(
                         threadId: threadId,
@@ -975,6 +1038,7 @@ extension CodexService {
             return
         }
 
+        projectedTerminalStateByThreadID.removeValue(forKey: threadId)
         pendingCanonicalSourceReplacementThreadIDs.insert(threadId)
         requestImmediateActiveThreadSync(threadId: threadId, forceHistoryRefresh: true)
     }
@@ -1042,11 +1106,28 @@ extension CodexService {
             ?? "Turn failed with no details"
     }
 
-    private func appendReasoningDelta(from paramsObject: IncomingParamsObject?) {
+    private func appendReasoningDelta(
+        from paramsObject: IncomingParamsObject?,
+        method: String
+    ) {
         guard let paramsObject else { return }
         let eventObject = envelopeEventObject(from: paramsObject)
 
-        let delta = extractTextDelta(from: paramsObject)
+        let delta: String
+        if method == "item/reasoning/summaryPartAdded" {
+            // A summary part is a separate visible trace. Preserve that boundary
+            // while streaming so `<!-- -->**Next summary**` cannot be parsed as
+            // disclosure detail before item/completed replaces the snapshot.
+            let summaryIndex = paramsObject["summaryIndex"]?.intValue
+                ?? paramsObject["summary_index"]?.intValue
+                ?? eventObject?["summaryIndex"]?.intValue
+                ?? eventObject?["summary_index"]?.intValue
+                ?? 0
+            let embeddedDelta = extractTextDelta(from: paramsObject)
+            delta = "\(summaryIndex > 0 ? "\n\n" : "")\(embeddedDelta)"
+        } else {
+            delta = extractTextDelta(from: paramsObject)
+        }
         guard !delta.isEmpty else { return }
 
         let turnId = extractTurnID(from: paramsObject)

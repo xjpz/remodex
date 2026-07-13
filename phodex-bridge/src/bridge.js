@@ -65,6 +65,7 @@ const {
   seedConversationStateFromThreadRead,
 } = require("./desktop-ipc-action-follower");
 const { createDesktopIpcLiveOwner } = require("./desktop-ipc-live-owner");
+const { createThreadRuntimeSettingsStore } = require("./thread-runtime-settings-store");
 const { version: bridgePackageVersion = "" } = require("../package.json");
 const {
   MINIMUM_SUPPORTED_IOS_APP_VERSION,
@@ -104,7 +105,10 @@ const RELAY_JSONL_ARTIFACT_CACHE_MAX_ENTRIES = 128;
 const RELAY_JSONL_THREAD_CWD_CACHE_TTL_MS = 5 * 60_000;
 const RELAY_JSONL_THREAD_EMPTY_CWD_CACHE_TTL_MS = 30_000;
 const RELAY_JSONL_FAST_FIRST_PAGE_WAIT_MS = 1_500;
-const RELAY_JSONL_CANONICAL_HANDOFF_TTL_MS = 60_000;
+// The phone may be backgrounded between the provisional JSONL page and its
+// canonical reconciliation. Keep the handoff long enough that a normal
+// foreground/reconnect does not turn a coherent first page into a dead cursor.
+const RELAY_JSONL_CANONICAL_HANDOFF_TTL_MS = 10 * 60_000;
 const RELAY_JSONL_CANONICAL_HANDOFF_MAX_ENTRIES = 32;
 const JSONL_CANONICAL_HANDOFF_CURSOR_PREFIX = "remodex-jsonl-handoff-v1:";
 const RELAY_JSONL_FULL_ARTIFACT_FALLBACK_MAX_BYTES = Math.max(
@@ -454,6 +458,14 @@ function createThreadTurnsListFastPageCoordinator({
     } catch {
       jsonlFallback = null;
     }
+    // A rollout tail is a useful emergency baseline only when it contains a
+    // whole turn package. Never let a bare tail (for example a file-change or
+    // final assistant fragment) win the race with canonical history: iOS would
+    // render it as a complete conversation and then merge the real opener in
+    // later, which is exactly how orphan cards and duplicate rows appeared.
+    if (jsonlFallback?.response && !isCoherentJsonlFirstPageResponse(jsonlFallback.response)) {
+      jsonlFallback = null;
+    }
     if (!jsonlFallback?.response) {
       const response = await awaitCanonicalOutcome(canonicalOutcomePromise);
       forgetCanonicalFirstPage(canonicalFirstPageCacheKey, canonicalOutcomePromise);
@@ -544,6 +556,7 @@ function threadTurnsListHandoffDescriptor(cursor) {
 function canonicalThreadTurnsListRequest(request) {
   const params = { ...(request?.params || {}) };
   delete params.remodexRequireCanonical;
+  delete params.remodexTurnStateOnly;
   if (params.cursor === JSONL_OLDER_HANDOFF_CURSOR || threadTurnsListHandoffDescriptor(params.cursor)) {
     delete params.cursor;
   }
@@ -614,6 +627,39 @@ function firstTurnsListTurnId(response) {
   const result = response?.result;
   const turnsKey = findTurnsListResultKey(result);
   return turnsKey ? turnListTurnIdentifier(result[turnsKey]?.[0]) : "";
+}
+
+function isCoherentJsonlFirstPageResponse(response) {
+  const result = response?.result;
+  const turnsKey = findTurnsListResultKey(result);
+  const turns = turnsKey ? result[turnsKey] : null;
+  if (!Array.isArray(turns) || turns.length === 0) {
+    return false;
+  }
+  // A running turn must contain its materialized user opener. Otherwise an
+  // orphan file card or assistant tail can win the fast-page race and later
+  // be mistaken for a complete conversation. Explicit terminal turns are
+  // allowed without a user item because older compacted/system turns can be
+  // legitimately item-only.
+  const newestTurn = turns[0];
+  const items = Array.isArray(newestTurn?.items) ? newestTurn.items : null;
+  if (!items) {
+    return false;
+  }
+  if (items.length === 0) {
+    return false;
+  }
+  const status = String(newestTurn?.status || "").replace(/[_-]/g, "").toLowerCase();
+  const isExplicitTerminal = new Set(["completed", "failed", "aborted", "cancelled", "canceled", "interrupted"])
+    .has(status);
+  if (isExplicitTerminal) {
+    return true;
+  }
+  return items.some((item) => {
+    const role = String(item?.role || "").toLowerCase();
+    const type = String(item?.type || "").replace(/[_-]/g, "").toLowerCase();
+    return role === "user" || type === "usermessage";
+  });
 }
 
 function threadTurnsListResponseContainsAnchor(response, anchorTurnId) {
@@ -727,6 +773,7 @@ function startBridge({
   const jsonlTurnsListRolloutCacheByThread = new Map();
   const jsonlTurnsListRolloutMissCacheByThread = new Map();
   const threadTurnsListFastPageCoordinator = createThreadTurnsListFastPageCoordinator();
+  const threadRuntimeSettingsStore = createThreadRuntimeSettingsStore();
   const trackedForwardedRequestMethods = new Set([
     "account/login/start",
     "account/login/cancel",
@@ -802,7 +849,9 @@ function startBridge({
       // served from Desktop echoes, or routed over the IPC bus.
       isLocallyOwnedThread: (threadId) => Boolean(desktopIpcLiveOwner?.isThreadOwned(threadId)),
       normalizeTurnStartParams: normalizeTurnStartParamsForCodex,
+      runtimeSettingsStore: threadRuntimeSettingsStore,
       socketPath: config.desktopIpcSocketPath || undefined,
+      snapshotDebounceMs: config.desktopIpcSnapshotDebounceMs,
     })
     : null;
   const desktopIpcLiveOwner = !config.codexEndpoint
@@ -812,6 +861,7 @@ function startBridge({
       sendCodexRequest,
       sendRawCodexMessage: (rawMessage) => codex.send(rawMessage),
       normalizeTurnStartParams: normalizeTurnStartParamsForCodex,
+      runtimeSettingsStore: threadRuntimeSettingsStore,
       socketPath: config.desktopIpcSocketPath || undefined,
       snapshotDebounceMs: config.desktopIpcSnapshotDebounceMs,
     })
@@ -1200,7 +1250,7 @@ function startBridge({
   }
 
   function forwardInboundRequestToCodex(rawMessage) {
-    const codexRequest = disableUnsupportedReasoningSummaryForTurnStart(rawMessage);
+    const codexRequest = normalizeTurnStartForCodex(rawMessage);
     rememberForwardedRequestMethod(rawMessage);
     rememberThreadFromMessage("phone", codexRequest);
     codex.send(codexRequest);
@@ -1312,7 +1362,7 @@ function startBridge({
         });
       } catch (error) {
         const jsonlFallback = maybeBuildJsonlThreadTurnsListFallback(request, null);
-        if (jsonlFallback?.response) {
+        if (jsonlFallback?.response && isCoherentJsonlFirstPageResponse(jsonlFallback.response)) {
           sendBridgeManagedThreadTurnsListResponse(request, jsonlFallback.response, respondOnce, {
             skipJsonlArtifactAugmentation: true,
           });
@@ -1367,10 +1417,20 @@ function startBridge({
         return null;
       }
 
+      // A first page is the local baseline for a newly opened thread. Honor a
+      // caller's larger request, but never manufacture the old one-turn tail:
+      // it has no room to preserve surrounding history while canonical data is
+      // still catching up.
+      const requestedLimit = Number.isInteger(params.limit) && params.limit > 0
+        ? params.limit
+        : RELAY_TURNS_LIST_MAX_INITIAL_LIMIT;
+      const firstPageLimit = params.cursor == null
+        ? Math.max(requestedLimit, RELAY_TURNS_LIST_MAX_INITIAL_LIMIT)
+        : requestedLimit;
       const result = readThreadTurnsListPageFromSessionJsonl(rolloutPath, {
         threadId,
-        limit: params.limit,
-        maxLimit: 1,
+        limit: firstPageLimit,
+        maxLimit: RELAY_TURNS_LIST_MAX_INITIAL_LIMIT,
         cursor: params.cursor,
       });
       const turnsKey = findTurnsListResultKey(result);
@@ -1636,6 +1696,13 @@ function startBridge({
       return normalizedMessage;
     }
     relaySanitizedResponseMethodsById.delete(String(responseId));
+
+    if (trackedRequest.method === "thread/list"
+      || trackedRequest.method === "thread/read"
+      || trackedRequest.method === "thread/resume") {
+      threadRuntimeSettingsStore.enrichResponse(trackedRequest.method, parsed);
+      normalizedMessage = JSON.stringify(parsed);
+    }
 
     return sanitizeThreadHistoryImagesForRelay(normalizedMessage, trackedRequest.method, trackedRequest);
   }
@@ -2348,7 +2415,7 @@ function disableUnsupportedReasoningSummaryForTurnStart(rawMessage) {
 }
 
 function normalizeTurnStartParamsForCodex(params) {
-  const normalizedRawMessage = disableUnsupportedReasoningSummaryForTurnStart(JSON.stringify({
+  const normalizedRawMessage = normalizeTurnStartForCodex(JSON.stringify({
     method: "turn/start",
     params,
   }));
@@ -2356,6 +2423,66 @@ function normalizeTurnStartParamsForCodex(params) {
   return parsed?.params && typeof parsed.params === "object" && !Array.isArray(parsed.params)
     ? parsed.params
     : params;
+}
+
+// A turn/start can carry the same runtime choice twice: in the legacy top-level
+// model/effort fields and in collaborationMode.settings. Codex treats the nested
+// collaboration settings as authoritative, so a stale Desktop value there can
+// silently override the model selected on the phone. Keep both representations
+// aligned before either direct app-server forwarding or Desktop-follower routing.
+function normalizeTurnStartForCodex(rawMessage) {
+  const parsed = parseBridgeJSON(rawMessage);
+  if (!parsed || parsed.method !== "turn/start") {
+    return rawMessage;
+  }
+
+  const params = parsed.params && typeof parsed.params === "object" && !Array.isArray(parsed.params)
+    ? parsed.params
+    : null;
+  if (!params) {
+    return rawMessage;
+  }
+
+  const model = normalizeNonEmptyString(params.model);
+  const effort = normalizeNonEmptyString(params.effort);
+  let changed = false;
+  let nextParams = params;
+
+  for (const collaborationKey of ["collaborationMode", "collaboration_mode"]) {
+    const collaborationMode = nextParams[collaborationKey];
+    const settings = collaborationMode?.settings;
+    if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
+      continue;
+    }
+
+    const nextSettings = { ...settings };
+    let settingsChanged = false;
+    if (model && normalizeNonEmptyString(settings.model) !== model) {
+      nextSettings.model = model;
+      settingsChanged = true;
+    }
+    if (effort && normalizeNonEmptyString(settings.reasoning_effort) !== effort) {
+      nextSettings.reasoning_effort = effort;
+      settingsChanged = true;
+    }
+    if (!settingsChanged) {
+      continue;
+    }
+
+    nextParams = {
+      ...nextParams,
+      [collaborationKey]: {
+        ...collaborationMode,
+        settings: nextSettings,
+      },
+    };
+    changed = true;
+  }
+
+  const alignedRawMessage = changed
+    ? JSON.stringify({ ...parsed, params: nextParams })
+    : rawMessage;
+  return disableUnsupportedReasoningSummaryForTurnStart(alignedRawMessage);
 }
 
 function readTurnStartModel(params) {
@@ -3615,6 +3742,21 @@ function mergeRelayHistoryItemsWithJsonlItems(existingItems, jsonlItems, threadI
   let matchedAnchorCount = 0;
   let didReplaceMatchedItem = false;
 
+  // The rollout's turn+text alias is the only identity shared across the
+  // live-owner (item_N) and rollout (msg_...) views of one assistant reply.
+  // Carrying it onto the matched server row lets the phone join this item
+  // with its other-source representations instead of duplicating it.
+  const adoptJsonlSourceAlias = (index, jsonlItem) => {
+    const sourceKey = normalizeNonEmptyString(jsonlItem?.remodexSourceItemKey);
+    const existing = resolvedExistingItems[index];
+    if (!sourceKey || !existing || typeof existing !== "object"
+      || normalizeNonEmptyString(existing.remodexSourceItemKey)) {
+      return;
+    }
+    resolvedExistingItems[index] = { ...existing, remodexSourceItemKey: sourceKey };
+    didReplaceMatchedItem = true;
+  };
+
   const placePendingItems = () => {
     if (pendingItems.length === 0) {
       return;
@@ -3653,6 +3795,7 @@ function mergeRelayHistoryItemsWithJsonlItems(existingItems, jsonlItems, threadI
           );
           didReplaceMatchedItem = true;
         }
+        adoptJsonlSourceAlias(representedExactIndex, jsonlItem);
         continue;
       }
       existingIndex = findRelayHistorySemanticMatchIndex(existingItems, jsonlItem, eligibleMatch);
@@ -3676,6 +3819,7 @@ function mergeRelayHistoryItemsWithJsonlItems(existingItems, jsonlItems, threadI
           );
           didReplaceMatchedItem = true;
         }
+        adoptJsonlSourceAlias(representedIndex, jsonlItem);
         continue;
       }
       if (includeJsonlItem(jsonlItem)) {
@@ -3693,6 +3837,7 @@ function mergeRelayHistoryItemsWithJsonlItems(existingItems, jsonlItems, threadI
       );
       didReplaceMatchedItem = true;
     }
+    adoptJsonlSourceAlias(existingIndex, jsonlItem);
     previousMatchedIndex = existingIndex;
     matchedAnchorCount += 1;
   }
@@ -3832,6 +3977,7 @@ function isRelayAssistantHistoryItem(item) {
   const itemType = normalizeHistoryItemToken(item?.type);
   return role === "assistant"
     || itemType === "assistantmessage"
+    || itemType === "agentmessage"
     || (itemType === "message" && role !== "user");
 }
 
@@ -3859,9 +4005,13 @@ function areEquivalentRelayHistoryItems(first, second) {
 
   // JSONL line ids are source-local fallbacks, not provider identities. They
   // may reconcile semantically with a real app-server id; occurrence tracking
-  // in the merge keeps intentional repeated rows distinct.
+  // in the merge keeps intentional repeated rows distinct. Assistant messages
+  // are exempt from the two-stable-ids refusal: the live-owner state keys them
+  // by app-server event id (item_N) while the rollout records the provider id
+  // (msg_...), so the same reply legitimately carries two stable identities.
   if (relayHistoryIdentityIsStable(firstIdentity)
-    && relayHistoryIdentityIsStable(secondIdentity)) {
+    && relayHistoryIdentityIsStable(secondIdentity)
+    && !(isRelayAssistantHistoryItem(first) && isRelayAssistantHistoryItem(second))) {
     return false;
   }
   if (relayHistoryIdentityIsStable(firstCallId)
@@ -3916,6 +4066,7 @@ function relayHistoryItemKindsCompatible(first, second) {
 function isRelayMessageLikeHistoryType(itemType) {
   return itemType === "message"
     || itemType === "assistantmessage"
+    || itemType === "agentmessage"
     || itemType === "usermessage";
 }
 
@@ -4865,10 +5016,18 @@ function persistBridgePreferences(
 
 function shouldSuppressRolloutMirrorForThread(
   threadId,
-  { desktopIpcActionFollower = null, desktopIpcLiveOwner = null } = {}
+  { desktopIpcActionFollower = null, desktopIpcLiveOwner = null } = {},
+  { fallbackActivityAt = 0 } = {}
 ) {
-  return Boolean(desktopIpcActionFollower?.hasLiveThreadState(threadId))
-    || Boolean(desktopIpcLiveOwner?.isThreadOwned(threadId));
+  // Desktop ownership is an expiring live lease, not a permanent boolean. A
+  // stale IPC snapshot used to mute an actively growing rollout forever.
+  const followerIsFresh = typeof desktopIpcActionFollower?.hasFreshLiveThreadState === "function"
+    ? desktopIpcActionFollower.hasFreshLiveThreadState(threadId, { fallbackActivityAt })
+    : desktopIpcActionFollower?.hasLiveThreadState(threadId);
+  const ownerIsFresh = typeof desktopIpcLiveOwner?.isFreshThreadOwned === "function"
+    ? desktopIpcLiveOwner.isFreshThreadOwned(threadId)
+    : false;
+  return Boolean(followerIsFresh) || Boolean(ownerIsFresh);
 }
 
 module.exports = {
@@ -4882,6 +5041,7 @@ module.exports = {
   hasRelayConnectionGoneStale,
   isContextualUserItemNotification,
   maybeMergeLatestJsonlTurnIntoTurnsListResponse,
+  normalizeTurnStartForCodex,
   normalizeRelayBoundJsonRpcMessage,
   persistBridgePreferences,
   resolveJsonlTurnsListRolloutPathForFallback,

@@ -23,15 +23,18 @@ enum TurnTimelineReducer {
         let reordered = enforceIntraTurnOrder(in: anchored)
         let collapsedThinking = collapseThinkingMessages(in: reordered)
         let withoutCommandThinkingEchoes = removeRedundantThinkingCommandActivityMessages(in: collapsedThinking)
-        let dedupedUsers = removeDuplicateUserMessages(in: withoutCommandThinkingEchoes)
+        let withoutRepeatedReasoningSummaries = removeDuplicateReasoningSummaryMessages(
+            in: withoutCommandThinkingEchoes
+        )
+        let dedupedUsers = removeDuplicateUserMessages(in: withoutRepeatedReasoningSummaries)
         let dedupedFileChanges = removeDuplicateFileChangeMessages(in: dedupedUsers)
         let dedupedSubagentActions = removeDuplicateSubagentActionMessages(in: dedupedFileChanges)
         let dedupedAssistant = removeDuplicateAssistantMessages(in: dedupedSubagentActions)
         return TurnTimelineProjection(messages: dedupedAssistant)
     }
 
-    // Resolves where the viewport should anchor when assistant output starts streaming.
-    static func assistantResponseAnchorMessageID(
+    // Resolves whether the active assistant response has entered the timeline.
+    static func assistantResponseMessageID(
         in messages: [CodexMessage],
         activeTurnID: String?
     ) -> String? {
@@ -93,11 +96,11 @@ enum TurnTimelineReducer {
                 sorted = movingFileChangesToTurnTail(
                     in: turnMessages.sorted { $0.orderIndex < $1.orderIndex }
                 )
-            } else if hasInterleavedAssistantActivityFlow(turnMessages) {
-                // Multi-item turn: keep the streamed interleaving intact. If the turn has
-                // only one user prompt, we can still float that original opener forward.
-                // Once a second user row exists, treat it as an in-turn steer and preserve
-                // full chronological order so it stays near the bottom of the active run.
+            } else if hasInterleavedAssistantActivityFlow(turnMessages)
+                        || hasInterleavedCommandTraceFlow(turnMessages) {
+                // Interleaved assistant or command-trace flow: keep streamed chronology.
+                // If the turn has only one user prompt, we can still float that original
+                // opener forward. A second user row is an in-turn steer and stays in place.
                 let userCount = turnMessages.reduce(into: 0) { partialResult, message in
                     if message.role == .user {
                         partialResult += 1
@@ -215,6 +218,27 @@ enum TurnTimelineReducer {
                 }
             }
         }
+        return false
+    }
+
+    // Reasoning summaries are part of the command trace. Once one arrives after a
+    // command row, chronological order is already authoritative; role-priority
+    // sorting would move the trace ahead of its command and break the disclosure,
+    // even when no later command follows it.
+    private static func hasInterleavedCommandTraceFlow(_ turnMessages: [CodexMessage]) -> Bool {
+        let ordered = turnMessages.sorted { $0.orderIndex < $1.orderIndex }
+        var seenCommand = false
+
+        for message in ordered {
+            if message.role == .system, message.kind == .commandExecution {
+                seenCommand = true
+            } else if seenCommand,
+                      message.role == .system,
+                      message.kind == .thinking {
+                return true
+            }
+        }
+
         return false
     }
 
@@ -663,6 +687,62 @@ enum TurnTimelineReducer {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         return command.isEmpty ? nil : command
+    }
+
+    // Codex can emit cumulative reasoning summaries under several stable item
+    // ids in one turn (event_msg plus response_item snapshots). Keep each short
+    // trace title once while preserving the first-seen position and any unseen
+    // suffix titles. Detailed reasoning items remain independent.
+    static func removeDuplicateReasoningSummaryMessages(
+        in messages: [CodexMessage]
+    ) -> [CodexMessage] {
+        var seenSummaryKeysByTurn: [String: Set<String>] = [:]
+        var result: [CodexMessage] = []
+        result.reserveCapacity(messages.count)
+
+        for var message in messages {
+            guard message.role == .system,
+                  message.kind == .thinking,
+                  message.text.utf8.count <= largeTextDedupeByteLimit,
+                  message.text.contains("**"),
+                  let turnID = normalizedIdentifier(message.turnId) else {
+                result.append(message)
+                continue
+            }
+
+            let content = ThinkingDisclosureParser.parse(from: message.text)
+            guard content.isSummaryOnly else {
+                result.append(message)
+                continue
+            }
+
+            var seenKeys = seenSummaryKeysByTurn[turnID, default: Set<String>()]
+            let unseenSections = content.sections.filter { section in
+                let key = reasoningSummaryKey(section.title)
+                guard !key.isEmpty else { return true }
+                return seenKeys.insert(key).inserted
+            }
+            seenSummaryKeysByTurn[turnID] = seenKeys
+
+            guard !unseenSections.isEmpty else {
+                continue
+            }
+            if unseenSections.count != content.sections.count {
+                message.text = unseenSections
+                    .map { "**\($0.title)**\n\n<!-- -->" }
+                    .joined(separator: "\n\n")
+            }
+            result.append(message)
+        }
+
+        return result
+    }
+
+    private static func reasoningSummaryKey(_ title: String) -> String {
+        title
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+            .lowercased()
     }
 
     // Collapses optimistic phone-send rows with their confirmed runtime echoes so

@@ -2,8 +2,9 @@
 // Purpose: Parses thread/read history payloads into normalized timeline messages.
 // Layer: Service
 // Exports: CodexService history parsing helpers
-// Depends on: CodexMessage, JSONValue
+// Depends on: CodexMessage, CryptoKit, JSONValue
 
+import CryptoKit
 import Foundation
 import UIKit
 
@@ -15,6 +16,24 @@ fileprivate struct UserMessageSemanticKey: Equatable {
     var hasMentions: Bool {
         !skillMentions.isEmpty || !pluginMentions.isEmpty
     }
+}
+
+fileprivate struct CanonicalAssistantTurnKey: Hashable {
+    let threadId: String
+    let turnId: String
+}
+
+fileprivate struct CanonicalAssistantSourceKey: Hashable {
+    let threadId: String
+    let turnId: String
+    let sourceItemKey: String
+    let text: String
+}
+
+fileprivate struct CanonicalAssistantTurnTextKey: Hashable {
+    let threadId: String
+    let turnId: String
+    let text: String
 }
 
 extension CodexService {
@@ -101,6 +120,7 @@ extension CodexService {
                     ?? turnTimeZoneIdentifier
                 offset += 0.001
                 let itemID = itemObject["id"]?.stringValue
+                let sourceItemKey = itemObject["remodexSourceItemKey"]?.stringValue
                 let decodedText = decodeItemText(from: itemObject)
                 let skillMentions = decodeHistorySkillMentions(from: itemObject)
                 let pluginMentions = decodeHistoryPluginMentions(from: itemObject)
@@ -115,6 +135,7 @@ extension CodexService {
                         threadId: threadId,
                         turnId: turnID,
                         itemId: itemID,
+                        sourceItemKey: sourceItemKey,
                         createdAt: timestamp,
                         timeZoneIdentifier: timeZoneIdentifier,
                         skillMentions: skillMentions,
@@ -132,6 +153,7 @@ extension CodexService {
                         threadId: threadId,
                         turnId: turnID,
                         itemId: itemID,
+                        sourceItemKey: sourceItemKey,
                         createdAt: timestamp,
                         timeZoneIdentifier: timeZoneIdentifier,
                         attachments: imageAttachments
@@ -152,6 +174,7 @@ extension CodexService {
                         threadId: threadId,
                         turnId: turnID,
                         itemId: itemID,
+                        sourceItemKey: sourceItemKey,
                         createdAt: timestamp,
                         timeZoneIdentifier: timeZoneIdentifier,
                         skillMentions: mappedRole == .user ? skillMentions : [],
@@ -929,6 +952,22 @@ extension CodexService {
                 throw CancellationError()
             }
 
+            if let incomingSourceItemKey = normalizedHistoryIdentifier(message.sourceItemKey),
+               let incomingTurnID = normalizedHistoryIdentifier(message.turnId) {
+                let eligibleAliasIndices = merged.indices.filter { index in
+                    let candidate = merged[index]
+                    return candidate.role == message.role
+                        && normalizedHistoryIdentifier(candidate.turnId) == incomingTurnID
+                        && normalizedHistoryIdentifier(candidate.sourceItemKey) == incomingSourceItemKey
+                        && sourceItemIdentityAllowsReconcile(candidate.itemId, message.itemId)
+                        && (candidate.kind == message.kind || candidate.kind == .chat || message.kind == .chat)
+                }
+                if eligibleAliasIndices.count == 1, let index = eligibleAliasIndices.first {
+                    reconcileMessage(at: index, with: message)
+                    continue
+                }
+            }
+
             if let incomingItemId = normalizedHistoryIdentifier(message.itemId),
                let index = merged.firstIndex(where: { candidate in
                    normalizedHistoryIdentifier(candidate.itemId) == incomingItemId
@@ -1294,6 +1333,15 @@ extension CodexService {
             recordCanonicalOrder(at: merged.index(before: merged.endIndex))
         }
 
+        repairCanonicalAssistantSourceIdentityRotations(
+            in: &merged,
+            history: history,
+            canonicalOrderByMessageID: &canonicalOrderByMessageID,
+            activeThreadIDs: activeThreadIDs,
+            activeTurnIDs: activeTurnIDs,
+            runningThreadIDs: runningThreadIDs
+        )
+
         if shouldApplyCanonicalHistoryOrder {
             applyCanonicalHistoryOrder(
                 to: &merged,
@@ -1578,6 +1626,190 @@ extension CodexService {
         }
     }
 
+    // Desktop live state and canonical history can assign different stable provider ids to the
+    // same assistant item. Match them through the bridge's deterministic turn + text source alias;
+    // normal app-server history can derive that alias even though it does not carry the field.
+    // Active turns additionally require the orphan to precede the canonical copy unless the alias
+    // is exact, so a newer intentional same-text item is never folded into history.
+    nonisolated static func repairCanonicalAssistantSourceIdentityRotations(
+        in messages: inout [CodexMessage],
+        history: [CodexMessage],
+        canonicalOrderByMessageID: inout [String: Int],
+        activeThreadIDs: Set<String>,
+        activeTurnIDs: Set<String>? = nil,
+        runningThreadIDs: Set<String>
+    ) {
+        let canonicalAssistantRows = history.filter { message in
+            message.role == .assistant
+                && normalizedHistoryIdentifier(message.turnId) != nil
+                && normalizedHistoryIdentifier(message.itemId) != nil
+                && hasMeaningfulHistoryText(message.text)
+        }
+        guard !canonicalAssistantRows.isEmpty else {
+            return
+        }
+
+        var canonicalItemIDsByTurn: [CanonicalAssistantTurnKey: Set<String>] = [:]
+        for message in history where message.role == .assistant {
+            guard let turnId = normalizedHistoryIdentifier(message.turnId),
+                  let itemId = normalizedHistoryIdentifier(message.itemId) else {
+                continue
+            }
+            canonicalItemIDsByTurn[
+                CanonicalAssistantTurnKey(threadId: message.threadId, turnId: turnId),
+                default: []
+            ].insert(itemId)
+        }
+
+        let canonicalRowsBySource = Dictionary(grouping: canonicalAssistantRows) { message in
+            let turnId = normalizedHistoryIdentifier(message.turnId) ?? ""
+            return CanonicalAssistantSourceKey(
+                threadId: message.threadId,
+                turnId: turnId,
+                sourceItemKey: normalizedHistoryIdentifier(message.sourceItemKey)
+                    ?? remodexAssistantSourceItemKey(turnId: turnId, text: message.text)
+                    ?? "",
+                text: normalizedMessageText(message.text)
+            )
+        }
+        let localIndicesByTurnText = Dictionary(
+            grouping: messages.indices.filter { index in
+                let message = messages[index]
+                return message.role == .assistant
+                    && !message.isStreaming
+                    && normalizedHistoryIdentifier(message.turnId) != nil
+                    && hasMeaningfulHistoryText(message.text)
+            },
+            by: { index in
+                let message = messages[index]
+                return CanonicalAssistantTurnTextKey(
+                    threadId: message.threadId,
+                    turnId: normalizedHistoryIdentifier(message.turnId) ?? "",
+                    text: normalizedMessageText(message.text)
+                )
+            }
+        )
+
+        var repairs: [(orphanMessageId: String, duplicateMessageIds: [String], canonical: CodexMessage)] = []
+        var claimedMessageIDs: Set<String> = []
+
+        for (sourceKey, canonicalRows) in canonicalRowsBySource where canonicalRows.count == 1 {
+            guard !isProvisionalHistoryTurnIdentifier(sourceKey.turnId),
+                  let canonical = canonicalRows.first,
+                  let canonicalItemID = normalizedHistoryIdentifier(canonical.itemId) else {
+                continue
+            }
+
+            let turnKey = CanonicalAssistantTurnKey(
+                threadId: sourceKey.threadId,
+                turnId: sourceKey.turnId
+            )
+            let canonicalTurnItemIDs = canonicalItemIDsByTurn[turnKey] ?? []
+            let turnTextKey = CanonicalAssistantTurnTextKey(
+                threadId: sourceKey.threadId,
+                turnId: sourceKey.turnId,
+                text: sourceKey.text
+            )
+            let matchingLocalIndices = localIndicesByTurnText[turnTextKey] ?? []
+            let canonicalHasExplicitSourceAlias = normalizedHistoryIdentifier(
+                canonical.sourceItemKey
+            ) != nil
+            let orphanIndices = matchingLocalIndices.filter { index in
+                let candidate = messages[index]
+                let candidateItemID = normalizedHistoryIdentifier(candidate.itemId)
+                let candidateSourceKey = normalizedHistoryIdentifier(candidate.sourceItemKey)
+                return candidateItemID != canonicalItemID
+                    && (candidateItemID.map { !canonicalTurnItemIDs.contains($0) } ?? true)
+                    && (canonicalHasExplicitSourceAlias
+                        ? (candidateSourceKey == nil || candidateSourceKey == sourceKey.sourceItemKey)
+                        : candidateSourceKey == sourceKey.sourceItemKey)
+            }
+            guard orphanIndices.count == 1,
+                  let orphanIndex = orphanIndices.first,
+                  !claimedMessageIDs.contains(messages[orphanIndex].id) else {
+                continue
+            }
+
+            let canonicalDuplicateIndices = matchingLocalIndices.filter { index in
+                index != orphanIndex
+                    && normalizedHistoryIdentifier(messages[index].itemId) == canonicalItemID
+            }
+            let orphanSourceKey = normalizedHistoryIdentifier(messages[orphanIndex].sourceItemKey)
+            let turnIsActive = activeThreadIDs.contains(sourceKey.threadId)
+                ? (activeTurnIDs?.contains(sourceKey.turnId) ?? true)
+                : runningThreadIDs.contains(sourceKey.threadId)
+            let hasExactSourceProof = !sourceKey.sourceItemKey.isEmpty
+                && orphanSourceKey == sourceKey.sourceItemKey
+            if turnIsActive, !hasExactSourceProof {
+                guard let earliestCanonicalOrderIndex = canonicalDuplicateIndices
+                    .map({ messages[$0].orderIndex })
+                    .min(),
+                      messages[orphanIndex].orderIndex < earliestCanonicalOrderIndex else {
+                    continue
+                }
+            }
+            let duplicateMessageIDs = canonicalDuplicateIndices.map { messages[$0].id }
+            guard duplicateMessageIDs.allSatisfy({ !claimedMessageIDs.contains($0) }) else {
+                continue
+            }
+
+            claimedMessageIDs.insert(messages[orphanIndex].id)
+            claimedMessageIDs.formUnion(duplicateMessageIDs)
+            repairs.append((
+                orphanMessageId: messages[orphanIndex].id,
+                duplicateMessageIds: duplicateMessageIDs,
+                canonical: canonical
+            ))
+        }
+
+        for repair in repairs {
+            guard let orphanIndex = messages.firstIndex(where: { $0.id == repair.orphanMessageId }),
+                  let canonicalItemID = normalizedHistoryIdentifier(repair.canonical.itemId) else {
+                continue
+            }
+
+            let preservedOrderIndex = messages[orphanIndex].orderIndex
+            var repaired = reconcileExistingMessage(
+                messages[orphanIndex],
+                with: repair.canonical,
+                activeThreadIDs: activeThreadIDs,
+                activeTurnIDs: activeTurnIDs,
+                runningThreadIDs: runningThreadIDs
+            )
+            for duplicateMessageID in repair.duplicateMessageIds {
+                guard let duplicate = messages.first(where: { $0.id == duplicateMessageID }) else {
+                    continue
+                }
+                if repaired.attachments.isEmpty, !duplicate.attachments.isEmpty {
+                    repaired.attachments = duplicate.attachments
+                }
+            }
+            repaired.itemId = canonicalItemID
+            if let canonicalSourceKey = normalizedHistoryIdentifier(repair.canonical.sourceItemKey) {
+                repaired.sourceItemKey = canonicalSourceKey
+            }
+            repaired.orderIndex = preservedOrderIndex
+            messages[orphanIndex] = repaired
+
+            let canonicalOrder = repair.duplicateMessageIds.compactMap {
+                canonicalOrderByMessageID[$0]
+            }.min()
+            if let canonicalOrder {
+                canonicalOrderByMessageID[repair.orphanMessageId] = canonicalOrder
+            }
+            for duplicateMessageID in repair.duplicateMessageIds {
+                canonicalOrderByMessageID.removeValue(forKey: duplicateMessageID)
+            }
+
+            let duplicateIndices = repair.duplicateMessageIds.compactMap { duplicateMessageID in
+                messages.firstIndex(where: { $0.id == duplicateMessageID })
+            }
+            for duplicateIndex in duplicateIndices.sorted(by: >) {
+                messages.remove(at: duplicateIndex)
+            }
+        }
+    }
+
     // Keeps running-thread reopen bounded to the recent transcript tail so A/B switching
     // does not repeatedly reconcile the entire chat while output is still streaming.
     nonisolated static func mergeRecentHistoryWindow(
@@ -1736,6 +1968,9 @@ extension CodexService {
 
         if value.deliveryState == .pending {
             value.deliveryState = .confirmed
+        }
+        if value.sourceItemKey == nil {
+            value.sourceItemKey = serverMessage.sourceItemKey
         }
 
         if CodexTimestampParser.isTrustworthyServerDate(serverMessage.createdAt),
@@ -2115,6 +2350,22 @@ extension CodexService {
         return CodexTextContentFingerprint.cacheKey(for: text)
     }
 
+    // Mirrors the bridge's source-neutral alias for an event_msg/response_item pair. Normal
+    // app-server history omits remodexSourceItemKey, so deriving it here preserves exact replay
+    // identity without falling back to unsafe turn + text matching on partial history windows.
+    nonisolated static func remodexAssistantSourceItemKey(turnId: String, text: String) -> String? {
+        guard let normalizedTurnId = normalizedHistoryIdentifier(turnId) else {
+            return nil
+        }
+        let normalizedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedText.isEmpty else {
+            return nil
+        }
+        let digest = SHA256.hash(data: Data(normalizedText.utf8))
+        let textHash = digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+        return "\(normalizedTurnId):\(textHash)"
+    }
+
     nonisolated static func normalizedHistoryIdentifier(_ value: String?) -> String? {
         guard let value else {
             return nil
@@ -2325,6 +2576,25 @@ extension CodexService {
             return false
         }
         return !CodexSyntheticIdentifiers.isMirrorMintedItemID(itemId)
+    }
+
+    // Source aliases are semantic bridge hints, not provider identities. They may collide when
+    // two real assistant items intentionally contain the same text, so only use them to bridge
+    // one mirror identity and one provider identity (or the exact same item id).
+    nonisolated static func sourceItemIdentityAllowsReconcile(
+        _ existingItemId: String?,
+        _ incomingItemId: String?
+    ) -> Bool {
+        let existing = normalizedHistoryIdentifier(existingItemId)
+        let incoming = normalizedHistoryIdentifier(incomingItemId)
+        guard let existing, let incoming else {
+            return false
+        }
+        if existing == incoming {
+            return true
+        }
+        return CodexSyntheticIdentifiers.isMirrorMintedItemID(existing)
+            != CodexSyntheticIdentifiers.isMirrorMintedItemID(incoming)
     }
 
     // Running assistant rows may absorb history only when the provider item identity agrees.
@@ -2842,6 +3112,7 @@ extension CodexService {
         threadId: String,
         turnId: String?,
         itemId: String?,
+        sourceItemKey: String? = nil,
         createdAt: Date,
         timeZoneIdentifier: String? = nil,
         skillMentions: [String] = [],
@@ -2874,6 +3145,7 @@ extension CodexService {
                 timeZoneIdentifier: timeZoneIdentifier,
                 turnId: turnId,
                 itemId: itemId,
+                sourceItemKey: sourceItemKey,
                 isStreaming: false,
                 deliveryState: .confirmed,
                 attachments: attachments,

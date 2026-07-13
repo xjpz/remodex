@@ -19,6 +19,7 @@ const {
   fetchAdaptiveThreadTurnsListForRelay,
   hasRelayConnectionGoneStale,
   maybeMergeLatestJsonlTurnIntoTurnsListResponse,
+  normalizeTurnStartForCodex,
   normalizeRelayBoundJsonRpcMessage,
   persistBridgePreferences,
   resolveJsonlTurnsListRolloutPathForFallback,
@@ -62,6 +63,40 @@ test("rollout suppression follows the follower's current ownership signal", () =
     { desktopIpcActionFollower }
   ), false);
   assert.equal(liveStateChecks, 2);
+});
+
+test("rollout suppression releases a stale Desktop owner so a growing rollout can mirror", () => {
+  let receivedFallbackActivityAt = 0;
+  const desktopIpcActionFollower = {
+    hasLiveThreadState() {
+      return true;
+    },
+    hasFreshLiveThreadState(_threadId, { fallbackActivityAt = 0 } = {}) {
+      receivedFallbackActivityAt = fallbackActivityAt;
+      return false;
+    },
+  };
+  const desktopIpcLiveOwner = {
+    isThreadOwned() {
+      return true;
+    },
+    isFreshThreadOwned() {
+      return false;
+    },
+  };
+
+  assert.equal(shouldSuppressRolloutMirrorForThread(
+    "thread-stale-desktop",
+    { desktopIpcActionFollower, desktopIpcLiveOwner },
+    { fallbackActivityAt: 1234 }
+  ), false);
+  assert.equal(receivedFallbackActivityAt, 1234);
+
+  desktopIpcLiveOwner.isFreshThreadOwned = () => true;
+  assert.equal(shouldSuppressRolloutMirrorForThread(
+    "thread-fresh-desktop",
+    { desktopIpcActionFollower, desktopIpcLiveOwner }
+  ), true);
 });
 
 test("normalizeRelayBoundJsonRpcMessage rewrites payload-only responses to result", () => {
@@ -192,7 +227,7 @@ test("thread turns-list fast page returns JSONL once and reuses the late canonic
       response: {
         id: request.id,
         result: {
-          data: [{ id: "turn-jsonl", items: [{ id: "item-jsonl" }] }],
+          data: [{ id: "turn-jsonl", items: [{ id: "item-jsonl", type: "user_message", role: "user" }] }],
           nextCursor: "remodex-jsonl-fallback-older-unavailable",
           remodexJsonlFallback: true,
         },
@@ -342,7 +377,7 @@ test("thread turns-list fast page keeps an immediate canonical response authorit
       response: {
         id: "req-fast-canonical",
         result: {
-          data: [{ id: "turn-jsonl", items: [] }],
+          data: [{ id: "turn-jsonl", items: [{ id: "jsonl-item", type: "user_message", role: "user" }] }],
           nextCursor: "remodex-jsonl-fallback-older-unavailable",
         },
       },
@@ -351,6 +386,73 @@ test("thread turns-list fast page keeps an immediate canonical response authorit
   });
 
   assert.equal(deadlineWasScheduled, true);
+  assert.equal(selection.source, "canonical");
+  assert.equal(selection.response.result.data[0].id, "turn-canonical");
+});
+
+test("thread turns-list refuses an empty JSONL tail as a history baseline", async () => {
+  const coordinator = createThreadTurnsListFastPageCoordinator();
+  const selection = await coordinator.resolve({
+    id: "req-empty-jsonl-tail",
+    method: "thread/turns/list",
+    params: { threadId: "thread-empty-jsonl-tail", limit: 5 },
+  }, {
+    fetchCanonical: async () => ({
+      id: "canonical-empty-jsonl-tail",
+      result: {
+        data: [{ id: "turn-canonical", items: [{ id: "canonical-opener" }] }],
+        nextCursor: null,
+      },
+    }),
+    readJsonl: async () => ({
+      response: {
+        id: "req-empty-jsonl-tail",
+        result: {
+          data: [{ id: "turn-jsonl-tail", status: "running", items: [] }],
+          nextCursor: "remodex-jsonl-fallback-older-unavailable",
+        },
+      },
+      usesJsonl: true,
+    }),
+  });
+
+  assert.equal(selection.source, "canonical");
+  assert.equal(selection.response.result.data[0].id, "turn-canonical");
+});
+
+test("thread turns-list refuses an assistant and file-change-only running JSONL tail", async () => {
+  const coordinator = createThreadTurnsListFastPageCoordinator();
+  const selection = await coordinator.resolve({
+    id: "req-artifact-jsonl-tail",
+    method: "thread/turns/list",
+    params: { threadId: "thread-artifact-jsonl-tail", limit: 5 },
+  }, {
+    fetchCanonical: async () => ({
+      id: "canonical-artifact-jsonl-tail",
+      result: {
+        data: [{ id: "turn-canonical", items: [{ id: "canonical-user", type: "user_message", role: "user" }] }],
+        nextCursor: null,
+      },
+    }),
+    readJsonl: async () => ({
+      response: {
+        id: "req-artifact-jsonl-tail",
+        result: {
+          data: [{
+            id: "turn-jsonl-tail",
+            status: "running",
+            items: [
+              { id: "orphan-file-change", type: "file_change" },
+              { id: "assistant-tail", type: "message", role: "assistant", text: "tail only" },
+            ],
+          }],
+          nextCursor: "remodex-jsonl-fallback-older-unavailable",
+        },
+      },
+      usesJsonl: true,
+    }),
+  });
+
   assert.equal(selection.source, "canonical");
   assert.equal(selection.response.result.data[0].id, "turn-canonical");
 });
@@ -377,7 +479,7 @@ test("thread turns-list fast page prefers a newer running JSONL turn over stale 
       response: {
         id: "req-newer-jsonl",
         result: {
-          data: [{ id: "turn-jsonl-running", status: "running", items: [] }],
+          data: [{ id: "turn-jsonl-running", status: "running", items: [{ id: "jsonl-running-item", type: "user_message", role: "user" }] }],
           nextCursor: "remodex-jsonl-fallback-older-unavailable",
         },
       },
@@ -415,7 +517,7 @@ test("thread turns-list handoff never returns newer canonical turns as older his
       response: {
         id: request.id,
         result: {
-          data: [{ id: "turn-anchor", items: [{ id: "anchor-item" }] }],
+          data: [{ id: "turn-anchor", items: [{ id: "anchor-item", type: "user_message", role: "user" }] }],
           nextCursor: "remodex-jsonl-fallback-older-unavailable",
         },
       },
@@ -495,7 +597,7 @@ test("canonical reconciliation follows the canonical cursor until it reaches the
       response: {
         id: request.id,
         result: {
-          data: [{ id: "turn-jsonl-anchor", items: [{ id: "jsonl-anchor" }] }],
+          data: [{ id: "turn-jsonl-anchor", items: [{ id: "jsonl-anchor", type: "user_message", role: "user" }] }],
           nextCursor: "remodex-jsonl-fallback-older-unavailable",
         },
       },
@@ -579,7 +681,7 @@ test("canonical reconciliation compacts every turn through the anchor under the 
       response: {
         id: request.id,
         result: {
-          data: [{ id: "turn-oversized-anchor", items: [{ id: "jsonl-anchor" }] }],
+          data: [{ id: "turn-oversized-anchor", items: [{ id: "jsonl-anchor", type: "user_message", role: "user" }] }],
           nextCursor: "remodex-jsonl-fallback-older-unavailable",
         },
       },
@@ -650,7 +752,7 @@ test("canonical reconciliation does not search forever for a synthetic JSONL anc
       response: {
         id: request.id,
         result: {
-          data: [{ id: "turn-line-2048", items: [{ id: "jsonl-synthetic-item" }] }],
+          data: [{ id: "turn-line-2048", items: [{ id: "jsonl-synthetic-item", type: "user_message", role: "user" }] }],
           nextCursor: "remodex-jsonl-fallback-older-unavailable",
         },
       },
@@ -701,6 +803,7 @@ test("canonical turns-list requests strip bridge-only handoff state", () => {
       limit: 1,
       cursor: "remodex-jsonl-handoff-v1:token",
       remodexRequireCanonical: true,
+      remodexTurnStateOnly: true,
     },
   };
 
@@ -878,6 +981,55 @@ test("disableUnsupportedReasoningSummaryForTurnStart leaves other models untouch
   });
 
   assert.equal(disableUnsupportedReasoningSummaryForTurnStart(raw), raw);
+});
+
+test("normalizeTurnStartForCodex aligns stale collaboration settings with the phone runtime choice", () => {
+  const raw = JSON.stringify({
+    id: "req-phone-sol",
+    method: "turn/start",
+    params: {
+      threadId: "thread-desktop-terra",
+      model: "gpt-5.6-sol",
+      effort: "low",
+      serviceTier: "fast",
+      collaborationMode: {
+        mode: "default",
+        settings: {
+          model: "gpt-5.6-terra",
+          reasoning_effort: "medium",
+          developer_instructions: "keep me",
+        },
+      },
+      input: [{ type: "text", text: "hi" }],
+    },
+  });
+
+  const normalized = JSON.parse(normalizeTurnStartForCodex(raw));
+
+  assert.equal(normalized.params.model, "gpt-5.6-sol");
+  assert.equal(normalized.params.effort, "low");
+  assert.equal(normalized.params.serviceTier, "fast");
+  assert.equal(normalized.params.collaborationMode.settings.model, "gpt-5.6-sol");
+  assert.equal(normalized.params.collaborationMode.settings.reasoning_effort, "low");
+  assert.equal(normalized.params.collaborationMode.settings.developer_instructions, "keep me");
+});
+
+test("normalizeTurnStartForCodex leaves collaboration-only runtime choices intact", () => {
+  const raw = JSON.stringify({
+    method: "turn/start",
+    params: {
+      threadId: "thread-plan",
+      collaborationMode: {
+        mode: "plan",
+        settings: {
+          model: "gpt-5.6-terra",
+          reasoning_effort: "high",
+        },
+      },
+    },
+  });
+
+  assert.equal(normalizeTurnStartForCodex(raw), raw);
 });
 
 test("hasRelayConnectionGoneStale returns false for fresh or missing activity timestamps", () => {
@@ -2102,6 +2254,93 @@ test("sanitizeThreadHistoryImagesForRelay reconciles fallback ids without collap
   assert.equal(items.filter((item) => item.role === "assistant").length, 3);
   assert.equal(items.some((item) => item.id?.startsWith("user-message-line-")), false);
   assert.equal(items.some((item) => item.id?.startsWith("apply-patch-line-")), false);
+});
+
+// A live-owned turn keys assistant replies by app-server event id (item_N)
+// while the rollout records the provider id (msg_...). The augment pass must
+// fold the two stable identities into one row and carry the JSONL source
+// alias onto it so the phone can join later cross-source representations.
+test("sanitizeThreadHistoryImagesForRelay folds live-owner assistant ids into JSONL provider rows", (t) => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-history-live-owner-ids-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+  t.after(() => {
+    if (previousCodexHome == null) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  });
+
+  const threadId = "thread-live-owner-identities";
+  const turnId = "turn-live-owner-identities";
+  const assistantText = "The change set is substantial: tracing the new contracts.";
+  const sessionsDir = path.join(codexHome, "sessions", "2026", "07", "11");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(sessionsDir, `rollout-2026-07-11T15-55-04-${threadId}.jsonl`),
+    [
+      JSON.stringify({ type: "session_meta", payload: { id: threadId } }),
+      JSON.stringify({
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: turnId },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        payload: { type: "user_message", turn_id: turnId, message: "review my changes" },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          id: "msg_rollout_provider_identity",
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: assistantText }],
+        },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: turnId },
+      }),
+    ].join("\n"),
+    "utf8"
+  );
+
+  const sanitized = JSON.parse(sanitizeThreadHistoryImagesForRelay(JSON.stringify({
+    id: "req-thread-live-owner-identities",
+    result: {
+      thread: {
+        id: threadId,
+        turns: [{
+          id: turnId,
+          status: "inProgress",
+          items: [
+            {
+              id: `${turnId}:input`,
+              type: "userMessage",
+              content: [{ type: "text", text: "review my changes" }],
+            },
+            { id: "item_0", type: "agentMessage", text: assistantText },
+          ],
+        }],
+      },
+    },
+  }), "thread/read"));
+
+  const items = sanitized.result.thread.turns[0].items;
+  const assistantItems = items.filter((item) => (
+    (item.role || "").toLowerCase() === "assistant"
+      || (item.type || "").toLowerCase().replace(/[_-]/g, "") === "agentmessage"
+  ));
+  assert.equal(assistantItems.length, 1);
+  assert.equal(assistantItems[0].id, "item_0");
+  assert.equal(
+    typeof assistantItems[0].remodexSourceItemKey,
+    "string",
+    "the folded row must adopt the JSONL turn+text source alias"
+  );
+  assert.equal(assistantItems[0].remodexSourceItemKey.startsWith(`${turnId}:`), true);
 });
 
 test("sanitizeThreadHistoryImagesForRelay augments app-server history with JSONL fileChange blocks", (t) => {

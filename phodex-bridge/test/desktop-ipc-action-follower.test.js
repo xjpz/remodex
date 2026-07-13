@@ -24,6 +24,66 @@ const {
   resolveDefaultIpcSocketPath,
   seedConversationStateFromThreadRead,
 } = require("../src/desktop-ipc-action-follower");
+const {
+  matchDesktopTurnIdentityContinuities,
+} = require("../src/desktop-ipc-conversation-projector");
+
+test("desktop identity repair pairs synthetic turns independently of parallel active turns", () => {
+  const sharedTurn = {
+    status: "inProgress",
+    params: { input: [{ type: "text", text: "Repair A" }] },
+    items: [{ id: "assistant-a-stable", type: "agentMessage", text: "Working" }],
+  };
+  const stableParallelTurn = {
+    id: "turn-c",
+    status: "inProgress",
+    items: [{ id: "assistant-c", type: "agentMessage", text: "Parallel" }],
+  };
+  const matches = matchDesktopTurnIdentityContinuities(
+    [
+      { id: "ipc-turn-0", turn: sharedTurn },
+      { id: "turn-c", turn: stableParallelTurn },
+    ],
+    [
+      { id: "turn-real-a", turn: { ...sharedTurn, turnId: "turn-real-a" } },
+      { id: "turn-c", turn: stableParallelTurn },
+    ]
+  );
+
+  assert.deepEqual([...matches.previousTurnIds], ["ipc-turn-0"]);
+  assert.deepEqual([...matches.nextTurnIds], ["turn-real-a"]);
+
+  const stablePriority = matchDesktopTurnIdentityContinuities(
+    [
+      {
+        id: "ipc-turn-0",
+        turn: {
+          startedAt: 123,
+          params: { input: [{ type: "text", text: "same prompt" }] },
+          items: [{ id: "assistant-fallback", type: "agentMessage", text: "Old" }],
+        },
+      },
+      {
+        id: "ipc-turn-1",
+        turn: {
+          startedAt: 999,
+          params: { input: [{ type: "text", text: "other prompt" }] },
+          items: [{ id: "assistant-stable", type: "agentMessage", text: "Stable" }],
+        },
+      },
+    ],
+    [{
+      id: "turn-real-stable",
+      turn: {
+        startedAt: 123,
+        params: { input: [{ type: "text", text: "same prompt" }] },
+        items: [{ id: "assistant-stable", type: "agentMessage", text: "Stable" }],
+      },
+    }]
+  );
+  assert.deepEqual([...stablePriority.previousTurnIds], ["ipc-turn-1"]);
+  assert.deepEqual([...stablePriority.nextTurnIds], ["turn-real-stable"]);
+});
 
 test("desktop turns/list returns newest-first pages without reversing reopen history", () => {
   const chronologicalTurns = [
@@ -692,6 +752,7 @@ test("desktop IPC follower announces thread replacement when synthetic turn ids 
   await waitFor(() => outbound.some((message) => message.method === "turn/started"));
 
   // The next snapshot has the canonical turn id: the phone must be told to rebuild.
+  const canonicalReplacementStartIndex = outbound.length;
   writeFrame(serverSocket, {
     type: "broadcast",
     method: "thread-stream-state-changed",
@@ -727,6 +788,81 @@ test("desktop IPC follower announces thread replacement when synthetic turn ids 
   const followUpTurnStarted = outbound.slice(replacedIndex + 1)
     .find((message) => message.method === "turn/started");
   assert.equal(followUpTurnStarted.params.turnId, "turn-real-id");
+  assert.equal(followUpTurnStarted.params.remodexTurnIdentityContinuity, true);
+  assert.equal(
+    outbound.slice(canonicalReplacementStartIndex).some((message) => (
+      message.method === "turn/completed" && message.params?.turnId === "ipc-turn-0"
+    )),
+    false,
+    "canonical id repair must not terminate the synthetic alias"
+  );
+
+  // Shape alone is not continuity: if synthetic A ended while IPC was stale
+  // and the next snapshot contains a different real B, B must advance iOS's
+  // monotonic run generation.
+  const distinctThreadId = "thread-full-replace-distinct-turn";
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: distinctThreadId },
+  }));
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 6,
+    params: {
+      conversationId: distinctThreadId,
+      change: {
+        type: "snapshot",
+        conversationState: {
+          turns: [{
+            status: "inProgress",
+            params: { input: [{ type: "text", text: "Synthetic A prompt" }] },
+            items: [{ id: "assistant-a", type: "agentMessage", text: "A output" }],
+          }],
+          requests: [],
+        },
+      },
+    },
+  });
+  await waitFor(() => outbound.some((message) => (
+    message.method === "turn/started"
+      && message.params?.threadId === distinctThreadId
+      && message.params?.turnId === "ipc-turn-0"
+  )));
+  const distinctReplacementStartIndex = outbound.length;
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 6,
+    params: {
+      conversationId: distinctThreadId,
+      change: {
+        type: "snapshot",
+        conversationState: {
+          turns: [{
+            turnId: "turn-real-b",
+            status: "inProgress",
+            params: { input: [{ type: "text", text: "Synthetic A prompt" }] },
+            items: [{ id: "assistant-b", type: "agentMessage", text: "B output" }],
+          }],
+          requests: [],
+        },
+      },
+    },
+  });
+  await waitFor(() => outbound.slice(distinctReplacementStartIndex).some((message) => (
+    message.method === "turn/started"
+      && message.params?.threadId === distinctThreadId
+      && message.params?.turnId === "turn-real-b"
+  )));
+  const distinctTurnStarted = outbound.slice(distinctReplacementStartIndex).find((message) => (
+    message.method === "turn/started"
+      && message.params?.threadId === distinctThreadId
+      && message.params?.turnId === "turn-real-b"
+  ));
+  assert.notEqual(distinctTurnStarted.params.remodexTurnIdentityContinuity, true);
 });
 
 test("uses the Codex Desktop named pipe as the default Windows IPC path", (t) => {
@@ -1444,8 +1580,19 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
   });
 
   const outbound = [];
+  const runtimeCommits = [];
   const follower = createDesktopIpcActionFollower({
     socketPath,
+    runtimeSettingsStore: {
+      get() {
+        return null;
+      },
+      commit(threadId, params, metadata) {
+        runtimeCommits.push({ threadId, params, metadata });
+        return null;
+      },
+      attachToConversation() {},
+    },
     sendApplicationResponse(message) {
       outbound.push(JSON.parse(message));
     },
@@ -1484,12 +1631,28 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
       input: [{ type: "input_text", text: "continue from phone" }],
       cwd: "/repo",
       model: "gpt-test",
+      effort: "low",
+      serviceTier: "fast",
     },
   }));
   assert.equal(handled, true);
 
+  await waitFor(() => serverFrames.find((frame) => frame.method === "thread-follower-update-thread-settings"));
   await waitFor(() => serverFrames.find((frame) => frame.method === "thread-follower-start-turn"));
+  const settingsFrame = serverFrames.find((frame) => frame.method === "thread-follower-update-thread-settings");
   const turnStartFrame = serverFrames.find((frame) => frame.method === "thread-follower-start-turn");
+  assert.deepEqual(settingsFrame.params, {
+    conversationId: "thread-desktop-owned",
+    threadSettings: {
+      model: "gpt-test",
+      effort: "low",
+      serviceTier: "fast",
+    },
+  });
+  assert.ok(
+    serverFrames.indexOf(settingsFrame) < serverFrames.indexOf(turnStartFrame),
+    "Desktop runtime settings must settle before start-turn"
+  );
   assert.equal(turnStartFrame.version, 1);
   assert.deepEqual(turnStartFrame.params, {
     conversationId: "thread-desktop-owned",
@@ -1499,6 +1662,8 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
       input: [{ type: "input_text", text: "continue from phone" }],
       cwd: "/repo",
       model: "gpt-test",
+      effort: "low",
+      serviceTier: "fast",
     },
   });
 
@@ -1507,6 +1672,21 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
     id: "phone-turn-start-1",
     result: { turn: { id: "turn-from-phone" } },
   });
+  assert.deepEqual(runtimeCommits, [{
+    threadId: "thread-desktop-owned",
+    params: {
+      threadId: "thread-desktop-owned",
+      input: [{ type: "input_text", text: "continue from phone" }],
+      cwd: "/repo",
+      model: "gpt-test",
+      effort: "low",
+      serviceTier: "fast",
+    },
+    metadata: {
+      source: "phone",
+      turnId: "turn-from-phone",
+    },
+  }]);
 
   const routedRequests = [
     {
@@ -1918,7 +2098,7 @@ test("desktop IPC follower discovers running sidebar threads before the phone op
     type: "broadcast",
     method: "thread-stream-state-changed",
     sourceClientId: "desktop",
-    version: 8,
+    version: 11,
     params: {
       conversationId: "thread-idle-unopened",
       change: {
@@ -1934,7 +2114,7 @@ test("desktop IPC follower discovers running sidebar threads before the phone op
     type: "broadcast",
     method: "thread-stream-state-changed",
     sourceClientId: "desktop",
-    version: 8,
+    version: 11,
     params: {
       conversationId: "thread-running-unopened",
       change: {
@@ -1954,10 +2134,70 @@ test("desktop IPC follower discovers running sidebar threads before the phone op
       },
     },
   });
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 11,
+    params: {
+      conversationId: "thread-normalized-running-unopened",
+      change: {
+        type: "snapshot",
+        conversationState: {
+          turns: [{
+            id: "turn-normalized-running",
+            status: "inProgress",
+            items: [],
+          }],
+          requests: [],
+          turnHistory: {
+            kind: "canonical",
+            history: {
+              entitiesByKey: {
+                "turn:turn-normalized-idle": {
+                  turnId: "turn-normalized-idle",
+                  status: "completed",
+                  items: [],
+                },
+                "turn:turn-normalized-parallel-older": {
+                  turnId: "turn-normalized-parallel-older",
+                  status: "inProgress",
+                  items: [],
+                },
+                "turn:turn-normalized-running": {
+                  turnId: "turn-normalized-running",
+                  status: "inProgress",
+                  items: [],
+                },
+              },
+              islands: [{
+                id: "tail:1",
+                entries: [
+                  { key: "turn:turn-normalized-idle", value: "turn:turn-normalized-idle" },
+                  {
+                    key: "turn:turn-normalized-parallel-older",
+                    value: "turn:turn-normalized-parallel-older",
+                  },
+                  { key: "turn:turn-normalized-running", value: "turn:turn-normalized-running" },
+                ],
+              }],
+              generation: 1,
+              isComplete: true,
+            },
+          },
+        },
+      },
+    },
+  });
 
   await waitFor(() => outbound.some((message) => (
     message.method === "turn/started"
       && message.params?.threadId === "thread-running-unopened"
+  )));
+  await waitFor(() => outbound.some((message) => (
+    message.method === "turn/started"
+      && message.params?.threadId === "thread-normalized-running-unopened"
+      && message.params?.turnId === "turn-normalized-running"
   )));
   assert.equal(
     outbound.some((message) => message.params?.threadId === "thread-idle-unopened"),
@@ -1970,13 +2210,129 @@ test("desktop IPC follower discovers running sidebar threads before the phone op
     "background discovery must not replay historical transcript items"
   );
 
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 11,
+    params: {
+      conversationId: "thread-normalized-idle-stale",
+      change: {
+        type: "snapshot",
+        conversationState: {
+          turns: [],
+          requests: [],
+          threadRuntimeStatus: { type: "idle", activeFlags: [] },
+          turnHistory: {
+            kind: "canonical",
+            history: {
+              entitiesByKey: {
+                "turn:turn-ancient-null-duration": {
+                  turnId: "turn-ancient-null-duration",
+                  turnStartedAtMs: 1,
+                  durationMs: null,
+                  status: "inProgress",
+                  items: [],
+                },
+                "turn:turn-latest-completed": {
+                  turnId: "turn-latest-completed",
+                  status: "completed",
+                  items: [],
+                },
+              },
+              islands: [{
+                id: "tail:1",
+                entries: [
+                  {
+                    key: "turn:turn-ancient-null-duration",
+                    value: "turn:turn-ancient-null-duration",
+                  },
+                  { key: "turn:turn-latest-completed", value: "turn:turn-latest-completed" },
+                ],
+              }],
+              generation: 1,
+              isComplete: true,
+            },
+          },
+        },
+      },
+    },
+  });
+  await wait(50);
+  assert.equal(
+    outbound.some((message) => (
+      message.method === "turn/started"
+        && message.params?.threadId === "thread-normalized-idle-stale"
+    )),
+    false,
+    "idle background discovery must not resurrect a stale null-duration turn"
+  );
+  assert.equal(follower.hasLiveThreadState("thread-normalized-idle-stale"), true);
+  const idleOpenHandled = follower.observeInbound(JSON.stringify({
+    id: "open-normalized-idle-stale",
+    method: "thread/turns/list",
+    params: { threadId: "thread-normalized-idle-stale", limit: 1 },
+  }));
+  assert.equal(idleOpenHandled, false);
+  assert.equal(
+    outbound.some((message) => message.id === "open-normalized-idle-stale"),
+    false
+  );
+
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 11,
+    params: {
+      conversationId: "thread-normalized-running-unopened",
+      change: {
+        type: "patches",
+        patches: [
+          {
+            op: "replace",
+            path: ["turns", 0, "status"],
+            value: "completed",
+          },
+          {
+            op: "replace",
+            path: [
+              "turnHistory",
+              "history",
+              "entitiesByKey",
+              "turn:turn-normalized-parallel-older",
+              "status",
+            ],
+            value: "completed",
+          },
+          {
+            op: "replace",
+            path: [
+              "turnHistory",
+              "history",
+              "entitiesByKey",
+              "turn:turn-normalized-running",
+              "status",
+            ],
+            value: "completed",
+          },
+        ],
+      },
+    },
+  });
+  await waitFor(() => outbound.some((message) => (
+    message.method === "turn/completed"
+      && message.params?.threadId === "thread-normalized-running-unopened"
+      && message.params?.turnId === "turn-normalized-running"
+  )));
+
   // The idle snapshot is retained inside the bridge, so a later Mac-started
   // run is still discovered without any per-thread read from the phone.
   writeFrame(serverSocket, {
     type: "broadcast",
     method: "thread-stream-state-changed",
     sourceClientId: "desktop",
-    version: 8,
+    version: 11,
     params: {
       conversationId: "thread-idle-unopened",
       change: {
@@ -1997,7 +2353,7 @@ test("desktop IPC follower discovers running sidebar threads before the phone op
     type: "broadcast",
     method: "thread-stream-state-changed",
     sourceClientId: "desktop",
-    version: 8,
+    version: 11,
     params: {
       conversationId: "thread-idle-unopened",
       change: {
@@ -2019,7 +2375,7 @@ test("desktop IPC follower discovers running sidebar threads before the phone op
     type: "broadcast",
     method: "thread-stream-state-changed",
     sourceClientId: "desktop",
-    version: 8,
+    version: 11,
     params: {
       conversationId: "thread-running-unopened",
       change: {
@@ -2059,7 +2415,7 @@ test("desktop IPC follower discovers running sidebar threads before the phone op
     type: "broadcast",
     method: "thread-stream-state-changed",
     sourceClientId: "desktop",
-    version: 8,
+    version: 11,
     params: {
       conversationId: "thread-running-unopened",
       change: {
@@ -2326,7 +2682,7 @@ test("desktop IPC follower does not evict an announced background turn", async (
     type: "broadcast",
     method: "thread-stream-state-changed",
     sourceClientId: "desktop",
-    version: 8,
+    version: 11,
     params: {
       conversationId: "thread-background-lru-protected",
       change: {
@@ -2411,7 +2767,7 @@ test("desktop IPC background recovery stays lifecycle-only until open", async (t
     type: "broadcast",
     method: "thread-stream-state-changed",
     sourceClientId: "desktop",
-    version: 8,
+    version: 11,
     params: {
       conversationId: "thread-background-recovery",
       change: {
@@ -3991,6 +4347,7 @@ test("desktop IPC follower yields stale active ownership and cleanly replaces it
     },
   });
   await waitFor(() => follower.hasLiveThreadState("thread-stale-active"));
+  const desktopSnapshotAt = fakeNow;
 
   // While Desktop keeps the stream fresh, cached reads answer immediately.
   const freshServed = follower.observeInbound(JSON.stringify({
@@ -4001,11 +4358,17 @@ test("desktop IPC follower yields stale active ownership and cleanly replaces it
   assert.equal(freshServed, true);
   assert.equal(outbound.some((message) => message.id === "read-fresh"), true);
 
-  // Desktop went silent while the cache still claims an active turn: both read
-  // serving and mirror ownership must yield so rollout/local recovery can take
-  // over instead of pinning a phantom running indicator on the phone.
+  // Desktop went silent while the cache still claims an active turn. Cached
+  // reads yield quickly, while source ownership gets a longer quiet-turn lease.
   fakeNow += 21_000;
   assert.equal(follower.hasLiveThreadState("thread-stale-active"), false);
+  assert.equal(
+    follower.hasFreshLiveThreadState("thread-stale-active", {
+      fallbackActivityAt: desktopSnapshotAt - 1,
+    }),
+    true,
+    "an older fallback must not displace a genuinely quiet Desktop turn"
+  );
   const staleServed = follower.observeInbound(JSON.stringify({
     id: "read-stale",
     method: "thread/read",
@@ -4013,6 +4376,12 @@ test("desktop IPC follower yields stale active ownership and cleanly replaces it
   }));
   assert.equal(staleServed, false);
   assert.equal(outbound.some((message) => message.id === "read-stale"), false);
+
+  // A connected IPC client is not permanent proof that this one thread is
+  // still live. Newer rollout activity lets the fallback recover it.
+  assert.equal(follower.hasFreshLiveThreadState("thread-stale-active", {
+    fallbackActivityAt: fakeNow + 1,
+  }), false);
 
   // The next fresh Desktop snapshot starts a new source epoch. It must arrive as
   // one replacement bootstrap, not as an incremental completion of stale state.
@@ -4090,6 +4459,1333 @@ test("desktop IPC follower yields stale active ownership and cleanly replaces it
   const idleResponse = outbound.find((message) => message.id === "read-idle");
   assert.equal(idleResponse.result.thread.turns[0].status, "completed");
   assert.equal(idleResponse.result.thread.turns[0].items[0].id, "assistant-fresh-epoch");
+});
+
+test("desktop IPC follower yields normalized history reads while keeping its bounded live tail", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-normalized-history-yield-");
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-normalized-history" },
+  }));
+  await waitFor(() => serverSocket);
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-live",
+    version: 11,
+    params: {
+      conversationId: "thread-normalized-history",
+      change: {
+        type: "snapshot",
+        conversationState: {
+          title: "A real task with normalized history",
+          turns: [],
+          requests: [],
+          threadRuntimeStatus: { type: "idle", activeFlags: [] },
+          turnHistory: {
+            kind: "canonical",
+            history: {
+              entitiesByKey: {
+                "turn:turn-ancient-stale": {
+                  turnId: "turn-ancient-stale",
+                  turnStartedAtMs: 1,
+                  durationMs: null,
+                  status: "inProgress",
+                  items: [],
+                },
+                "turn:turn-normalized": {
+                  turnId: "turn-normalized",
+                  status: "completed",
+                  items: [{
+                    id: "assistant-normalized",
+                    type: "agentMessage",
+                    text: "Stored outside the legacy turns array.",
+                  }],
+                },
+              },
+              islands: [{
+                id: "tail:1",
+                entries: [
+                  { key: "turn:turn-ancient-stale", value: "turn:turn-ancient-stale" },
+                  { key: "turn:turn-normalized", value: "turn:turn-normalized" },
+                ],
+              }],
+              generation: 1,
+              isComplete: true,
+            },
+          },
+        },
+      },
+    },
+  });
+
+  await waitFor(() => outbound.some((message) => message.method === "thread/replaced"));
+  assert.equal(
+    follower.hasLiveThreadState("thread-normalized-history"),
+    true,
+    "a usable bounded Desktop tail should keep the expensive rollout mirror suppressed"
+  );
+  assert.equal(
+    outbound.some((message) => message.method === "turn/started"),
+    false,
+    "explicit idle runtime must not resurrect an ancient normalized inProgress turn"
+  );
+  outbound.length = 0;
+
+  for (const method of ["thread/read", "thread/resume", "thread/turns/list"]) {
+    const handled = follower.observeInbound(JSON.stringify({
+      id: `normalized-${method}`,
+      method,
+      params: { threadId: "thread-normalized-history", limit: 1 },
+    }));
+    assert.equal(handled, false, `${method} should fall through to canonical recovery`);
+  }
+  assert.deepEqual(outbound, []);
+
+  // Current Litter snapshots keep even the active turn only in the normalized
+  // store. Project the bounded tail live while ignoring an ancient stale
+  // inProgress entity and keeping all history reads canonical.
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-live",
+    version: 11,
+    params: {
+      conversationId: "thread-normalized-history",
+      change: {
+        type: "snapshot",
+        conversationState: {
+          title: "A real task with normalized live history",
+          turns: [],
+          requests: [],
+          threadRuntimeStatus: { type: "active", activeFlags: [] },
+          turnHistory: {
+            kind: "canonical",
+            history: {
+              entitiesByKey: {
+                "turn:turn-stale-running": {
+                  turnId: "turn-stale-running",
+                  turnStartedAtMs: 1,
+                  durationMs: 1,
+                  status: "inProgress",
+                  items: [],
+                },
+                "turn:turn-normalized": {
+                  turnId: "turn-normalized",
+                  status: "completed",
+                  items: [],
+                },
+                "turn:turn-running": {
+                  turnId: "turn-running",
+                  status: "inProgress",
+                  items: [{
+                    id: "assistant-running",
+                    type: "agentMessage",
+                    text: "A",
+                  }],
+                },
+              },
+              islands: [{
+                id: "tail:1",
+                entries: [
+                  { key: "turn:turn-stale-running", value: "turn:turn-stale-running" },
+                  { key: "turn:turn-normalized", value: "turn:turn-normalized" },
+                  { key: "turn:turn-running", value: "turn:turn-running" },
+                ],
+              }],
+              generation: 2,
+              isComplete: true,
+            },
+          },
+        },
+      },
+    },
+  });
+  await wait(50);
+  assert.equal(follower.hasLiveThreadState("thread-normalized-history"), true);
+  assert.equal(
+    outbound.some((message) => message.method === "thread/replaced"),
+    false,
+    "the live tail must not restart canonical history after its first repair"
+  );
+  assert.equal(
+    outbound.some((message) => (
+      message.method === "turn/started"
+        && message.params?.threadId === "thread-normalized-history"
+        && message.params?.turn?.id === "turn-running"
+    )),
+    true,
+    "the current Desktop turn should stay live while history remains canonical"
+  );
+  outbound.length = 0;
+
+  // Litter rehydrates the same full normalized snapshot with different item
+  // IDs shortly after connect. That is a baseline replacement, not hundreds
+  // of new live items.
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-live",
+    version: 11,
+    params: {
+      conversationId: "thread-normalized-history",
+      change: {
+        type: "snapshot",
+        conversationState: {
+          title: "A real task with rehydrated normalized IDs",
+          turns: [],
+          requests: [],
+          threadRuntimeStatus: { type: "active", activeFlags: [] },
+          turnHistory: {
+            kind: "canonical",
+            history: {
+              entitiesByKey: {
+                "turn:turn-stale-running": {
+                  turnId: "turn-stale-running",
+                  turnStartedAtMs: 1,
+                  durationMs: null,
+                  status: "inProgress",
+                  items: [],
+                },
+                "turn:turn-normalized": {
+                  turnId: "turn-normalized",
+                  status: "completed",
+                  items: [],
+                },
+                "turn:turn-running": {
+                  turnId: "turn-running",
+                  status: "inProgress",
+                  items: [{
+                    id: "item-rehydrated-running",
+                    type: "agentMessage",
+                    text: "A",
+                  }],
+                },
+              },
+              islands: [{
+                id: "tail:1",
+                entries: [
+                  { key: "turn:turn-stale-running", value: "turn:turn-stale-running" },
+                  { key: "turn:turn-normalized", value: "turn:turn-normalized" },
+                  { key: "turn:turn-running", value: "turn:turn-running" },
+                ],
+              }],
+              generation: 3,
+              isComplete: true,
+            },
+          },
+        },
+      },
+    },
+  });
+  await wait(50);
+  assert.deepEqual(
+    outbound.filter((message) => message.method?.startsWith("item/")),
+    [],
+    "a re-keyed full snapshot must not replay historical item lifecycles"
+  );
+  assert.equal(
+    outbound.some((message) => message.method === "turn/started"),
+    false,
+    "the same active turn must not restart on baseline rehydration"
+  );
+  outbound.length = 0;
+
+  const stateProbeHandled = follower.observeInbound(JSON.stringify({
+    id: "normalized-live-state",
+    method: "thread/turns/list",
+    params: {
+      threadId: "thread-normalized-history",
+      limit: 8,
+      sortDirection: "desc",
+    },
+  }));
+  assert.equal(stateProbeHandled, true);
+  const stateProbe = outbound.find((message) => message.id === "normalized-live-state");
+  assert.equal(stateProbe?.result?.remodexDesktopLiveState, true);
+  assert.deepEqual(stateProbe?.result?.data?.[0], {
+    id: "turn-running",
+    status: "inProgress",
+  });
+  assert.equal(
+    stateProbe?.result?.data?.some((turn) => turn.id === "turn-stale-running"),
+    false
+  );
+  outbound.length = 0;
+
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-live",
+    version: 11,
+    params: {
+      conversationId: "thread-normalized-history",
+      change: {
+        type: "patches",
+        patches: [{
+          op: "replace",
+          path: [
+            "turnHistory",
+            "history",
+            "entitiesByKey",
+            "turn:turn-running",
+            "items",
+            0,
+            "text",
+          ],
+          value: "AB",
+        }],
+      },
+    },
+  });
+  await waitFor(() => outbound.some((message) => (
+    message.method === "item/agentMessage/delta"
+      && message.params?.threadId === "thread-normalized-history"
+      && message.params?.turnId === "turn-running"
+      && message.params?.delta === "B"
+  )));
+  assert.equal(
+    outbound.some((message) => message.method === "thread/replaced"),
+    false
+  );
+  outbound.length = 0;
+
+  // A temporary legacy-complete snapshot must not reclaim history reads or
+  // restart the source epoch. Canonical history authority stays sticky while
+  // the same bounded current turn continues over Desktop IPC.
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-live",
+    version: 11,
+    params: {
+      conversationId: "thread-normalized-history",
+      change: {
+        type: "snapshot",
+        conversationState: {
+          turns: [
+            {
+              id: "turn-stale-running",
+              turnStartedAtMs: 1,
+              durationMs: 1,
+              status: "inProgress",
+              items: [],
+            },
+            { id: "turn-normalized", status: "completed", items: [] },
+            {
+              id: "turn-running",
+              status: "inProgress",
+              items: [{ id: "assistant-running", type: "agentMessage", text: "AB" }],
+            },
+          ],
+          requests: [],
+          threadRuntimeStatus: { type: "active", activeFlags: [] },
+        },
+      },
+    },
+  });
+  await wait(50);
+  assert.equal(follower.hasLiveThreadState("thread-normalized-history"), true);
+  assert.equal(
+    outbound.some((message) => message.method === "thread/replaced"),
+    false
+  );
+  outbound.length = 0;
+
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "partial-turns",
+    method: "thread/turns/list",
+    params: { threadId: "thread-normalized-history", limit: 1 },
+  })), false);
+  assert.deepEqual(outbound, []);
+
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-live",
+    version: 11,
+    params: {
+      conversationId: "thread-normalized-history",
+      change: {
+        type: "patches",
+        patches: [{
+          op: "replace",
+          path: ["threadRuntimeStatus", "type"],
+          value: "idle",
+        }],
+      },
+    },
+  });
+  await waitFor(() => outbound.some((message) => (
+    message.method === "turn/completed"
+      && message.params?.threadId === "thread-normalized-history"
+      && message.params?.turnId === "turn-running"
+  )));
+  assert.equal(
+    outbound.some((message) => (
+      message.method === "turn/started"
+        && message.params?.turnId === "turn-stale-running"
+    )),
+    false
+  );
+  outbound.length = 0;
+
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "normalized-idle-state",
+    method: "thread/turns/list",
+    params: {
+      threadId: "thread-normalized-history",
+      limit: 8,
+      sortDirection: "desc",
+    },
+  })), true);
+  const idleStateProbe = outbound.find((message) => message.id === "normalized-idle-state");
+  assert.equal(idleStateProbe?.result?.data?.[0]?.status, "completed");
+  outbound.length = 0;
+
+  // A genuinely blank Desktop snapshot has no normalized turn entities, so it
+  // remains authoritative and can still answer with an empty first page.
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-genuinely-blank" },
+  }));
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-live",
+    version: 11,
+    params: {
+      conversationId: "thread-genuinely-blank",
+      change: {
+        type: "snapshot",
+        conversationState: {
+          title: "Blank task",
+          turns: [],
+          requests: [],
+          turnHistory: {
+            kind: "canonical",
+            history: { entitiesByKey: {}, generation: 1, isComplete: true },
+          },
+        },
+      },
+    },
+  });
+  await wait(50);
+  outbound.length = 0;
+  const blankHandled = follower.observeInbound(JSON.stringify({
+    id: "blank-turns",
+    method: "thread/turns/list",
+    params: { threadId: "thread-genuinely-blank", limit: 1 },
+  }));
+  assert.equal(blankHandled, true);
+  assert.deepEqual(
+    outbound.find((message) => message.id === "blank-turns")?.result?.data,
+    []
+  );
+});
+
+test("desktop IPC follower coalesces stale normalized snapshot bursts before publishing lifecycle", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-snapshot-coalesce-");
+  const outbound = [];
+  let serverSocket = null;
+  const nowValue = Date.now();
+  const locallyOwnedThreadIDs = new Set();
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "remodex-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    now: () => nowValue,
+    snapshotDebounceMs: 75,
+    isLocallyOwnedThread: (threadID) => locallyOwnedThreadIDs.has(threadID),
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-snapshot-coalesce" },
+  }));
+  await waitFor(() => serverSocket);
+
+  const sendSnapshot = ({
+    threadId = "thread-snapshot-coalesce",
+    oldStatus,
+    includeNewTurn,
+  }) => {
+    const entitiesByKey = {
+      "turn:turn-old": {
+        turnId: "turn-old",
+        turnStartedAtMs: nowValue,
+        durationMs: 0,
+        status: oldStatus,
+        items: [],
+      },
+    };
+    const entries = [{ key: "turn:turn-old", value: "turn:turn-old" }];
+    if (includeNewTurn) {
+      entitiesByKey["turn:turn-new"] = {
+        turnId: "turn-new",
+        turnStartedAtMs: nowValue,
+        durationMs: 0,
+        status: "inProgress",
+        items: [],
+      };
+      entries.push({ key: "turn:turn-new", value: "turn:turn-new" });
+    }
+    writeFrame(serverSocket, {
+      type: "broadcast",
+      method: "thread-stream-state-changed",
+      sourceClientId: "desktop-live",
+      version: 11,
+      params: {
+        conversationId: threadId,
+        change: {
+          type: "snapshot",
+          conversationState: {
+            turns: [],
+            requests: [],
+            threadRuntimeStatus: { type: "active", activeFlags: [] },
+            turnHistory: {
+              kind: "canonical",
+              history: {
+                entitiesByKey,
+                islands: [{ id: "tail:coalesce", entries }],
+                isComplete: true,
+              },
+            },
+          },
+        },
+      },
+    });
+  };
+
+  sendSnapshot({ oldStatus: "inProgress", includeNewTurn: false });
+  await wait(25);
+  // The debounced snapshot is already authoritative for source arbitration:
+  // rollout must stay suppressed while the follower coalesces the burst.
+  assert.equal(follower.hasLiveThreadState("thread-snapshot-coalesce"), true);
+  assert.equal(follower.hasFreshLiveThreadState("thread-snapshot-coalesce"), true);
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "provisional-explicit-state",
+    method: "thread/turns/list",
+    params: {
+      threadId: "thread-snapshot-coalesce",
+      limit: 8,
+      sortDirection: "desc",
+      remodexTurnStateOnly: true,
+    },
+  })), false);
+  assert.equal(outbound.some((message) => message.id === "provisional-explicit-state"), false);
+
+  sendSnapshot({ oldStatus: "completed", includeNewTurn: true });
+  await wait(50);
+  assert.equal(outbound.some((message) => message.method?.startsWith("turn/")), false);
+
+  await waitFor(() => outbound.some((message) => (
+    message.method === "turn/started" && message.params?.turnId === "turn-new"
+  )));
+  assert.notEqual(
+    outbound.find((message) => (
+      message.method === "turn/started" && message.params?.turnId === "turn-new"
+    ))?.params?.remodexTurnIdentityContinuity,
+    true,
+    "a distinct replacement turn must advance the phone run generation"
+  );
+  assert.equal(
+    outbound.some((message) => (
+      message.method === "turn/started" && message.params?.turnId === "turn-old"
+    )),
+    false
+  );
+  assert.equal(
+    outbound.filter((message) => message.method === "thread/replaced").length,
+    1
+  );
+  outbound.length = 0;
+
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "settled-explicit-state",
+    method: "thread/turns/list",
+    params: {
+      threadId: "thread-snapshot-coalesce",
+      limit: 8,
+      sortDirection: "desc",
+      remodexTurnStateOnly: true,
+    },
+  })), true);
+  assert.deepEqual(
+    outbound.find((message) => message.id === "settled-explicit-state")?.result?.data?.[0],
+    { id: "turn-new", status: "inProgress" }
+  );
+  outbound.length = 0;
+
+  const locallyOwnedThreadID = "thread-owned-during-snapshot-debounce";
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: locallyOwnedThreadID },
+  }));
+  sendSnapshot({
+    threadId: locallyOwnedThreadID,
+    oldStatus: "inProgress",
+    includeNewTurn: false,
+  });
+  await wait(25);
+  locallyOwnedThreadIDs.add(locallyOwnedThreadID);
+  await wait(75);
+
+  assert.deepEqual(outbound, []);
+  assert.equal(follower.hasLiveThreadState(locallyOwnedThreadID), false);
+});
+
+test("desktop IPC follower completes either parallel active turn across normalized snapshots", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-parallel-normalized-");
+  const outbound = [];
+  let serverSocket = null;
+  const nowValue = Date.now();
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "remodex-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    now: () => nowValue,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-parallel-normalized" },
+  }));
+  await waitFor(() => serverSocket);
+
+  const sendSnapshot = (firstStatus, secondStatus, runtimeType = "active") => {
+    const firstTurn = {
+      turnId: "turn-parallel-a",
+      turnStartedAtMs: nowValue,
+      durationMs: 0,
+      status: firstStatus,
+      items: [],
+    };
+    const secondTurn = {
+      turnId: "turn-parallel-b",
+      turnStartedAtMs: nowValue,
+      durationMs: 0,
+      status: secondStatus,
+      items: [],
+    };
+    writeFrame(serverSocket, {
+      type: "broadcast",
+      method: "thread-stream-state-changed",
+      sourceClientId: "desktop-live",
+      version: 11,
+      params: {
+        conversationId: "thread-parallel-normalized",
+        change: {
+          type: "snapshot",
+          conversationState: {
+            turns: [],
+            requests: [],
+            threadRuntimeStatus: { type: runtimeType, activeFlags: [] },
+            turnHistory: {
+              kind: "canonical",
+              history: {
+                entitiesByKey: {
+                  "turn:turn-parallel-a": firstTurn,
+                  "turn:turn-parallel-b": secondTurn,
+                },
+                islands: [{
+                  id: "tail:parallel",
+                  entries: [
+                    { key: "turn:turn-parallel-a", value: "turn:turn-parallel-a" },
+                    { key: "turn:turn-parallel-b", value: "turn:turn-parallel-b" },
+                  ],
+                }],
+                isComplete: true,
+              },
+            },
+          },
+        },
+      },
+    });
+  };
+
+  sendSnapshot("inProgress", "inProgress");
+  await waitFor(() => outbound.filter((message) => message.method === "turn/started").length === 2);
+  assert.deepEqual(
+    outbound
+      .filter((message) => message.method === "turn/started")
+      .map((message) => message.params?.turnId),
+    ["turn-parallel-a", "turn-parallel-b"]
+  );
+  outbound.length = 0;
+
+  sendSnapshot("completed", "inProgress");
+  await waitFor(() => outbound.some((message) => (
+    message.method === "turn/completed"
+      && message.params?.turnId === "turn-parallel-a"
+  )));
+  assert.equal(
+    outbound.some((message) => (
+      message.method === "turn/completed"
+        && message.params?.turnId === "turn-parallel-b"
+    )),
+    false
+  );
+  assert.equal(outbound.some((message) => message.method?.startsWith("item/")), false);
+  outbound.length = 0;
+
+  sendSnapshot("completed", "completed", "idle");
+  await waitFor(() => outbound.some((message) => (
+    message.method === "turn/completed"
+      && message.params?.turnId === "turn-parallel-b"
+  )));
+  assert.equal(outbound.some((message) => message.method === "turn/started"), false);
+});
+
+test("desktop IPC follower forces canonical repair after a normalized reconnect snapshot", async (t) => {
+  const { socketPath, state } = await startInitializedIpcTestServer(
+    t,
+    "remodex-ipc-normalized-reconnect-repair-"
+  );
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  const threadId = "thread-normalized-reconnect-repair";
+  const sendSnapshot = (text) => writeFrame(state.socket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-live",
+    version: 11,
+    params: {
+      conversationId: threadId,
+      change: {
+        type: "snapshot",
+        conversationState: {
+          turns: [],
+          requests: [],
+          threadRuntimeStatus: { type: "active", activeFlags: [] },
+          turnHistory: {
+            kind: "canonical",
+            history: {
+              entitiesByKey: {
+                "turn:turn-reconnect": {
+                  turnId: "turn-reconnect",
+                  turnStartedAtMs: Date.now(),
+                  durationMs: 0,
+                  status: "inProgress",
+                  items: [{ id: "assistant-reconnect", type: "agentMessage", text }],
+                },
+              },
+              islands: [{
+                id: "tail:reconnect",
+                entries: [{ key: "turn:turn-reconnect", value: "turn:turn-reconnect" }],
+              }],
+              isComplete: true,
+            },
+          },
+        },
+      },
+    },
+  });
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId },
+  }));
+  await waitFor(() => state.socket);
+  sendSnapshot("A");
+  await waitFor(() => outbound.some((message) => message.method === "thread/replaced"));
+  outbound.length = 0;
+
+  state.socket.destroy();
+  await waitFor(() => state.socket == null);
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId },
+  }));
+  await waitFor(() => state.connectionCount === 2 && state.socket);
+  sendSnapshot("Output produced while IPC was disconnected");
+
+  await waitFor(() => outbound.some((message) => message.method === "thread/replaced"));
+  assert.equal(
+    outbound.some((message) => message.method === "item/agentMessage/delta"),
+    false,
+    "the reconnect snapshot must force canonical reload instead of pretending outage content was streamed"
+  );
+});
+
+test("desktop IPC follower bootstraps a normalized active turn when the phone opens it", async (t) => {
+  const { socketPath, state } = await startInitializedIpcTestServer(
+    t,
+    "remodex-ipc-background-canonical-repair-"
+  );
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  const threadId = "thread-background-canonical-repair";
+  follower.observeInbound(JSON.stringify({ id: "sidebar", method: "thread/list", params: {} }));
+  await waitFor(() => state.socket);
+  writeFrame(state.socket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-live",
+    version: 11,
+    params: {
+      conversationId: threadId,
+      change: {
+        type: "snapshot",
+        conversationState: {
+          turns: [],
+          requests: [],
+          threadRuntimeStatus: { type: "active", activeFlags: [] },
+          turnHistory: {
+            kind: "canonical",
+            history: {
+              entitiesByKey: {
+                "turn:turn-background-history": {
+                  turnId: "turn-background-history",
+                  status: "completed",
+                  items: [{
+                    id: "assistant-background-history",
+                    type: "agentMessage",
+                    text: "Older completed output",
+                  }],
+                },
+                "turn:turn-background-parallel": {
+                  turnId: "turn-background-parallel",
+                  turnStartedAtMs: Date.now(),
+                  durationMs: 0,
+                  status: "inProgress",
+                  items: [{
+                    id: "assistant-background-parallel",
+                    type: "agentMessage",
+                    text: "Parallel active block",
+                  }],
+                },
+                "turn:turn-background-repair": {
+                  turnId: "turn-background-repair",
+                  turnStartedAtMs: Date.now(),
+                  durationMs: 0,
+                  status: "inProgress",
+                  params: { input: [{ type: "text", text: "Continue the active task" }] },
+                  items: [
+                    {
+                      id: "assistant-background-first",
+                      type: "agentMessage",
+                      text: "First active block",
+                    },
+                    {
+                      id: "assistant-background-second",
+                      type: "agentMessage",
+                      text: "Second active block",
+                    },
+                  ],
+                },
+              },
+              islands: [{
+                id: "tail:background-repair",
+                entries: [
+                  {
+                    key: "turn:turn-background-history",
+                    value: "turn:turn-background-history",
+                  },
+                  {
+                    key: "turn:turn-background-parallel",
+                    value: "turn:turn-background-parallel",
+                  },
+                  {
+                    key: "turn:turn-background-repair",
+                    value: "turn:turn-background-repair",
+                  },
+                ],
+              }],
+              isComplete: true,
+            },
+          },
+        },
+      },
+    },
+  });
+  await waitFor(() => outbound.some((message) => (
+    message.method === "turn/started" && message.params?.threadId === threadId
+  )));
+  assert.equal(
+    outbound.filter((message) => (
+      message.method === "turn/started" && message.params?.threadId === threadId
+    )).length,
+    1,
+    "background discovery should announce the active turn once"
+  );
+  outbound.length = 0;
+
+  const handled = follower.observeInbound(JSON.stringify({
+    id: "metadata-only-resume",
+    method: "thread/resume",
+    params: { threadId, excludeTurns: true },
+  }));
+  assert.equal(handled, false);
+  await waitFor(() => outbound.some((message) => (
+    message.method === "item/started"
+      && message.params?.itemId === "assistant-background-second"
+  )));
+  assert.equal(outbound[0].method, "thread/replaced");
+  assert.deepEqual(
+    outbound
+      .filter((message) => message.method === "turn/started")
+      .map((message) => message.params.turnId),
+    ["turn-background-parallel"],
+    "opening should add the other parallel run without repeating the sidebar-announced run"
+  );
+  assert.deepEqual(
+    outbound
+      .filter((message) => message.method === "item/started")
+      .map((message) => message.params.itemId),
+    [
+      "assistant-background-parallel",
+      "turn-background-repair:input",
+      "assistant-background-first",
+      "assistant-background-second",
+    ],
+    "the phone should receive the complete bounded active-turn baseline before another patch"
+  );
+  assert.deepEqual(
+    outbound
+      .filter((message) => message.method === "item/completed")
+      .map((message) => message.params.itemId),
+    [
+      "assistant-background-parallel",
+      "turn-background-repair:input",
+      "assistant-background-first",
+      "assistant-background-second",
+    ],
+    "each completed baseline item should arrive with its normal terminal notification"
+  );
+  assert.equal(
+    outbound.some((message) => message.params?.itemId === "assistant-background-history"),
+    false,
+    "opening an active chat must not replay completed historical turns"
+  );
+  outbound.length = 0;
+
+  writeFrame(state.socket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-live",
+    version: 11,
+    params: {
+      conversationId: threadId,
+      change: {
+        type: "patches",
+        patches: [{
+          op: "replace",
+          path: [
+            "turnHistory",
+            "history",
+            "entitiesByKey",
+            "turn:turn-background-repair",
+            "items",
+            1,
+            "text",
+          ],
+          value: "Second active block continued",
+        }],
+      },
+    },
+  });
+  await waitFor(() => outbound.some((message) => message.method === "item/agentMessage/delta"));
+  assert.deepEqual(
+    outbound.map((message) => ({
+      method: message.method,
+      itemId: message.params?.itemId,
+      delta: message.params?.delta,
+    })),
+    [{
+      method: "item/agentMessage/delta",
+      itemId: "assistant-background-second",
+      delta: " continued",
+    }],
+    "the next normalized patch should diff against the delivered baseline without replaying it"
+  );
+});
+
+test("desktop IPC follower preserves promoted synthetic-turn identity from prompt and start", async (t) => {
+  const { socketPath, state } = await startInitializedIpcTestServer(
+    t,
+    "remodex-ipc-promoted-identity-"
+  );
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  const threadId = "thread-background-identity-continuity";
+  const startedAt = Date.now();
+  const prompt = [{ type: "text", text: "Continue the same promoted run" }];
+  follower.observeInbound(JSON.stringify({ id: "sidebar", method: "thread/list", params: {} }));
+  await waitFor(() => state.socket);
+  writeFrame(state.socket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-live",
+    version: 11,
+    params: {
+      conversationId: threadId,
+      change: {
+        type: "snapshot",
+        conversationState: {
+          turns: [{
+            status: "inProgress",
+            turnStartedAtMs: startedAt,
+            durationMs: 0,
+            params: { input: prompt },
+            items: [{
+              id: "assistant-synthetic-alias",
+              type: "agentMessage",
+              text: "Synthetic alias output",
+            }],
+          }],
+          requests: [],
+          threadRuntimeStatus: { type: "active", activeFlags: [] },
+          turnHistory: {
+            kind: "canonical",
+            history: {
+              entitiesByKey: {
+                "turn:turn-promoted-canonical": {
+                  turnId: "turn-promoted-canonical",
+                  status: "inProgress",
+                  turnStartedAtMs: startedAt,
+                  durationMs: 0,
+                  params: { input: prompt },
+                  items: [{
+                    id: "assistant-canonical-alias",
+                    type: "agentMessage",
+                    text: "Canonical alias output",
+                  }],
+                },
+              },
+              islands: [{
+                id: "tail:identity-continuity",
+                entries: [{
+                  key: "turn:turn-promoted-canonical",
+                  value: "turn:turn-promoted-canonical",
+                }],
+              }],
+              isComplete: true,
+            },
+          },
+        },
+      },
+    },
+  });
+  await waitFor(() => outbound.some((message) => (
+    message.method === "turn/started"
+      && message.params?.threadId === threadId
+      && String(message.params?.turnId || "").startsWith("ipc-turn-")
+  )));
+  outbound.length = 0;
+
+  const handled = follower.observeInbound(JSON.stringify({
+    id: "metadata-only-identity-resume",
+    method: "thread/resume",
+    params: { threadId, excludeTurns: true },
+  }));
+  assert.equal(handled, false);
+  await waitFor(() => outbound.some((message) => (
+    message.method === "turn/started"
+      && message.params?.turnId === "turn-promoted-canonical"
+  )));
+  const canonicalStart = outbound.find((message) => (
+    message.method === "turn/started"
+      && message.params?.turnId === "turn-promoted-canonical"
+  ));
+  assert.equal(canonicalStart.params.remodexTurnIdentityContinuity, true);
+  assert.equal(
+    outbound.some((message) => (
+      message.method === "turn/started"
+        && String(message.params?.turnId || "").startsWith("ipc-turn-")
+    )),
+    false,
+    "the already-announced synthetic alias must not start twice during promotion"
+  );
+});
+
+test("desktop IPC follower reuses its normalized history index for live content patches", async (t) => {
+  const { socketPath, state } = await startInitializedIpcTestServer(
+    t,
+    "remodex-ipc-normalized-index-reuse-"
+  );
+  const outbound = [];
+  let indexRebuilds = 0;
+  const nowValue = Date.now();
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    now: () => nowValue,
+    onNormalizedHistoryIndexRebuilt() {
+      indexRebuilds += 1;
+    },
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  const threadId = "thread-normalized-index-reuse";
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId },
+  }));
+  await waitFor(() => state.socket);
+
+  const entitiesByKey = {};
+  const entries = [];
+  const historicalTurnCount = 1_000;
+  for (let index = 0; index < historicalTurnCount; index += 1) {
+    const turnId = `turn-history-${index}`;
+    entitiesByKey[`turn:${turnId}`] = { turnId, status: "completed", items: [] };
+    entries.push({ key: `turn:${turnId}`, value: `turn:${turnId}` });
+  }
+  entitiesByKey["turn:turn-index-live"] = {
+    turnId: "turn-index-live",
+    turnStartedAtMs: nowValue,
+    durationMs: 0,
+    status: "inProgress",
+    items: [{ id: "assistant-index-live", type: "agentMessage", text: "A" }],
+  };
+  entries.push({ key: "turn:turn-index-live", value: "turn:turn-index-live" });
+  writeFrame(state.socket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-live",
+    version: 11,
+    params: {
+      conversationId: threadId,
+      change: {
+        type: "snapshot",
+        conversationState: {
+          turns: [],
+          requests: [],
+          threadRuntimeStatus: { type: "active", activeFlags: [] },
+          turnHistory: {
+            kind: "canonical",
+            history: { entitiesByKey, islands: [{ id: "tail:index", entries }], isComplete: true },
+          },
+        },
+      },
+    },
+  });
+  await waitFor(() => outbound.some((message) => message.method === "thread/replaced"));
+  assert.equal(indexRebuilds, 1);
+  outbound.length = 0;
+
+  let text = "A";
+  const contentPatchCount = 20;
+  for (let index = 0; index < contentPatchCount; index += 1) {
+    text += "x";
+    writeFrame(state.socket, {
+      type: "broadcast",
+      method: "thread-stream-state-changed",
+      sourceClientId: "desktop-live",
+      version: 11,
+      params: {
+        conversationId: threadId,
+        change: {
+          type: "patches",
+          patches: [{
+            op: "replace",
+            path: [
+              "turnHistory",
+              "history",
+              "entitiesByKey",
+              "turn:turn-index-live",
+              "items",
+              0,
+              "text",
+            ],
+            value: text,
+          }],
+        },
+      },
+    });
+  }
+  await waitFor(() => outbound.filter((message) => (
+    message.method === "item/agentMessage/delta"
+  )).length === contentPatchCount);
+  assert.equal(indexRebuilds, 1, "content patches must not rescan normalized history");
+  outbound.length = 0;
+
+  writeFrame(state.socket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-live",
+    version: 11,
+    params: {
+      conversationId: threadId,
+      change: {
+        type: "patches",
+        patches: [
+          {
+            op: "replace",
+            path: [
+              "turnHistory",
+              "history",
+              "entitiesByKey",
+              "turn:turn-index-live",
+              "status",
+            ],
+            value: "completed",
+          },
+          { op: "replace", path: ["threadRuntimeStatus", "type"], value: "idle" },
+        ],
+      },
+    },
+  });
+  await waitFor(() => outbound.some((message) => (
+    message.method === "turn/completed" && message.params?.turnId === "turn-index-live"
+  )));
+  assert.equal(indexRebuilds, 1, "status patches must update the active set without a full rebuild");
+  outbound.length = 0;
+
+  writeFrame(state.socket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-live",
+    version: 11,
+    params: {
+      conversationId: threadId,
+      change: {
+        type: "patches",
+        patches: [
+          {
+            op: "add",
+            path: [
+              "turnHistory",
+              "history",
+              "entitiesByKey",
+              "turn:turn-index-next",
+            ],
+            value: {
+              turnId: "turn-index-next",
+              turnStartedAtMs: nowValue,
+              durationMs: 0,
+              status: "inProgress",
+              items: [],
+            },
+          },
+          {
+            op: "add",
+            path: ["turnHistory", "history", "islands", 0, "entries", entries.length],
+            value: { key: "turn:turn-index-next", value: "turn:turn-index-next" },
+          },
+          { op: "replace", path: ["threadRuntimeStatus", "type"], value: "active" },
+        ],
+      },
+    },
+  });
+  await waitFor(() => outbound.some((message) => (
+    message.method === "turn/started" && message.params?.turnId === "turn-index-next"
+  )));
+  assert.equal(indexRebuilds, 2, "a structural turn-order patch should rebuild exactly once");
 });
 
 test("desktop IPC follower keeps phone interest in a thread across a Desktop disconnect", async (t) => {
@@ -4432,7 +6128,7 @@ function backgroundConversationSnapshot(threadId, status, {
     type: "broadcast",
     method: "thread-stream-state-changed",
     sourceClientId: "desktop",
-    version: 8,
+    version: 11,
     params: {
       conversationId: threadId,
       change: {
@@ -4499,6 +6195,39 @@ function createIpcTestSocket(prefix) {
     ? `\\\\.\\pipe\\${path.basename(tempDir)}-ipc`
     : path.join(tempDir, "ipc.sock");
   return { tempDir, socketPath };
+}
+
+async function startInitializedIpcTestServer(t, prefix) {
+  const { tempDir, socketPath } = createIpcTestSocket(prefix);
+  const state = { socket: null, connectionCount: 0 };
+  const server = net.createServer((socket) => {
+    state.socket = socket;
+    state.connectionCount += 1;
+    socket.on("close", () => {
+      if (state.socket === socket) {
+        state.socket = null;
+      }
+    });
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "remodex-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    state.socket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+  return { socketPath, state };
 }
 
 function useProcessPlatform(t, platform) {
