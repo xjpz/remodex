@@ -100,6 +100,8 @@ extension CodexService {
     // Clears all volatile approval prompts on disconnect or server switch.
     func clearPendingApprovals() {
         pendingApprovals.removeAll()
+        autoApprovalRetryReviewIDsInFlight.removeAll()
+        autoApprovalRetryTokensByReviewKey.removeAll()
     }
 
     func listThreads(limit: Int? = nil) async throws {
@@ -169,6 +171,7 @@ extension CodexService {
             return model?.supportsServiceTier(requestedTier) == false ? nil : requestedTier.rawValue
         }()
         var includesServiceTier = explicitServiceTier != nil
+        let accessConfiguration = runtimeAccessConfiguration()
 
         while true {
             let params = CodexThreadStartProjectBinding.makeThreadStartParams(
@@ -178,7 +181,16 @@ extension CodexService {
             )
 
             do {
-                let response = try await sendRequestWithSandboxFallback(method: "thread/start", baseParams: params)
+                let response = try await sendRequestWithSandboxFallback(
+                    method: "thread/start",
+                    baseParams: params,
+                    accessConfiguration: accessConfiguration
+                )
+                try validateAppliedAccessConfiguration(
+                    in: response,
+                    expected: accessConfiguration,
+                    context: "thread/start"
+                )
 
                 guard let result = response.result,
                       let resultObject = result.objectValue,
@@ -212,7 +224,7 @@ extension CodexService {
                     )
                 }
                 if let normalizedProjectPath = thread.normalizedProjectPath,
-                   CodexThread.projectIconSystemName(for: normalizedProjectPath) == "arrow.triangle.branch" {
+                   CodexThread.isManagedWorktreePath(normalizedProjectPath) {
                     rememberAssociatedManagedWorktreePath(normalizedProjectPath, for: thread.id)
                 }
                 activeThreadId = thread.id
@@ -1084,7 +1096,9 @@ private extension CodexService {
 
         return pendingApprovals.remove(at: exactIndex)
     }
+}
 
+extension CodexService {
     func normalizedApprovalThreadIdentifier(_ rawValue: String?) -> String? {
         guard let rawValue else {
             return nil
@@ -1271,7 +1285,8 @@ extension CodexService {
         threadId: String,
         force: Bool = false,
         preferredProjectPath: String? = nil,
-        modelIdentifierOverride: String? = nil
+        modelIdentifierOverride: String? = nil,
+        accessConfigurationOverride: RuntimeAccessConfiguration? = nil
     ) async throws -> CodexThread? {
         guard !threadId.isEmpty else {
             return nil
@@ -1286,7 +1301,8 @@ extension CodexService {
         let requestedSignature = CodexThreadResumeRequestSignature(
             projectPath: CodexThreadStartProjectBinding.normalizedProjectPath(preferredProjectPath)
                 ?? thread(for: threadId)?.gitWorkingDirectory,
-            modelIdentifier: modelIdentifierOverride ?? runtimeModelIdentifierForTurn(threadId: threadId)
+            modelIdentifier: modelIdentifierOverride ?? runtimeModelIdentifierForTurn(threadId: threadId),
+            accessConfiguration: accessConfigurationOverride ?? runtimeAccessConfiguration()
         )
         let refreshGeneration = currentPerThreadRefreshGeneration(for: threadId)
         if let existingTask = threadResumeTaskByThreadID[threadId] {
@@ -1299,7 +1315,8 @@ extension CodexService {
                 threadId: threadId,
                 force: force,
                 preferredProjectPath: preferredProjectPath,
-                modelIdentifierOverride: modelIdentifierOverride
+                modelIdentifierOverride: modelIdentifierOverride,
+                accessConfigurationOverride: accessConfigurationOverride
             )
         }
 
@@ -1329,7 +1346,11 @@ extension CodexService {
             var didRequestExcludedTurns = params["excludeTurns"] != nil
             let response: RPCMessage
             do {
-                response = try await sendRequestWithSandboxFallback(method: "thread/resume", baseParams: params)
+                response = try await sendRequestWithSandboxFallback(
+                    method: "thread/resume",
+                    baseParams: params,
+                    accessConfiguration: requestedSignature.accessConfiguration
+                )
             } catch {
                 guard didRequestExcludedTurns, consumeUnsupportedTurnPagination(error) else {
                     throw error
@@ -1337,8 +1358,17 @@ extension CodexService {
 
                 params.removeValue(forKey: "excludeTurns")
                 didRequestExcludedTurns = false
-                response = try await sendRequestWithSandboxFallback(method: "thread/resume", baseParams: params)
+                response = try await sendRequestWithSandboxFallback(
+                    method: "thread/resume",
+                    baseParams: params,
+                    accessConfiguration: requestedSignature.accessConfiguration
+                )
             }
+            try validateAppliedAccessConfiguration(
+                in: response,
+                expected: requestedSignature.accessConfiguration,
+                context: "thread/resume"
+            )
             guard !Task.isCancelled,
                   isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration) else {
                 throw CancellationError()
@@ -1510,6 +1540,7 @@ extension CodexService {
                 }
 
                 if let runningTurnID = snapshot.interruptibleTurnID {
+                    pendingReconnectRunContinuityThreadIDs.remove(normalizedThreadID)
                     markThreadAsRunning(normalizedThreadID)
                     noteDesktopMirroredRunningActivity(for: normalizedThreadID)
                     setProtectedRunningFallback(false, for: normalizedThreadID)
@@ -1520,18 +1551,38 @@ extension CodexService {
                 }
 
                 if snapshot.hasInterruptibleTurnWithoutID {
+                    pendingReconnectRunContinuityThreadIDs.remove(normalizedThreadID)
                     markThreadAsRunning(normalizedThreadID)
                     noteDesktopMirroredRunningActivity(for: normalizedThreadID)
                     setProtectedRunningFallback(true, for: normalizedThreadID)
                 } else {
                     let existingTurnID = activeTurnID(for: normalizedThreadID)
-                    let latestTurnClosesExistingRun = existingTurnID != nil
+                    let hasUnconfirmedProtectedRun = (
+                        protectedRunningFallbackThreadIDs.contains(normalizedThreadID)
+                            || pendingReconnectRunContinuityThreadIDs.contains(normalizedThreadID)
+                    ) && snapshot.latestTurnID == nil
+                    if hasUnconfirmedProtectedRun {
+                        markThreadAsRunning(normalizedThreadID)
+                        if existingTurnID == nil {
+                            setProtectedRunningFallback(true, for: normalizedThreadID)
+                        }
+                        return true
+                    }
+                    // On a busy mirrored thread the bounded snapshot often reads the
+                    // still-streaming latest turn as non-interruptible for a beat.
+                    // Closing the run on that read alone (even when the snapshot's
+                    // latest turn matches the tracked one) makes the running state
+                    // flap on every probe, so the stale-snapshot grace guard decides
+                    // here too. A snapshot whose latest turn IS the tracked one is
+                    // positive closure evidence and only gets the short grace.
+                    let snapshotClosesTrackedTurn = existingTurnID != nil
                         && snapshot.latestTurnID == existingTurnID
-                    if latestTurnClosesExistingRun {
-                        clearRunningState(for: normalizedThreadID)
-                    } else if isDesktopMirroredRunning(normalizedThreadID),
+                    if isDesktopMirroredRunning(normalizedThreadID),
                        threadHasActiveOrRunningTurn(normalizedThreadID),
-                       shouldPreserveDesktopMirroredRunningAfterStaleSnapshot(for: normalizedThreadID) {
+                       shouldPreserveDesktopMirroredRunningAfterStaleSnapshot(
+                           for: normalizedThreadID,
+                           snapshotClosesTrackedTurn: snapshotClosesTrackedTurn
+                       ) {
                         markThreadAsRunning(normalizedThreadID)
                         if let existingTurnID {
                             setProtectedRunningFallback(false, for: normalizedThreadID)
@@ -1626,6 +1677,7 @@ extension CodexService {
         var effectiveCollaborationMode = supportsTurnCollaborationMode ? collaborationMode : nil
         var didDowngradePlanModeForRuntime = false
         var includesServiceTier = runtimeServiceTierForTurn(threadId: threadId) != nil
+        let accessConfiguration = runtimeAccessConfiguration()
 
         if collaborationMode != nil, effectiveCollaborationMode == nil {
             debugRuntimeLog(
@@ -1653,7 +1705,8 @@ extension CodexService {
                 }
                 let response = try await sendRequestWithSandboxFallback(
                     method: "turn/start",
-                    baseParams: requestParams
+                    baseParams: requestParams,
+                    accessConfiguration: accessConfiguration
                 )
                 let resolvedTurnID = handleSuccessfulTurnStartResponse(
                     response,
@@ -3204,7 +3257,25 @@ extension CodexService {
                         ?? resultObject["turns"]?.arrayValue
                         ?? []
                 ).compactMap { $0.objectValue }
-                return turnStateSnapshot(from: turnObjects, newestFirst: true)
+                let snapshot = turnStateSnapshot(
+                    from: turnObjects,
+                    newestFirst: true,
+                    knownParallelTurnIDs: knownParallelTurnIDs(for: threadId)
+                )
+                // The bridge's rollout mirror rides its actively-tailed turn id
+                // along on the probe. It is fresher than the bounded canonical
+                // page, which can read a busy run as closed for a beat, so honor
+                // it whenever the page itself found nothing interruptible.
+                if snapshot.interruptibleTurnID == nil,
+                   !snapshot.hasInterruptibleTurnWithoutID,
+                   let mirrorActiveTurnID = normalizedInterruptIdentifier(
+                       resultObject["remodexMirrorActiveTurnId"]?.stringValue
+                   ),
+                   !Self.isSyntheticPlaceholderTurnID(mirrorActiveTurnID),
+                   turnTerminalState(for: mirrorActiveTurnID, threadId: threadId) == nil {
+                    return (mirrorActiveTurnID, false, snapshot.latestTurnID)
+                }
+                return snapshot
             } catch {
                 if shouldFallbackTurnSnapshotToThreadRead(error) {
                     debugSyncLog("thread/turns/list unavailable for fresh thread=\(threadId); resolving stop state via thread/read")
@@ -3243,7 +3314,11 @@ extension CodexService {
 
         let turnObjects = response.result?.objectValue?["thread"]?.objectValue?["turns"]?.arrayValue?
             .compactMap { $0.objectValue } ?? []
-        return turnStateSnapshot(from: turnObjects, newestFirst: false)
+        return turnStateSnapshot(
+            from: turnObjects,
+            newestFirst: false,
+            knownParallelTurnIDs: knownParallelTurnIDs(for: threadId)
+        )
     }
 
     // Freshly-created chats can reject thread/turns/list until the first user turn is materialized.
@@ -3260,7 +3335,8 @@ extension CodexService {
     // Parses latest/running turn metadata from either descending pages or chronological legacy arrays.
     func turnStateSnapshot(
         from turnObjects: [RPCObject],
-        newestFirst: Bool
+        newestFirst: Bool,
+        knownParallelTurnIDs: Set<String> = []
     ) -> (
         interruptibleTurnID: String?,
         hasInterruptibleTurnWithoutID: Bool,
@@ -3282,9 +3358,10 @@ extension CodexService {
             return turnID
         }.first
 
-        // Newest-first scanning trusts the latest real turn as the active-state boundary.
-        // If it is terminal, older stale in-progress rows cannot still be interruptible.
+        // Parallel turns can finish out of order. A newer terminal turn does not
+        // prove that an older in-progress sibling is no longer interruptible.
         var hasInterruptibleTurnWithoutID = false
+        var encounteredTerminalBoundary = false
         for turnObject in newestTurnObjects {
             // The bridge's compaction banner ships without a real turn status
             // (older bridges omit it entirely); reading it as interruptible
@@ -3298,22 +3375,39 @@ extension CodexService {
             }
             let turnStatus = normalizedInterruptTurnStatus(from: turnObject)
             if !isInterruptibleTurnStatus(turnStatus) {
-                break
+                encounteredTerminalBoundary = true
+                continue
             }
-
             if let interruptibleTurnID = normalizedInterruptIdentifier(
                 turnObject["id"]?.stringValue
                     ?? turnObject["turnId"]?.stringValue
                     ?? turnObject["turn_id"]?.stringValue
             ) {
+                // A terminal row is a sequential-history boundary unless local
+                // lifecycle already proves this older turn was a parallel sibling.
+                if encounteredTerminalBoundary,
+                   !knownParallelTurnIDs.contains(interruptibleTurnID) {
+                    continue
+                }
                 return (interruptibleTurnID, false, latestTurnID)
             }
 
+            if encounteredTerminalBoundary {
+                continue
+            }
             hasInterruptibleTurnWithoutID = true
             break
         }
 
         return (nil, hasInterruptibleTurnWithoutID, latestTurnID)
+    }
+
+    private func knownParallelTurnIDs(for threadId: String) -> Set<String> {
+        var turnIDs = displacedActiveTurnIDsByThread[threadId] ?? []
+        if let activeTurnID = activeTurnID(for: threadId) {
+            turnIDs.insert(activeTurnID)
+        }
+        return turnIDs
     }
 
     // Keeps stop recovery compatible with runtimes that only accept snake_case thread/read params.

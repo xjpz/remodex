@@ -55,6 +55,7 @@ const { createBridgeSecureTransport } = require("./secure-transport");
 const { createRolloutLiveMirrorController } = require("./rollout-live-mirror");
 const {
   isContextualUserText,
+  isThreadTurnStateProbeRequest,
   isUserRoleItem,
   readUserItemText,
   sanitizeUserRoleItem,
@@ -66,6 +67,9 @@ const {
 } = require("./desktop-ipc-action-follower");
 const { createDesktopIpcLiveOwner } = require("./desktop-ipc-live-owner");
 const { createThreadRuntimeSettingsStore } = require("./thread-runtime-settings-store");
+const { createThreadListProvenanceEnricher } = require("./thread-list-provenance");
+const { createWorktreeOriginEnricher } = require("./worktree-origin");
+const { forEachThreadRowInResponse } = require("./thread-row-enrichment");
 const { version: bridgePackageVersion = "" } = require("../package.json");
 const {
   MINIMUM_SUPPORTED_IOS_APP_VERSION,
@@ -553,6 +557,33 @@ function threadTurnsListHandoffDescriptor(cursor) {
   return { anchorTurnId, token };
 }
 
+// The bounded canonical page can read a busy mirrored run as closed for a
+// beat, which used to flap the phone's running state. When the rollout mirror
+// is actively tailing a real turn, ride its id along on the turn-state probe
+// as an advisory field; history pages stay untouched.
+function annotateTurnStateProbeWithMirrorActiveTurn(request, response, getMirrorActiveTurnId) {
+  if (!isThreadTurnStateProbeRequest(request)) {
+    return response;
+  }
+  const params = request?.params || {};
+  const threadId = normalizeNonEmptyString(params.threadId)
+    || normalizeNonEmptyString(params.thread_id);
+  const mirrorActiveTurnId = threadId ? getMirrorActiveTurnId?.(threadId) : null;
+  const result = response?.result;
+  if (!mirrorActiveTurnId || !result || typeof result !== "object" || Array.isArray(result)) {
+    return response;
+  }
+  // Page responses can come from the fast-page cache: never mutate a shared
+  // object, or the annotation would outlive the mirror on later replays.
+  return {
+    ...response,
+    result: {
+      ...result,
+      remodexMirrorActiveTurnId: mirrorActiveTurnId,
+    },
+  };
+}
+
 function canonicalThreadTurnsListRequest(request) {
   const params = { ...(request?.params || {}) };
   delete params.remodexRequireCanonical;
@@ -774,6 +805,8 @@ function startBridge({
   const jsonlTurnsListRolloutMissCacheByThread = new Map();
   const threadTurnsListFastPageCoordinator = createThreadTurnsListFastPageCoordinator();
   const threadRuntimeSettingsStore = createThreadRuntimeSettingsStore();
+  const threadListProvenanceEnricher = createThreadListProvenanceEnricher();
+  const worktreeOriginEnricher = createWorktreeOriginEnricher();
   const trackedForwardedRequestMethods = new Set([
     "account/login/start",
     "account/login/cancel",
@@ -1382,6 +1415,11 @@ function startBridge({
   function sendBridgeManagedThreadTurnsListResponse(request, response, sendResponse, {
     skipJsonlArtifactAugmentation = false,
   } = {}) {
+    response = annotateTurnStateProbeWithMirrorActiveTurn(
+      request,
+      response,
+      (threadId) => rolloutLiveMirror?.getActiveTurnId(threadId) || null
+    );
     const finalSanitizeContext = buildThreadTurnsListRelaySanitizeContext(request, {
       skipJsonlArtifactAugmentation,
     });
@@ -1700,7 +1738,12 @@ function startBridge({
     if (trackedRequest.method === "thread/list"
       || trackedRequest.method === "thread/read"
       || trackedRequest.method === "thread/resume") {
-      threadRuntimeSettingsStore.enrichResponse(trackedRequest.method, parsed);
+      // One walk over the rows for both enrichers instead of one traversal each.
+      forEachThreadRowInResponse(trackedRequest.method, parsed, (thread) => {
+        threadRuntimeSettingsStore.attachToThread(thread);
+        threadListProvenanceEnricher.attachToThread(thread);
+        worktreeOriginEnricher.attachToThread(thread);
+      });
       normalizedMessage = JSON.stringify(parsed);
     }
 
@@ -5031,6 +5074,7 @@ function shouldSuppressRolloutMirrorForThread(
 }
 
 module.exports = {
+  annotateTurnStateProbeWithMirrorActiveTurn,
   buildThreadTurnsListRelaySanitizeContext,
   buildHeartbeatBridgeStatus,
   canonicalThreadTurnsListRequest,

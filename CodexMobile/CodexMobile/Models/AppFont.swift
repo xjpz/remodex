@@ -2,14 +2,16 @@
 // Purpose: Centralised font provider that uses a selectable prose font plus a dedicated mono font for code.
 // Layer: Model
 // Exports: AppFont
-// Depends on: SwiftUI, UIKit
+// Depends on: Foundation, SwiftUI, UIKit
 
+import Foundation
 import SwiftUI
 import UIKit
 
 enum AppFont {
     enum Style: String, CaseIterable, Identifiable {
         case system
+        case systemRounded
         case geist
         case geistMono
         case jetBrainsMono
@@ -19,6 +21,7 @@ enum AppFont {
         var title: String {
             switch self {
             case .system: return "System"
+            case .systemRounded: return "SF Pro Rounded"
             case .geist: return "Geist"
             case .geistMono: return "Geist Mono"
             case .jetBrainsMono: return "JetBrains Mono"
@@ -29,6 +32,8 @@ enum AppFont {
             switch self {
             case .system:
                 return "Use the native iOS font for regular text. Code stays monospaced."
+            case .systemRounded:
+                return "Use the rounded native iOS font for regular text. Code stays monospaced."
             case .geist:
                 return "Use Geist for regular text. Code stays monospaced."
             case .geistMono:
@@ -57,11 +62,6 @@ enum AppFont {
             return style
         }
 
-        // Older builds may have stored "jetBrainsMono" in the new key during the transition.
-        if UserDefaults.standard.string(forKey: storageKey) == "jetBrainsMono" {
-            return .jetBrainsMono
-        }
-
         if UserDefaults.standard.object(forKey: legacyStorageKey) != nil {
             return .jetBrainsMono
         }
@@ -71,7 +71,7 @@ enum AppFont {
 
     private static func candidateFaceNames(for weight: Font.Weight, style: Style) -> [String] {
         switch style {
-        case .system:
+        case .system, .systemRounded:
             return []
         case .geist:
             switch weight {
@@ -107,7 +107,7 @@ enum AppFont {
 
     private static func fontSizeAdjustment(for style: Style) -> CGFloat {
         switch style {
-        case .system, .geist, .geistMono, .jetBrainsMono:
+        case .system, .systemRounded, .geist, .geistMono, .jetBrainsMono:
             return 0
         }
     }
@@ -158,8 +158,12 @@ enum AppFont {
         let adjustedSize = max(size + fontSizeAdjustment(for: selectedStyle), 1)
         let metrics = UIFontMetrics(forTextStyle: fallbackTextStyle)
 
-        if selectedStyle == .system {
-            let systemFont = UIFont.systemFont(ofSize: adjustedSize, weight: uiKitWeight(for: weight))
+        if selectedStyle == .system || selectedStyle == .systemRounded {
+            let systemFont = systemUIFont(
+                size: adjustedSize,
+                weight: weight,
+                design: selectedStyle == .systemRounded ? .rounded : .default
+            )
             return metrics.scaledFont(for: systemFont)
         }
 
@@ -173,17 +177,24 @@ enum AppFont {
     }
 
     // Keeps code surfaces on the selected mono family when the user picks a mono UI font.
+    // The two system faces pair with SF Mono, which shares their metrics and Dynamic Type
+    // behavior, so only the custom prose families borrow a bundled mono face.
     private static var preferredMonoStyle: Style {
         switch currentStyle {
         case .geistMono:
             return .geistMono
-        case .jetBrainsMono, .system, .geist:
+        case .system, .systemRounded:
+            return .system
+        case .jetBrainsMono, .geist:
             return .jetBrainsMono
         }
     }
 
     private static func candidateMonoFaceNames(for weight: Font.Weight, style: Style) -> [String] {
         switch style {
+        case .system, .systemRounded:
+            // SF Mono ships as the system monospaced design, not as a bundled face.
+            return []
         case .geistMono:
             switch weight {
             case .bold, .heavy, .black, .semibold:
@@ -193,7 +204,7 @@ enum AppFont {
             default:
                 return ["GeistMono-Regular", "GeistMono-Medium"]
             }
-        case .jetBrainsMono, .system, .geist:
+        case .jetBrainsMono, .geist:
             break
         }
 
@@ -234,12 +245,10 @@ enum AppFont {
             return metrics.scaledFont(for: font)
         }
 
-        if let descriptor = UIFontDescriptor.preferredFontDescriptor(withTextStyle: fallbackTextStyle)
-            .withDesign(.monospaced) {
-            return UIFont(descriptor: descriptor, size: 0)
-        }
-
-        return UIFont.monospacedSystemFont(ofSize: size, weight: uiKitWeight(for: weight))
+        // SF Mono at the requested point size: the text style only drives Dynamic Type
+        // scaling here, so callers keep the size they asked for instead of the style default.
+        let systemMono = UIFont.monospacedSystemFont(ofSize: adjustedSize, weight: uiKitWeight(for: weight))
+        return metrics.scaledFont(for: systemMono)
     }
 
     private static func monoFont(size: CGFloat, weight: Font.Weight, style: Font.TextStyle) -> Font {
@@ -248,7 +257,7 @@ enum AppFont {
             return .custom(faceName, size: adjustedSize, relativeTo: style)
         }
 
-        return .system(style, design: .monospaced, weight: weight)
+        return Font(resolvedMonoUIFont(size: size, weight: weight, fallbackTextStyle: uiKitTextStyle(for: style)))
     }
 
     static func monoUIFont(size: CGFloat, weight: Font.Weight = .regular, textStyle: UIFont.TextStyle = .body) -> UIFont {
@@ -260,7 +269,9 @@ enum AppFont {
         switch preferredMonoStyle {
         case .geistMono:
             return "\"Geist Mono\", \"JetBrains Mono\", ui-monospace, monospace"
-        case .jetBrainsMono, .system, .geist:
+        case .system, .systemRounded:
+            return "ui-monospace, \"SF Mono\", SFMono-Regular, Menlo, monospace"
+        case .jetBrainsMono, .geist:
             return "\"JetBrains Mono\", \"Geist Mono\", ui-monospace, monospace"
         }
     }
@@ -274,8 +285,13 @@ enum AppFont {
         let selectedStyle = currentStyle
         let adjustedSize = max(size + fontSizeAdjustment(for: selectedStyle), 1)
 
-        if selectedStyle == .system {
-            return scaledSystemFont(size: adjustedSize, weight: weight, relativeTo: style)
+        if selectedStyle == .system || selectedStyle == .systemRounded {
+            return scaledSystemFont(
+                size: adjustedSize,
+                weight: weight,
+                design: selectedStyle == .systemRounded ? .rounded : .default,
+                relativeTo: style
+            )
         }
 
         if let faceName = resolvedCustomFaceName(for: weight, style: selectedStyle, size: adjustedSize) {
@@ -288,11 +304,26 @@ enum AppFont {
     private static func scaledSystemFont(
         size: CGFloat,
         weight: Font.Weight,
+        design: UIFontDescriptor.SystemDesign = .default,
         relativeTo style: Font.TextStyle
     ) -> Font {
-        let base = UIFont.systemFont(ofSize: size, weight: uiKitWeight(for: weight))
+        let base = systemUIFont(size: size, weight: weight, design: design)
         let metrics = UIFontMetrics(forTextStyle: uiKitTextStyle(for: style))
         return Font(metrics.scaledFont(for: base))
+    }
+
+    private static func systemUIFont(
+        size: CGFloat,
+        weight: Font.Weight,
+        design: UIFontDescriptor.SystemDesign
+    ) -> UIFont {
+        let base = UIFont.systemFont(ofSize: size, weight: uiKitWeight(for: weight))
+        guard design != .default,
+              let descriptor = base.fontDescriptor.withDesign(design) else {
+            return base
+        }
+
+        return UIFont(descriptor: descriptor, size: size)
     }
 
     private static func uiKitTextStyle(for style: Font.TextStyle) -> UIFont.TextStyle {
@@ -330,8 +361,17 @@ enum AppFont {
 
     // MARK: - Semantic helpers
 
+    // Single source for prose body size: SwiftUI text, the UIKit surfaces that
+    // must line up with it, and inline code all measure from this value.
+    static let bodyPointSize: CGFloat = 15
+
     static func body(weight: Font.Weight = .regular) -> Font {
-        proseFont(size: 15, weight: weight, style: .body)
+        proseFont(size: bodyPointSize, weight: weight, style: .body)
+    }
+
+    // UIKit text views and measuring code that must match SwiftUI prose body.
+    static func bodyUIFont(weight: Font.Weight = .regular) -> UIFont {
+        uiFont(size: bodyPointSize, weight: weight, textStyle: .body)
     }
 
     static func callout(weight: Font.Weight = .regular) -> Font {
@@ -368,10 +408,16 @@ enum AppFont {
 
     // MARK: - Monospaced (inline code, code blocks, diffs, shell output)
 
+    // Sized mono for surfaces that scale their own text (markdown headings),
+    // where a text-style mono would ignore the surrounding scale.
+    static func mono(size: CGFloat, weight: Font.Weight = .regular, relativeTo style: Font.TextStyle = .body) -> Font {
+        monoFont(size: size, weight: weight, style: style)
+    }
+
     static func mono(_ style: Font.TextStyle) -> Font {
         switch style {
         case .body:
-            return monoFont(size: 15, weight: .regular, style: .body)
+            return monoFont(size: bodyPointSize, weight: .regular, style: .body)
         case .callout:
             return monoFont(size: 14.5, weight: .regular, style: .callout)
         case .subheadline:
@@ -387,12 +433,29 @@ enum AppFont {
         }
     }
 
+    // Markdown parsers tag inline code with `.code`, and SwiftUI then derives its font from the
+    // ambient prose font. That derivation only reaches a fixed-width face when the prose family
+    // has one, so SF Pro Rounded and Geist would render code in the prose face. Pin the mono
+    // face on those runs instead so code stays monospaced in every app font style.
+    static func monospaceCodeSpans(in attributed: inout AttributedString, textStyle: Font.TextStyle = .body) {
+        let codeFont = mono(textStyle)
+        for run in attributed.runs where run.inlinePresentationIntent?.contains(.code) == true {
+            attributed[run.range].font = codeFont
+        }
+    }
+
     // MARK: - Sized helpers
 
-    static func system(size: CGFloat, weight: Font.Weight = .regular) -> Font {
+    // `design` requests a system design (e.g. .rounded badges) and is honored on
+    // the system styles; custom faces ignore it since the family is the design.
+    static func system(size: CGFloat, weight: Font.Weight = .regular, design: Font.Design = .default) -> Font {
         let selectedStyle = currentStyle
         if selectedStyle == .system {
-            return .system(size: size, weight: weight)
+            return .system(size: size, weight: weight, design: design)
+        }
+
+        if selectedStyle == .systemRounded {
+            return .system(size: size, weight: weight, design: design == .default ? .rounded : design)
         }
 
         let adjustedSize = max(size + fontSizeAdjustment(for: selectedStyle), 1)
@@ -400,7 +463,7 @@ enum AppFont {
             return .custom(faceName, size: adjustedSize)
         }
 
-        return .system(size: size, weight: weight)
+        return .system(size: size, weight: weight, design: design)
     }
 }
 

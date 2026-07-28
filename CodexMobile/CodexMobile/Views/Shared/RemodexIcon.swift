@@ -84,6 +84,13 @@ enum RemodexIcon {
         "qrcode": "central-qr-code",
         "qrcode.viewfinder": "central-scan-code",
         "remodex.agent": "central-robot",
+        // Same glyph Synara puts on scheduled automations, so a chat an automation
+        // started reads the same on both surfaces.
+        "remodex.automation": "central-clock",
+        // "Approve for me" is a sandbox, not a verdict: the shield keeps the security
+        // family and the brackets say the guard is the one reading the command. Every
+        // surface resolves it through this one name so Codex and Remodex never drift.
+        "remodex.auto-review": "central-shield-code",
         "remodex.branch": "central-branch",
         "remodex.changes": "changes",
         "remodex.plan-mode": "central-planning",

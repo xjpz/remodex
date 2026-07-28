@@ -34,16 +34,22 @@ extension CodexService {
 
         let resolvedProjectPath = resolvedForkProjectPath(for: target, sourceThread: sourceThread)
         let sourceModelIdentifier = sourceThread.model?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let accessConfiguration = runtimeAccessConfiguration()
 
         do {
             var baseParams: RPCObject = ["threadId": .string(normalizedSourceThreadId)]
             if supportsTurnPagination {
                 baseParams["excludeTurns"] = .bool(true)
             }
-            let response = try await sendRequestWithApprovalPolicyFallback(
+            let response = try await sendRequestWithSandboxFallback(
                 method: "thread/fork",
                 baseParams: baseParams,
-                context: "minimal"
+                accessConfiguration: accessConfiguration
+            )
+            try validateAppliedAccessConfiguration(
+                in: response,
+                expected: accessConfiguration,
+                context: "thread/fork"
             )
             let forkedThread = try await handleThreadForkResponse(
                 response,
@@ -57,10 +63,15 @@ extension CodexService {
             return forkedThread
         } catch {
             if supportsTurnPagination, consumeUnsupportedTurnPagination(error) {
-                let response = try await sendRequestWithApprovalPolicyFallback(
+                let response = try await sendRequestWithSandboxFallback(
                     method: "thread/fork",
                     baseParams: ["threadId": .string(normalizedSourceThreadId)],
-                    context: "minimal"
+                    accessConfiguration: accessConfiguration
+                )
+                try validateAppliedAccessConfiguration(
+                    in: response,
+                    expected: accessConfiguration,
+                    context: "thread/fork"
                 )
                 let forkedThread = try await handleThreadForkResponse(
                     response,
@@ -154,7 +165,7 @@ private extension CodexService {
             )
         }
         if let normalizedProjectPath = decodedThread.normalizedProjectPath,
-           CodexThread.projectIconSystemName(for: normalizedProjectPath) == "arrow.triangle.branch" {
+           CodexThread.isManagedWorktreePath(normalizedProjectPath) {
             rememberAssociatedManagedWorktreePath(normalizedProjectPath, for: decodedThread.id)
         }
         inheritThreadRuntimeOverrides(from: sourceThreadId, to: decodedThread.id)
@@ -201,7 +212,7 @@ private extension CodexService {
                     modelIdentifierOverride: sourceModelIdentifier
                 )
             } catch {
-                if shouldAllowProjectRebindWithoutResume(error) {
+                if isMissingRolloutError(error) {
                     continue
                 }
                 throw error
@@ -260,7 +271,7 @@ private extension CodexService {
         if didPatch {
             upsertThread(thread)
             if let normalizedProjectPath = thread.normalizedProjectPath,
-               CodexThread.projectIconSystemName(for: normalizedProjectPath) == "arrow.triangle.branch" {
+               CodexThread.isManagedWorktreePath(normalizedProjectPath) {
                 rememberAssociatedManagedWorktreePath(normalizedProjectPath, for: thread.id)
             }
         }

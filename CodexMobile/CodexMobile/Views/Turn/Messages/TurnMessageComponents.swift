@@ -54,6 +54,7 @@ private struct MessageRowMessageSignature: Equatable {
     let proposedPlan: MessageRowProposedPlanSignature?
     let subagentAction: MessageRowSubagentActionSignature?
     let structuredUserInputRequest: MessageRowStructuredInputRequestSignature?
+    let autoApprovalReview: MessageRowAutoApprovalReviewSignature?
     let orderIndex: Int
 
     init(_ message: CodexMessage) {
@@ -79,7 +80,28 @@ private struct MessageRowMessageSignature: Equatable {
         self.subagentAction = message.subagentAction.map(MessageRowSubagentActionSignature.init)
         self.structuredUserInputRequest = message.structuredUserInputRequest
             .map(MessageRowStructuredInputRequestSignature.init)
+        self.autoApprovalReview = message.autoApprovalReview.map(MessageRowAutoApprovalReviewSignature.init)
         self.orderIndex = message.orderIndex
+    }
+}
+
+private struct MessageRowAutoApprovalReviewSignature: Equatable {
+    let reviewId: String
+    let status: CodexAutoApprovalReviewStatus
+    let riskLevel: String?
+    let userAuthorization: String?
+    let rationaleFingerprint: String?
+    let retryApproved: Bool
+    let retryUnavailableReason: String?
+
+    init(_ review: CodexAutoApprovalReview) {
+        reviewId = review.reviewId
+        status = review.status
+        riskLevel = review.riskLevel
+        userAuthorization = review.userAuthorization
+        rationaleFingerprint = review.rationale.map(messageRowTextSignature)
+        retryApproved = review.retryApproved
+        retryUnavailableReason = review.retryUnavailableReason
     }
 }
 
