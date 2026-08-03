@@ -68,6 +68,9 @@ struct TurnComposerView: View {
     let gitState: TurnComposerGitState
     let gitActions: TurnComposerGitActions
     let onRefreshUsageStatus: () async -> Void
+    // Re-requests model/list when the runtime picker opens without options
+    // (bootstrap fetch failed or still in flight). Defaulted for previews.
+    var onRefreshModelsIfNeeded: () -> Void = {}
 
     let onSelectAccessMode: (CodexAccessMode) -> Void
     let onTapAddImage: () -> Void
@@ -110,6 +113,9 @@ struct TurnComposerView: View {
     // Square hit target for the resting capsule's "+", mic, and send/stop
     // controls. The extra 2pt keeps the closed capsule comfortable to tap.
     private let collapsedControlTapTarget: CGFloat = 34
+    // Extra inset applied to the resting capsule (and the accessory row above
+    // it, so the two stay flush) on top of the composer's own 12pt margins.
+    private static let collapsedComposerInset: CGFloat = 24
     private let expandedPlainTextMaxVisibleLines: CGFloat = 6
     private let expandedAccessoryTextMaxVisibleLines: CGFloat = 4
 
@@ -235,6 +241,9 @@ struct TurnComposerView: View {
                     gitState: gitState,
                     gitActions: gitActions
                 )
+                // Keep the accessory pills lined up with whichever width the
+                // surface below them currently has.
+                .padding(.horizontal, showsCollapsedComposer ? Self.collapsedComposerInset : 0)
             }
 
             VStack(spacing: 0) {
@@ -367,8 +376,10 @@ struct TurnComposerView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: composerSurfaceCornerRadius))
             .clipShape(RoundedRectangle(cornerRadius: composerSurfaceCornerRadius))
-            // The resting capsule sits slightly narrower than the expanded composer.
-            .padding(.horizontal, showsCollapsedComposer ? 8 : 0)
+            // The resting capsule sits noticeably narrower than the expanded
+            // composer, so the closed state reads as a floating control rather
+            // than an edge-to-edge input bar.
+            .padding(.horizontal, showsCollapsedComposer ? Self.collapsedComposerInset : 0)
             .overlay(alignment: .topLeading) {
                 Color.clear
                     .frame(maxWidth: .infinity, maxHeight: 0, alignment: .topLeading)
@@ -423,7 +434,12 @@ struct TurnComposerView: View {
             onSetPlanModeArmed: onSetPlanModeArmed,
             onResumeQueue: onResumeQueue,
             onStopTurn: onStopTurn,
-            onTapRuntimePill: { showsRuntimeOverlay = true },
+            onTapRuntimePill: {
+                // A failed bootstrap fetch would otherwise leave the picker
+                // with no fast-mode toggle and no effort slider forever.
+                onRefreshModelsIfNeeded()
+                showsRuntimeOverlay = true
+            },
             onSend: onSend
         )
     }

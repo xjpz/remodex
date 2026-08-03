@@ -96,7 +96,9 @@ struct TurnTimelineCommandGroup: Identifiable, Equatable {
                 .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
                 .count
         }
-        self.id = "command-group:\(messages.first?.id ?? "unknown")"
+        // Tool-only groups carry no command rows, so fall back to the first
+        // ordered row to keep the identity stable and collision-free.
+        self.id = "command-group:\((messages.first ?? resolvedOrderedMessages.first)?.id ?? "unknown")"
     }
 
     var commandCount: Int {
@@ -244,6 +246,7 @@ enum TurnTimelineRenderProjection {
                 result[entry.key] = replacement
             }
         }
+        let latestUserMessageIndex = messages.lastIndex { $0.role == .user }
 
         func flushBufferedToolMessages() {
             guard !bufferedToolMessages.isEmpty else { return }
@@ -262,20 +265,76 @@ enum TurnTimelineRenderProjection {
             bufferedCommandPendingToolActivity.removeAll(keepingCapacity: true)
         }
 
-        func flushBufferedCommandMessages(adoptsPendingToolActivity: Bool = true) {
-            if adoptsPendingToolActivity {
-                commitBufferedCommandPendingToolActivity()
+        func belongsToActiveTurn(_ message: CodexMessage, at messageIndex: Int? = nil) -> Bool {
+            guard isThreadRunning else { return false }
+
+            let messageTurnID = normalizedIdentifier(message.turnId)
+            if let activeTurnID = normalizedIdentifier(activeTurnID) {
+                if let messageTurnID {
+                    return messageTurnID == activeTurnID
+                }
             }
-            let deferredToolActivity = bufferedCommandPendingToolActivity
+
+            guard messageTurnID == nil,
+                  let latestUserMessageIndex,
+                  let messageIndex = messageIndex ?? messages.lastIndex(where: { $0.id == message.id }) else {
+                return false
+            }
+            return messageIndex > latestUserMessageIndex
+        }
+
+        let latestActiveToolCallIndex = messages.indices.last(where: { index in
+            isToolBurstCandidate(messages[index])
+                && belongsToActiveTurn(messages[index], at: index)
+        })
+
+        func isOlderActiveToolActivity(_ message: CodexMessage, at messageIndex: Int) -> Bool {
+            guard isCommandGroupingToolActivity(message),
+                  belongsToActiveTurn(message, at: messageIndex),
+                  let latestActiveToolCallIndex else {
+                return false
+            }
+            return messageIndex != latestActiveToolCallIndex
+        }
+
+        func flushBufferedCommandMessages(keepsLatestToolCallVisible: Bool = false) {
+            commitBufferedCommandPendingToolActivity()
+
+            var deferredToolCall: CodexMessage?
+            if keepsLatestToolCallVisible,
+               bufferedCommandTrailingFileChanges.isEmpty,
+               let latestMessage = bufferedCommandOrderedMessages.last,
+               isToolBurstCandidate(latestMessage),
+               belongsToActiveTurn(latestMessage) {
+                deferredToolCall = bufferedCommandOrderedMessages.removeLast()
+                bufferedCommandMessages.removeAll { $0.id == latestMessage.id }
+            }
+
             bufferedCommandPendingToolActivity.removeAll(keepingCapacity: true)
 
+            let groupedToolActivityCount = bufferedCommandOrderedMessages
+                .filter(isCommandGroupingToolActivity)
+                .count
             if !bufferedCommandMessages.isEmpty {
                 items.append(.commandGroup(TurnTimelineCommandGroup(
                     messages: bufferedCommandMessages,
                     orderedMessages: bufferedCommandOrderedMessages
                 )))
+            } else if groupedToolActivityCount > 1
+                || (deferredToolCall != nil && groupedToolActivityCount == 1) {
+                // Tool-only runs (apply patch, terminal writes) share the same
+                // disclosure as command runs instead of scattering one standalone
+                // row per tool call across the turn.
+                items.append(.commandGroup(TurnTimelineCommandGroup(
+                    messages: [],
+                    orderedMessages: bufferedCommandOrderedMessages
+                )))
+            } else {
+                items.append(contentsOf: bufferedCommandOrderedMessages.map(TurnTimelineRenderItem.message))
             }
-            items.append(contentsOf: deferredToolActivity.map(TurnTimelineRenderItem.message))
+            if let deferredToolCall {
+                items.append(.message(deferredToolCall))
+            }
             items.append(contentsOf: bufferedCommandTrailingFileChanges.map(TurnTimelineRenderItem.message))
             bufferedCommandMessages.removeAll(keepingCapacity: true)
             bufferedCommandOrderedMessages.removeAll(keepingCapacity: true)
@@ -292,7 +351,7 @@ enum TurnTimelineRenderProjection {
         // mirror that interleaves exec calls with terminal writes still renders
         // one group instead of alternating standalone rows.
         func adoptBufferedToolMessagesIntoOpeningCommandGroup(_ incoming: CodexMessage) -> Bool {
-            guard bufferedCommandMessages.isEmpty,
+            guard bufferedCommandOrderedMessages.isEmpty,
                   !bufferedToolMessages.isEmpty,
                   bufferedToolMessages.allSatisfy(isCommandGroupingToolActivity),
                   // Adjacency is measured against the row right before the command,
@@ -337,13 +396,23 @@ enum TurnTimelineRenderProjection {
                 continue
             }
 
+            // A historical Desktop review can arrive after its owning turn has
+            // fallen outside the bounded render page. Approved reviews are normal
+            // tool history: show them only through that turn's Previous messages
+            // disclosure, never as detached rows at the live tail. Denied and
+            // otherwise exceptional reviews remain visible for user attention.
+            if isApprovedAutoApprovalReview(renderedMessage),
+               !belongsToActiveTurn(renderedMessage, at: index) {
+                continue
+            }
+
             // Reasoning and inline file changes are command interstitials. File changes
             // remain pending until a later trace/command confirms that they bridge the
             // run; otherwise flush places them back after the command disclosure.
-            if !bufferedCommandMessages.isEmpty,
+            if !bufferedCommandOrderedMessages.isEmpty,
                isCommandGroupingInterstitial(renderedMessage) {
                 flushBufferedToolMessages()
-                if let previous = bufferedCommandMessages.last,
+                if let previous = bufferedCommandOrderedMessages.last,
                    !canShareToolBurst(previous: previous, incoming: renderedMessage) {
                     flushBufferedCommandMessages()
                     items.append(.message(renderedMessage))
@@ -364,20 +433,36 @@ enum TurnTimelineRenderProjection {
                 continue
             }
 
-            // Command disclosures are derived only from terminal command-execution
-            // tool rows. Assistant commentary/reasoning remains governed by the
-            // completed-turn previous-message projection below.
-            guard !isFinishedCommandToolCall(renderedMessage) else {
+            // Command disclosures are anchored by finished terminal commands and by
+            // finished generic tool calls (apply patch, terminal writes), so patch-only
+            // runs group like command runs. A settled tool row only anchors when the
+            // plain burst buffer is empty or homogeneous; mixed live runs keep the
+            // legacy burst path. Assistant commentary/reasoning remains governed by
+            // the completed-turn previous-message projection below.
+            let opensCommandGroup = isFinishedCommandToolCall(renderedMessage)
+            let anchorsToolOnlyGroup = !opensCommandGroup
+                && (
+                    isFinishedGroupAnchorToolActivity(renderedMessage)
+                        || isOlderActiveToolActivity(renderedMessage, at: index)
+                )
+                && (
+                    !bufferedCommandOrderedMessages.isEmpty
+                        || bufferedToolMessages.isEmpty
+                        || bufferedToolMessages.allSatisfy(isFinishedGroupAnchorToolActivity)
+                )
+            if opensCommandGroup || anchorsToolOnlyGroup {
                 if !adoptBufferedToolMessagesIntoOpeningCommandGroup(renderedMessage) {
                     flushBufferedToolMessages()
                 }
-                if let previous = bufferedCommandMessages.last,
+                if let previous = bufferedCommandOrderedMessages.last,
                    !canShareToolBurst(previous: previous, incoming: renderedMessage) {
                     flushBufferedCommandMessages()
                 }
                 commitBufferedCommandPendingToolActivity()
                 commitBufferedCommandTrailingFileChanges()
-                bufferedCommandMessages.append(renderedMessage)
+                if opensCommandGroup {
+                    bufferedCommandMessages.append(renderedMessage)
+                }
                 bufferedCommandOrderedMessages.append(renderedMessage)
                 continue
             }
@@ -385,9 +470,9 @@ enum TurnTimelineRenderProjection {
             // Terminal writes, patches and other tool rows interleave with the
             // commands of the same run; folding them into the open disclosure
             // keeps assistant text readable instead of one row per tool call.
-            if !bufferedCommandMessages.isEmpty,
+            if !bufferedCommandOrderedMessages.isEmpty,
                isCommandGroupingToolActivity(renderedMessage),
-               let previous = bufferedCommandMessages.last,
+               let previous = bufferedCommandOrderedMessages.last,
                canShareToolBurst(previous: previous, incoming: renderedMessage) {
                 flushBufferedToolMessages()
                 commitBufferedCommandTrailingFileChanges()
@@ -403,12 +488,11 @@ enum TurnTimelineRenderProjection {
             bufferedToolMessages.append(renderedMessage)
         }
 
-        // A tool row that is still streaming at the tail is the live one, so it
-        // stays under the disclosure instead of disappearing into it.
-        let keepsLiveToolActivityVisible = isThreadRunning
-            && bufferedCommandPendingToolActivity.contains { $0.isStreaming }
+        // Keep the latest call of the active turn readable until another call or
+        // assistant text arrives. Once the turn settles, the same projection folds
+        // it into the disclosure without needing extra persisted presentation state.
         flushBufferedToolMessages()
-        flushBufferedCommandMessages(adoptsPendingToolActivity: !keepsLiveToolActivityVisible)
+        flushBufferedCommandMessages(keepsLatestToolCallVisible: isThreadRunning)
         return mergeAdjacentFileChangeItems(items)
     }
 
@@ -804,8 +888,12 @@ enum TurnTimelineRenderProjection {
     private static func isPriorityVisibleMessage(_ message: CodexMessage, finalMessage: CodexMessage? = nil) -> Bool {
         if message.role == .system {
             switch message.kind {
-            case .fileChange, .subagentAction, .userInputPrompt, .autoApprovalReview:
+            case .fileChange, .subagentAction, .userInputPrompt:
                 return true
+            case .autoApprovalReview:
+                // Approved reviews are settled tool history. Keep reviews that
+                // failed or may still need attention beside the final answer.
+                return message.autoApprovalReview?.status != .approved
             case .plan:
                 return message.shouldDisplayInlinePlanResult
             case .thinking, .toolActivity, .commandExecution, .chat:
@@ -818,6 +906,12 @@ enum TurnTimelineRenderProjection {
             return false
         }
         return isAssistantPriorityArtifactOnly(message)
+    }
+
+    private static func isApprovedAutoApprovalReview(_ message: CodexMessage) -> Bool {
+        message.role == .system
+            && message.kind == .autoApprovalReview
+            && message.autoApprovalReview?.status == .approved
     }
 
     private static func isReplayOfFinalAssistant(_ message: CodexMessage, finalMessage: CodexMessage) -> Bool {
@@ -1082,6 +1176,13 @@ enum TurnTimelineRenderProjection {
 
     private static func isCommandGroupingToolActivity(_ message: CodexMessage) -> Bool {
         message.role == .system && message.kind == .toolActivity
+    }
+
+    // A settled generic tool call (apply patch, terminal write, connector read)
+    // can anchor a disclosure just like a finished command; streaming rows stay
+    // on the live path so the in-progress call remains individually visible.
+    private static func isFinishedGroupAnchorToolActivity(_ message: CodexMessage) -> Bool {
+        isCommandGroupingToolActivity(message) && !message.isStreaming
     }
 
     // Rows an open disclosure already absorbs must not close it when the

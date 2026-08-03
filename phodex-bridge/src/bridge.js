@@ -54,6 +54,7 @@ const {
 const { createBridgeSecureTransport } = require("./secure-transport");
 const { createRolloutLiveMirrorController } = require("./rollout-live-mirror");
 const {
+  buildCompleteThreadReadParams,
   isContextualUserText,
   isThreadTurnStateProbeRequest,
   isUserRoleItem,
@@ -456,6 +457,27 @@ function createThreadTurnsListFastPageCoordinator({
       canonicalRequest,
       fetchCanonical
     );
+    let timeoutId = null;
+    const deadline = new Promise((resolveDeadline) => {
+      timeoutId = setTimeoutImpl(() => resolveDeadline({ deadline: true }), waitMs);
+    });
+    const first = await Promise.race([canonicalOutcomePromise, deadline]);
+    if (timeoutId != null) {
+      clearTimeoutImpl(timeoutId);
+    }
+
+    if (first?.ok && !isEmptyTurnsListResponse(first.response)) {
+      forgetCanonicalFirstPage(canonicalFirstPageCacheKey, canonicalOutcomePromise);
+      return {
+        source: "canonical",
+        response: rebindThreadTurnsListResponseId(first.response, request.id),
+        usesJsonl: false,
+      };
+    }
+
+    // Deadline hit, canonical error, or an empty canonical page: only now pay
+    // for the synchronous rollout read, so a fast canonical response never
+    // blocks behind it and never delays itself.
     let jsonlFallback = null;
     try {
       jsonlFallback = await readJsonl(request);
@@ -477,38 +499,6 @@ function createThreadTurnsListFastPageCoordinator({
         source: "canonical",
         response: rebindThreadTurnsListResponseId(response, request.id),
         usesJsonl: false,
-      };
-    }
-
-    let timeoutId = null;
-    const deadline = new Promise((resolveDeadline) => {
-      timeoutId = setTimeoutImpl(() => resolveDeadline({ deadline: true }), waitMs);
-    });
-    const first = await Promise.race([canonicalOutcomePromise, deadline]);
-    if (timeoutId != null) {
-      clearTimeoutImpl(timeoutId);
-    }
-
-    if (first?.ok && !isEmptyTurnsListResponse(first.response)) {
-      if (shouldPreferJsonlFirstPage(first.response, jsonlFallback.response)) {
-        const token = rememberHandoff(threadId, canonicalOutcomePromise, jsonlFallback);
-        return {
-          source: "jsonl",
-          response: buildJsonlCanonicalHandoffResponse(
-            jsonlFallback.response,
-            request.id,
-            token,
-            firstTurnsListTurnId(jsonlFallback.response)
-          ),
-          usesJsonl: true,
-        };
-      }
-      forgetCanonicalFirstPage(canonicalFirstPageCacheKey, canonicalOutcomePromise);
-      return {
-        source: "canonical",
-        response: rebindThreadTurnsListResponseId(first.response, request.id),
-        usesJsonl: false,
-        jsonlFallback,
       };
     }
 
@@ -639,21 +629,6 @@ function buildJsonlCanonicalHandoffResponse(response, requestId, token, anchorTu
   };
 }
 
-function shouldPreferJsonlFirstPage(canonicalResponse, jsonlResponse) {
-  const canonicalResult = canonicalResponse?.result;
-  const jsonlResult = jsonlResponse?.result;
-  const canonicalTurnsKey = findTurnsListResultKey(canonicalResult);
-  const jsonlTurnsKey = findTurnsListResultKey(jsonlResult);
-  if (!canonicalTurnsKey || !jsonlTurnsKey) {
-    return false;
-  }
-  const jsonlTurn = jsonlResult[jsonlTurnsKey]?.[0];
-  const jsonlTurnId = turnListTurnIdentifier(jsonlTurn);
-  return Boolean(jsonlTurnId)
-    && !canonicalResult[canonicalTurnsKey].some((turn) => turnListTurnIdentifier(turn) === jsonlTurnId)
-    && shouldMergeLatestJsonlTurn(jsonlTurn);
-}
-
 function firstTurnsListTurnId(response) {
   const result = response?.result;
   const turnsKey = findTurnsListResultKey(result);
@@ -762,7 +737,10 @@ function startBridge({
   const relaySessionUrl = `${relayBaseUrl}/${sessionId}`;
   const notificationSecret = randomBytes(24).toString("hex");
   const desktopRefresher = new CodexDesktopRefresher({
-    enabled: config.refreshEnabled,
+    // IPC snapshots are accepted only after Codex mounts the route and
+    // announces itself as a follower. Auto-follow performs that one-time
+    // activation; refreshEnabled still controls the legacy reload workaround.
+    enabled: config.refreshEnabled || config.desktopAutoFollowEnabled === true,
     // With IPC live sync streaming content, deep-link refreshes are only needed
     // to navigate Desktop onto the phone-driven thread, not to reload content.
     navigationOnly: config.desktopIpcLiveSyncEnabled,
@@ -872,7 +850,7 @@ function startBridge({
     ? createDesktopIpcActionFollower({
       sendApplicationResponse,
       readConversationState: async (threadId) => seedConversationStateFromThreadRead(
-        await sendCodexRequest("thread/read", { threadId })
+        await sendCodexRequest("thread/read", buildCompleteThreadReadParams(threadId))
       ),
       forwardToLocalCodex: (rawMessage) => {
         observeDesktopIpcLiveOwnerInbound(rawMessage);
@@ -885,6 +863,9 @@ function startBridge({
       runtimeSettingsStore: threadRuntimeSettingsStore,
       socketPath: config.desktopIpcSocketPath || undefined,
       snapshotDebounceMs: config.desktopIpcSnapshotDebounceMs,
+      onFollowerStateChanged(threadId, following) {
+        desktopRefresher.handleFollowerStateChanged(threadId, following);
+      },
     })
     : null;
   const desktopIpcLiveOwner = !config.codexEndpoint
@@ -897,6 +878,9 @@ function startBridge({
       runtimeSettingsStore: threadRuntimeSettingsStore,
       socketPath: config.desktopIpcSocketPath || undefined,
       snapshotDebounceMs: config.desktopIpcSnapshotDebounceMs,
+      onFollowerStateChanged(threadId, following) {
+        desktopRefresher.handleFollowerStateChanged(threadId, following);
+      },
     })
     : null;
   let contextUsageWatcher = null;
@@ -1150,7 +1134,6 @@ function startBridge({
       stopContextUsageWatcher();
       // Relay reconnects are transport-only: keep local live observers running
       // so their output can enter secure replay and catch up on the next resume.
-      desktopRefresher.handleTransportReset();
       scheduleRelayReconnect(code);
     });
 
@@ -1382,15 +1365,7 @@ function startBridge({
           }),
           readJsonl: (jsonlRequest) => maybeBuildJsonlThreadTurnsListFallback(jsonlRequest, null),
         });
-        let responsePayload = selection.response;
-        if (selection.source === "canonical" && selection.jsonlFallback?.response?.result) {
-          responsePayload = maybeMergeLatestJsonlTurnIntoTurnsListResponse(
-            request,
-            selection.response,
-            selection.jsonlFallback.response.result
-          ) || selection.response;
-        }
-        sendBridgeManagedThreadTurnsListResponse(request, responsePayload, respondOnce, {
+        sendBridgeManagedThreadTurnsListResponse(request, selection.response, respondOnce, {
           skipJsonlArtifactAugmentation: selection.usesJsonl,
         });
       } catch (error) {

@@ -14,6 +14,10 @@ const {
 const { resolveCodexGeneratedImagesRoot } = require("./codex-home");
 const { buildApplyPatchFileChangeItem } = require("./apply-patch-changes");
 const {
+  expandExecWrapperToolCall,
+  isOrchestrationWaitCall,
+} = require("./codex-tool-wrapper");
+const {
   TERMINAL_TASK_EVENT_TYPES,
   terminalEventClosesTrackedTurn,
 } = require("./rollout-turn-semantics");
@@ -56,6 +60,8 @@ function createRolloutLiveMirrorController({
   now = () => Date.now(),
   setIntervalFn = setInterval,
   clearIntervalFn = clearInterval,
+  setImmediateFn = setImmediate,
+  clearImmediateFn = clearImmediate,
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   lookupTimeoutMs = DEFAULT_LOOKUP_TIMEOUT_MS,
   idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
@@ -110,6 +116,8 @@ function createRolloutLiveMirrorController({
       now,
       setIntervalFn,
       clearIntervalFn,
+      setImmediateFn,
+      clearImmediateFn,
       pollIntervalMs,
       lookupTimeoutMs,
       idleTimeoutMs,
@@ -157,6 +165,8 @@ function createThreadRolloutLiveMirror({
   now,
   setIntervalFn,
   clearIntervalFn,
+  setImmediateFn,
+  clearImmediateFn,
   pollIntervalMs,
   lookupTimeoutMs,
   idleTimeoutMs,
@@ -166,6 +176,7 @@ function createThreadRolloutLiveMirror({
   onStop = () => {},
 }) {
   const startedAt = now();
+  let lookupStartedAt = startedAt;
   const state = createMirrorState(threadId);
 
   let isStopped = false;
@@ -182,7 +193,10 @@ function createThreadRolloutLiveMirror({
   let wasSuppressed = false;
 
   const intervalId = setIntervalFn(tick, pollIntervalMs);
-  tick();
+  let initialTickId = setImmediateFn(() => {
+    initialTickId = null;
+    tick();
+  });
 
   function tick() {
     if (isStopped) {
@@ -191,9 +205,30 @@ function createThreadRolloutLiveMirror({
 
     try {
       const currentTime = now();
+      const suppressedBeforeScan = isSuppressed();
+      if (suppressedBeforeScan) {
+        if (!wasSuppressed) {
+          rolloutPath = null;
+          lastSize = 0;
+          partialLine = "";
+          didBootstrap = false;
+          resetRunState(state);
+        }
+        wasSuppressed = true;
+        return;
+      }
+      if (wasSuppressed) {
+        rolloutPath = null;
+        lastSize = 0;
+        partialLine = "";
+        didBootstrap = false;
+        resetRunState(state);
+        lookupStartedAt = currentTime;
+        wasSuppressed = false;
+      }
 
       if (!rolloutPath) {
-        if (currentTime - startedAt >= lookupTimeoutMs) {
+        if (currentTime - lookupStartedAt >= lookupTimeoutMs) {
           stop();
           return;
         }
@@ -209,20 +244,21 @@ function createThreadRolloutLiveMirror({
 
       const rolloutStat = fsModule.statSync(rolloutPath);
       const fileSize = rolloutStat.size;
-      // While another live source streams this thread the tail keeps consuming
-      // rollout lines with its emissions muted. Compare per-thread activity so
-      // a quiet Desktop turn stays owned, while newer rollout growth can recover
-      // from a stale connected snapshot.
+      // Re-check ownership with the rollout's activity time before bootstrapping.
+      // If another source owns the thread, leave the file untouched until that
+      // ownership expires.
       const suppressed = isSuppressed({
         fallbackActivityAt: Number(rolloutStat.mtimeMs) || 0,
       });
-      if (wasSuppressed && !suppressed && didBootstrap) {
+      if (suppressed) {
+        rolloutPath = null;
         lastSize = 0;
         partialLine = "";
         didBootstrap = false;
         resetRunState(state);
+        wasSuppressed = true;
+        return;
       }
-      wasSuppressed = suppressed;
       if (!didBootstrap) {
         didBootstrap = true;
         bootstrapFromExistingRollout({
@@ -354,6 +390,10 @@ function createThreadRolloutLiveMirror({
     // final partial-line flush must never leak the poll interval.
     isStopped = true;
     clearIntervalFn(intervalId);
+    if (initialTickId != null) {
+      clearImmediateFn(initialTickId);
+      initialTickId = null;
+    }
     if (partialLine) {
       const flushLine = partialLine;
       partialLine = "";
@@ -369,8 +409,8 @@ function createThreadRolloutLiveMirror({
   // Only a healthy, actively-tailed run with a real id counts: synthetic ids
   // are not actionable app-server turn ids, and suppressed/awaiting states
   // mean the mirror does not actually know what is running. While another live
-  // source owns the thread the tail keeps parsing with its emissions muted, so
-  // reporting that turn id would resurrect exactly the state the bridge muted.
+  // source owns the thread the mirror has no parsed file state, so reporting a
+  // turn id would resurrect exactly the state the bridge muted.
   function getActiveTurnId() {
     if (
       isStopped
@@ -950,6 +990,7 @@ function synthesizeNotificationsFromRolloutEntry(entry, state, { nowMs = Date.no
       state.commandCalls.clear();
       state.applyPatchCalls.clear();
       state.emittedPatchApplyEndCalls.clear();
+      state.wrappedExecCallIdsByOuterId.clear();
 
       const startedParams = {
         threadId: state.threadId,
@@ -1081,12 +1122,12 @@ function synthesizeNotificationsFromRolloutEntry(entry, state, { nowMs = Date.no
   }
 
   if (itemType === "functioncall") {
-    notifications.push(...toolStartNotifications(state, payload));
+    notifications.push(...projectedToolStartNotifications(state, payload));
     return notifications;
   }
 
   if (itemType === "customtoolcall") {
-    notifications.push(...customToolStartNotifications(state, payload));
+    notifications.push(...projectedToolStartNotifications(state, payload));
     return notifications;
   }
 
@@ -1326,6 +1367,29 @@ function extractResponseItemMessageText(payload) {
   return responseItemMessageText(payload);
 }
 
+function projectedToolStartNotifications(state, payload) {
+  if (isOrchestrationWaitCall(payload)) {
+    return [];
+  }
+
+  const projectedPayloads = expandExecWrapperToolCall(payload);
+  const outerCallId = projectedPayloads[0]?.remodexWrappedExecCallId;
+  if (outerCallId && projectedPayloads.length > 1) {
+    state.wrappedExecCallIdsByOuterId.set(
+      outerCallId,
+      projectedPayloads.map((projectedPayload) => (
+        readString(projectedPayload.call_id) || readString(projectedPayload.callId)
+      )).filter(Boolean)
+    );
+  }
+
+  return projectedPayloads.flatMap((projectedPayload) => (
+    normalizeRolloutItemType(projectedPayload.type) === "customtoolcall"
+      ? customToolStartNotifications(state, projectedPayload)
+      : toolStartNotifications(state, projectedPayload)
+  ));
+}
+
 function toolStartNotifications(state, payload) {
   if (!state.activeTurnId) {
     return [];
@@ -1383,6 +1447,7 @@ function toolStartNotifications(state, payload) {
     toolName,
     command: resolveToolCommand(toolName, argumentsObject),
     cwd: resolveToolWorkingDirectory(argumentsObject, state),
+    wrappedExecCall: Boolean(payload.remodexWrappedExecCallId),
   });
 
   if (isCommandToolName(toolName)) {
@@ -1411,6 +1476,8 @@ function toolStartNotifications(state, payload) {
       threadId: state.threadId,
       turnId: state.activeTurnId,
       call_id: callId,
+      itemId: callId,
+      status: "inProgress",
       message: activityMessage,
     }),
   ];
@@ -1461,6 +1528,7 @@ function customToolStartNotifications(state, payload) {
       toolName,
       command: toolName,
       cwd: readString(state.sessionMeta?.cwd) || "",
+      wrappedExecCall: Boolean(payload.remodexWrappedExecCallId),
     });
   }
 
@@ -1470,6 +1538,10 @@ function customToolStartNotifications(state, payload) {
       threadId: state.threadId,
       turnId: state.activeTurnId,
       call_id: callId,
+      ...(!state.applyPatchCalls.has(callId) ? {
+        itemId: callId,
+        status: "inProgress",
+      } : {}),
       message: activityMessage,
     }),
   ];
@@ -1544,8 +1616,28 @@ function toolOutputNotifications(state, payload) {
     return [];
   }
 
+  const wrappedCallIds = state.wrappedExecCallIdsByOuterId.get(callId);
+  if (Array.isArray(wrappedCallIds) && wrappedCallIds.length > 0) {
+    state.wrappedExecCallIdsByOuterId.delete(callId);
+    const outputRecipientId = wrappedCallIds.find((nestedCallId) => (
+      isCommandToolName(state.commandCalls.get(nestedCallId)?.toolName)
+    )) || wrappedCallIds[0];
+    return wrappedCallIds.flatMap((nestedCallId) => toolOutputNotifications(state, {
+      ...payload,
+      call_id: nestedCallId,
+      callId: nestedCallId,
+      output: nestedCallId === outputRecipientId ? payload.output : "",
+    }));
+  }
+
   const toolCall = state.commandCalls.get(callId);
   if (!toolCall) {
+    if (state.applyPatchCalls.has(callId)) {
+      return patchApplyEndNotifications(state, {
+        ...payload,
+        status: readString(payload.status) || "completed",
+      });
+    }
     return [];
   }
 
@@ -1555,13 +1647,16 @@ function toolOutputNotifications(state, payload) {
       threadId: state.threadId,
       turnId: state.activeTurnId,
       call_id: callId,
+      itemId: callId,
+      status: "completed",
       message: genericToolCompletionMessage(toolCall.toolName),
     }));
     state.commandCalls.delete(callId);
     return notifications;
   }
 
-  const output = readString(payload.output);
+  const rawOutput = extractToolOutputText(payload.output);
+  const output = toolCall.wrappedExecCall ? stripExecOutputEnvelope(rawOutput) : rawOutput;
   const notifications = [...ensureThinkingNotifications(state)];
   if (output) {
     notifications.push(createNotification("codex/event/exec_command_output_delta", {
@@ -1585,6 +1680,38 @@ function toolOutputNotifications(state, payload) {
   }));
   state.commandCalls.delete(callId);
   return notifications;
+}
+
+function extractToolOutputText(value) {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(extractToolOutputText).join("");
+  }
+  if (!value || typeof value !== "object") {
+    return "";
+  }
+
+  for (const key of ["text", "output_text", "outputText"]) {
+    if (typeof value[key] === "string") {
+      return value[key];
+    }
+  }
+  for (const key of ["content", "output", "result"]) {
+    const text = extractToolOutputText(value[key]);
+    if (text) {
+      return text;
+    }
+  }
+  return "";
+}
+
+function stripExecOutputEnvelope(output) {
+  return readString(output).replace(
+    /^Script [^\n]*\nWall time [^\n]*\nOutput:\n?/,
+    ""
+  );
 }
 
 function imageGenerationNotifications(state, payload, { preferCallId = false } = {}) {
@@ -1759,6 +1886,7 @@ function createMirrorState(threadId) {
     commandCalls: new Map(),
     applyPatchCalls: new Map(),
     emittedPatchApplyEndCalls: new Set(),
+    wrappedExecCallIdsByOuterId: new Map(),
     emittedAgentMessageKeys: new Set(),
     agentMessageOccurrencesByBaseKey: new Map(),
     pendingEventAgentMessageOccurrencesByBaseKey: new Map(),
@@ -2091,6 +2219,7 @@ function resetRunState(state) {
   state.commandCalls.clear();
   state.applyPatchCalls.clear();
   state.emittedPatchApplyEndCalls.clear();
+  state.wrappedExecCallIdsByOuterId.clear();
   state.emittedAgentMessageKeys.clear();
   state.agentMessageOccurrencesByBaseKey.clear();
   state.pendingEventAgentMessageOccurrencesByBaseKey.clear();

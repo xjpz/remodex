@@ -235,7 +235,11 @@ extension CodexService {
 
         let state = ThreadTimelineState(threadID: threadId)
         threadTimelineStateByThread[threadId] = state
-        refreshThreadTimelineState(for: threadId)
+        // The first materialization must not be starved by an open catch-up burst:
+        // build from whatever is already cached so a reopened chat paints instantly
+        // instead of showing "Loading chat" until the burst flushes. The flush still
+        // rebuilds unconditionally once replay settles.
+        refreshThreadTimelineState(for: threadId, ignoringCatchUpBurstSuppression: true)
         return state
     }
 
@@ -792,12 +796,15 @@ extension CodexService {
     // Returns sidebar-only chat badge state. This intentionally stays separate from
     // per-turn runtime truth so "chat finished unread" does not leak into timeline logic.
     func threadRunBadgeState(for threadId: String) -> CodexThreadRunBadgeState? {
-        // An approval prompt outranks the spinner: the run is not progressing, it is
-        // parked until the user answers, and that is the row worth opening first.
+        // A pending action outranks the spinner: the run is parked until the
+        // user responds, and that is the row worth opening first.
         if threadHasPendingApproval(threadId) {
             return .waitingOnUser
         }
         if threadHasActiveOrRunningTurn(threadId) {
+            if threadHasPendingStructuredUserInput(threadId) {
+                return .waitingOnUser
+            }
             return .running
         }
         // Goal lifecycle outranks stale ready/failed dots: an active goal keeps
@@ -819,6 +826,17 @@ extension CodexService {
             return .ready
         }
         return nil
+    }
+
+    // Structured questions are persisted as item-scoped system rows. Restrict
+    // this scan to active turns in threadRunBadgeState so sidebar projection
+    // remains cheap even for repositories with large histories.
+    private func threadHasPendingStructuredUserInput(_ threadId: String) -> Bool {
+        messagesByThread[threadId]?.contains { message in
+            message.role == .system
+                && message.kind == .userInputPrompt
+                && message.structuredUserInputRequest != nil
+        } == true
     }
 
     // Clears "ready/failed" badges when the user has opened a thread.
@@ -934,8 +952,24 @@ extension CodexService {
     }
 
     // Sets the active thread and lazily hydrates old messages from server history.
+    // Concurrent calls for the same thread (sidebar open + view lifecycle) coalesce
+    // into a single pipeline run instead of racing duplicate resume/history passes.
     @discardableResult
     func prepareThreadForDisplay(threadId: String) async -> Bool {
+        if let existingTask = prepareThreadDisplayTaskByThreadID[threadId] {
+            return await existingTask.value
+        }
+
+        let task = Task<Bool, Never> { @MainActor [weak self] in
+            guard let self else { return false }
+            defer { self.prepareThreadDisplayTaskByThreadID.removeValue(forKey: threadId) }
+            return await self.performPrepareThreadForDisplay(threadId: threadId)
+        }
+        prepareThreadDisplayTaskByThreadID[threadId] = task
+        return await task.value
+    }
+
+    private func performPrepareThreadForDisplay(threadId: String) async -> Bool {
         activeThreadId = threadId
         markThreadAsViewed(threadId)
         // Opening a thread mid-mirror-batch must render immediately: settle any
@@ -957,9 +991,21 @@ extension CodexService {
             return true
         }
 
+        // Under pagination the resume below intentionally excludes turns, so nothing in
+        // the resume/catch-up chain contributes to first paint. Start the history fetch
+        // now so the first page races those lifecycle round trips instead of queueing
+        // behind them; loadThreadHistoryIfNeeded coalesces any follow-up force callers.
+        let shouldDeferHeavyHydration = shouldDeferHeavyDisplayHydration(threadId: threadId)
+        var earlyHistoryTask: Task<Void, Never>?
+        if supportsTurnPagination, !shouldDeferHeavyHydration {
+            earlyHistoryTask = Task { @MainActor [weak self] in
+                await self?.syncThreadHistory(threadId: threadId, force: true)
+            }
+        }
+
         // Reopening a huge, already-materialized chat should prefer local persisted rows over
         // an immediate full resume/read pass, otherwise one tap can freeze the app on-device.
-        if shouldDeferHeavyDisplayHydration(threadId: threadId) {
+        if shouldDeferHeavyHydration {
             // Large chats still need one lightweight turn-state ping so reconnect can rediscover
             // a live run before we decide to trust the local persisted transcript.
             didRefreshRunningState = await refreshInFlightTurnState(threadId: threadId)
@@ -1018,7 +1064,13 @@ extension CodexService {
             return false
         }
         if shouldRequestImmediateSync {
-            requestImmediateActiveThreadSync(threadId: threadId, forceHistoryRefresh: true)
+            // When the paginated history fetch is already in flight from the start of
+            // this open, only refresh lifecycle/thread state instead of forcing a
+            // second fetch once the first one finishes.
+            requestImmediateActiveThreadSync(
+                threadId: threadId,
+                forceHistoryRefresh: earlyHistoryTask == nil
+            )
         }
         return true
     }
@@ -4026,6 +4078,32 @@ extension CodexService {
             return
         }
 
+        if let resolvedTurnId,
+           let explicitItemId,
+           let canonicalFinalMessageId = reconcileCanonicalFinalAnswerReplay(
+               threadId: threadId,
+               turnId: resolvedTurnId,
+               providerItemId: explicitItemId,
+               sourceItemKey: normalizedSourceItemKey,
+               assistantPhase: normalizedPhase,
+               canonicalText: trimmedText
+           ) {
+            assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
+            _ = mergeGeneratedImageArtifactsIntoAssistantMessage(
+                threadId: threadId,
+                turnId: resolvedTurnId,
+                assistantMessageId: canonicalFinalMessageId
+            )
+            persistMessages()
+            noteAssistantMessage(
+                threadId: threadId,
+                turnId: resolvedTurnId,
+                assistantMessageId: canonicalFinalMessageId
+            )
+            updateCurrentOutput(for: threadId)
+            return
+        }
+
         if let replayTerminalMessageId = absorbAssistantBlockReplayCompletion(
             threadId: threadId,
             turnId: resolvedTurnId,
@@ -4371,8 +4449,83 @@ extension CodexService {
         messagesByThread[threadId]?[messageIndex].sourceItemKey = sourceItemKey
     }
 
-    // A canonical provider id replaces a synthetic mirror id. Move every live lookup and queued
-    // delta to the new identity in the same mutation so a late chunk cannot revive a second row.
+    // Desktop live mirroring and the canonical completion stream can expose the
+    // same final answer under different provider ids. Reconcile only a proven
+    // same-turn final row; commentary and distinct completed prose stay separate.
+    func reconcileCanonicalFinalAnswerReplay(
+        threadId: String,
+        turnId: String,
+        providerItemId: String,
+        sourceItemKey: String?,
+        assistantPhase: String?,
+        canonicalText: String
+    ) -> String? {
+        guard Self.isFinalAnswerAssistantPhase(assistantPhase),
+              let candidateIndex = messagesByThread[threadId]?.indices.reversed().first(where: { index in
+                  guard let candidate = messagesByThread[threadId]?[index],
+                        candidate.role == .assistant,
+                        candidate.kind == .chat,
+                        candidate.turnId == turnId,
+                        candidate.itemId != providerItemId else {
+                      return false
+                  }
+
+                  let textMatches = Self.assistantFinalReplayTextsMatch(
+                      candidate.text,
+                      canonicalText
+                  )
+                  if Self.isFinalAnswerAssistantPhase(candidate.assistantPhase) {
+                      return candidate.isStreaming || textMatches
+                  }
+
+                  let hasProvisionalIdentity = candidate.itemId.map {
+                      CodexSyntheticIdentifiers.isMirrorMintedItemID($0)
+                  } ?? true
+                  return candidate.assistantPhase == nil
+                      && textMatches
+                      && (candidate.isStreaming || hasProvisionalIdentity)
+              }),
+              let existingText = messagesByThread[threadId]?[candidateIndex].text,
+              let messageId = messagesByThread[threadId]?[candidateIndex].id else {
+            return nil
+        }
+
+        messagesByThread[threadId]?[candidateIndex].text = Self.assistantCompletionTextPreservingImages(
+            existingText: existingText,
+            canonicalText: canonicalText
+        )
+        messagesByThread[threadId]?[candidateIndex].isStreaming = false
+        applyAssistantPhaseIfNeeded(
+            threadId: threadId,
+            messageIndex: candidateIndex,
+            assistantPhase: assistantPhase
+        )
+        applyAssistantSourceItemKeyIfNeeded(
+            threadId: threadId,
+            messageIndex: candidateIndex,
+            sourceItemKey: sourceItemKey
+        )
+        promoteAssistantItemIdentity(
+            threadId: threadId,
+            turnId: turnId,
+            messageIndex: candidateIndex,
+            providerItemId: providerItemId
+        )
+        refreshDerivedPlanMetadata(threadId: threadId, messageIndex: candidateIndex)
+        return messageId
+    }
+
+    private static func assistantFinalReplayTextsMatch(_ existing: String, _ incoming: String) -> Bool {
+        guard existing.utf8.count <= MessageTextProcessingPolicy.largeTextByteLimit,
+              incoming.utf8.count <= MessageTextProcessingPolicy.largeTextByteLimit else {
+            return existing == incoming
+        }
+        return existing.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+            == incoming.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+
+    // A canonical provider id replaces a synthetic or source-rotated live id. Move every live
+    // lookup and queued delta in the same mutation so a late chunk cannot revive a second row.
     func promoteAssistantItemIdentity(
         threadId: String,
         turnId: String,
@@ -5778,11 +5931,14 @@ extension CodexService {
     }
 
     // Rebuilds one thread's render snapshot from service-owned caches after any timeline mutation.
-    func refreshThreadTimelineState(for threadId: String) {
+    func refreshThreadTimelineState(
+        for threadId: String,
+        ignoringCatchUpBurstSuppression: Bool = false
+    ) {
         // While a catch-up burst is applying replayed history, defer the rebuild
         // so the reopened thread settles in one pass at flush time
         // (finishTimelineCatchUpBurst always rebuilds unconditionally).
-        if timelineCatchUpBurstThreadIDs.contains(threadId) {
+        if !ignoringCatchUpBurstSuppression, timelineCatchUpBurstThreadIDs.contains(threadId) {
             return
         }
         let state = timelineState(for: threadId)

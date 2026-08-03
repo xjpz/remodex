@@ -82,6 +82,133 @@ test("desktop-origin active runs replay thinking and exec command activity on re
   assert.equal(outbound[5].params.remodexRolloutBootstrapReplay, undefined);
 });
 
+test("desktop-origin exec wrappers mirror nested commands and hide cell waits", async (t) => {
+  const { homeDir } = createTemporaryRolloutHome({
+    threadId: "thread-wrapped-command",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [
+      taskStarted("turn-wrapped-command"),
+      customToolCall("outer-exec", "exec", [
+        "const result = await tools.exec_command({",
+        "  cmd: \"gh run view 30709849174 --json status,conclusion\",",
+        "  workdir: \"/repo\",",
+        "});",
+        "text(result.output);",
+      ].join("\n")),
+      customToolCallOutput("outer-exec", [
+        { type: "input_text", text: "Script completed\nWall time 0.2 seconds\nOutput:\n" },
+        { type: "input_text", text: "{\"status\":\"completed\"}" },
+      ]),
+      functionCall("outer-wait", "wait", {
+        cell_id: "382",
+        yield_time_ms: 30000,
+      }),
+      functionCallOutput("outer-wait", "completed"),
+    ],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => {
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    pollIntervalMs: 5,
+    idleTimeoutMs: 50,
+  });
+  t.after(() => controller.stopAll());
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-wrapped-command" },
+  }));
+
+  await wait(30);
+
+  assert.deepEqual(outbound.map((message) => message.method), [
+    "turn/started",
+    "item/reasoning/textDelta",
+    "codex/event/exec_command_begin",
+    "codex/event/exec_command_output_delta",
+    "codex/event/exec_command_end",
+    "turn/activity",
+  ]);
+  assert.equal(outbound[2].params.command, "gh run view 30709849174 --json status,conclusion");
+  assert.equal(outbound[2].params.cwd, "/repo");
+  assert.equal(outbound[3].params.chunk, "{\"status\":\"completed\"}");
+  assert.equal(outbound.some((message) => /(?:exec|wait)/i.test(message.params?.message || "")), false);
+});
+
+test("desktop-origin exec wrappers complete every nested parallel tool", async (t) => {
+  const { homeDir } = createTemporaryRolloutHome({
+    threadId: "thread-wrapped-parallel",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [
+      taskStarted("turn-wrapped-parallel"),
+      customToolCall("outer-parallel", "exec", [
+        "const results = await Promise.all([",
+        "  tools.exec_command({cmd: \"git status --short\", workdir: \"/repo\"}),",
+        "  tools.write_stdin({session_id: 33518, chars: \"\"}),",
+        "]);",
+        "for (const result of results) text(result.output);",
+      ].join("\n")),
+      customToolCallOutput("outer-parallel", [
+        { type: "input_text", text: "Script completed\nWall time 0.2 seconds\nOutput:\n" },
+        { type: "input_text", text: "clean" },
+      ]),
+    ],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => {
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    pollIntervalMs: 5,
+    idleTimeoutMs: 50,
+  });
+  t.after(() => controller.stopAll());
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-wrapped-parallel" },
+  }));
+
+  await wait(30);
+
+  assert.deepEqual(outbound.map((message) => message.method), [
+    "turn/started",
+    "item/reasoning/textDelta",
+    "codex/event/exec_command_begin",
+    "codex/event/background_event",
+    "codex/event/exec_command_output_delta",
+    "codex/event/exec_command_end",
+    "codex/event/background_event",
+    "turn/activity",
+  ]);
+  assert.equal(outbound[2].params.command, "git status --short");
+  assert.equal(outbound[3].params.message, "Writing to terminal");
+  assert.equal(outbound[3].params.itemId, "outer-parallel:nested:2");
+  assert.equal(outbound[3].params.status, "inProgress");
+  assert.equal(outbound[4].params.chunk, "clean");
+  assert.equal(outbound[6].params.message, "Wrote to terminal");
+  assert.equal(outbound[6].params.itemId, "outer-parallel:nested:2");
+  assert.equal(outbound[6].params.status, "completed");
+});
+
 test("desktop-origin active runs emit activity heartbeat while rollout is quiet", async (t) => {
   const { homeDir } = createTemporaryRolloutHome({
     threadId: "thread-heartbeat",
@@ -274,7 +401,93 @@ test("rollout mirror suppression silences threads owned by another live source",
 
   await wait(30);
   assert.deepEqual(outbound, []);
-  assert.ok(fallbackActivityAt > 0, "source arbitration should receive rollout activity time");
+  assert.equal(fallbackActivityAt, 0, "suppressed mirrors should not stat the rollout");
+});
+
+test("rollout mirror defers its first filesystem scan until after observeInbound returns", (t) => {
+  const { homeDir } = createTemporaryRolloutHome({
+    threadId: "thread-deferred-scan",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [taskStarted("turn-deferred-scan")],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  const trackedFs = createTrackedMirrorFs();
+  let firstTick = null;
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse() {},
+    fsModule: trackedFs,
+    setIntervalFn() {
+      return 1;
+    },
+    clearIntervalFn() {},
+    setImmediateFn(callback) {
+      firstTick = callback;
+      return 2;
+    },
+    clearImmediateFn() {},
+  });
+  t.after(() => {
+    controller.stopAll();
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-deferred-scan" },
+  }));
+
+  assert.equal(trackedFs.readdirCalls, 0);
+  assert.ok(firstTick);
+  firstTick();
+  assert.ok(trackedFs.readdirCalls > 0);
+});
+
+test("rollout mirror performs no filesystem scan or bootstrap while suppressed", (t) => {
+  const { homeDir } = createTemporaryRolloutHome({
+    threadId: "thread-suppressed-scan",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [taskStarted("turn-suppressed-scan")],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  const trackedFs = createTrackedMirrorFs();
+  let firstTick = null;
+  let intervalTick = null;
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse() {},
+    fsModule: trackedFs,
+    shouldSuppressThread: () => true,
+    setIntervalFn(callback) {
+      intervalTick = callback;
+      return 1;
+    },
+    clearIntervalFn() {},
+    setImmediateFn(callback) {
+      firstTick = callback;
+      return 2;
+    },
+    clearImmediateFn() {},
+  });
+  t.after(() => {
+    controller.stopAll();
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-suppressed-scan" },
+  }));
+  firstTick();
+  intervalTick();
+
+  assert.equal(trackedFs.readdirCalls, 0);
+  assert.equal(trackedFs.statCalls, 0);
+  assert.equal(trackedFs.readCalls, 0);
 });
 
 test("suppression lift re-bootstraps the muted tail so a running thread recovers", async (t) => {
@@ -314,9 +527,8 @@ test("suppression lift re-bootstraps the muted tail so a running thread recovers
     },
   }));
 
-  // The muted tail consumes the whole rollout without mirroring anything, and
-  // must not leak its parsed turn through the turn-state probe either: that is
-  // the very state the bridge decided another live source owns.
+  // A muted tail does not scan or parse the rollout, and must not leak a turn
+  // through the state probe: that is the state another live source owns.
   await wait(30);
   assert.deepEqual(outbound, []);
   assert.equal(controller.getActiveTurnId("thread-unmute"), null);
@@ -2202,6 +2414,8 @@ test("desktop-origin rollouts mirror custom apply_patch as file-change lifecycle
   assert.equal(outbound[2].params.itemId, "call-patch");
   assert.equal(outbound[2].params.status, "inProgress");
   assert.equal(outbound[2].params.changes[0].path, "Sources/App.swift");
+  assert.equal(outbound[3].params.itemId, undefined);
+  assert.equal(outbound[3].params.status, undefined);
   assert.equal(outbound[4].params.itemId, "call-patch");
   assert.equal(outbound[4].params.changes[0].path, "Sources/App.swift");
   assert.equal(outbound[4].params.changes[0].kind, "update");
@@ -2498,6 +2712,27 @@ function appendRolloutLines(rolloutPath, lines) {
   fs.appendFileSync(rolloutPath, `${lines.join("\n")}\n`);
 }
 
+function createTrackedMirrorFs() {
+  return {
+    ...fs,
+    readdirCalls: 0,
+    statCalls: 0,
+    readCalls: 0,
+    readdirSync(...args) {
+      this.readdirCalls += 1;
+      return fs.readdirSync(...args);
+    },
+    statSync(...args) {
+      this.statCalls += 1;
+      return fs.statSync(...args);
+    },
+    readSync(...args) {
+      this.readCalls += 1;
+      return fs.readSync(...args);
+    },
+  };
+}
+
 function taskStarted(turnId) {
   return JSON.stringify({
     timestamp: "2026-03-15T19:47:37.000Z",
@@ -2674,6 +2909,18 @@ function customToolCall(callId, name, input) {
       call_id: callId,
       name,
       input,
+    },
+  });
+}
+
+function customToolCallOutput(callId, output) {
+  return JSON.stringify({
+    timestamp: "2026-03-15T19:47:39.000Z",
+    type: "response_item",
+    payload: {
+      type: "custom_tool_call_output",
+      call_id: callId,
+      output,
     },
   });
 }
