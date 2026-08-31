@@ -333,6 +333,7 @@
 				A9F1B2C3D4E5F60718293A47 /* CodexStructuredUserInputDecodeTests.swift */,
 				B3C4D5E6F708192A3B4C5D6F /* CodexPlanModeTests.swift */,
 				4EEB36EBEA2A475AC9B30B1F /* TurnTimelineReducerTests.swift */,
+				BFA160000000000000000002 /* TerminalSelectableTextNormalizerTests.swift */,
 				5B10CDE1A2B3C4D5E6F70002 /* StreamingMarkdownBlockSplitterTests.swift */,
 				E6F1A2B3C4D5E6F708192A50 /* UserBubbleInlineMarkdownRendererTests.swift */,
 			);
@@ -747,6 +748,7 @@
 				A9F1B2C3D4E5F60718293A46 /* CodexStructuredUserInputDecodeTests.swift in Sources */,
 				B3C4D5E6F708192A3B4C5D6E /* CodexPlanModeTests.swift in Sources */,
 				4CCE0926DAD312571934343A /* TurnTimelineReducerTests.swift in Sources */,
+				BFA160000000000000000001 /* TerminalSelectableTextNormalizerTests.swift in Sources */,
 				5B10CDE1A2B3C4D5E6F70001 /* StreamingMarkdownBlockSplitterTests.swift in Sources */,
 				E6F1A2B3C4D5E6F708192A51 /* UserBubbleInlineMarkdownRendererTests.swift in Sources */,
 			);
@@ -795,7 +797,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.6;
+				MARKETING_VERSION = 3.2;
 				PRODUCT_BUNDLE_IDENTIFIER = cc.xjpz.Remodex.RemodexWidget;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -869,7 +871,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.6;
+				MARKETING_VERSION = 3.2;
 				PRODUCT_BUNDLE_IDENTIFIER = cc.xjpz.Remodex.RemodexWidget;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -1076,7 +1078,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 3.1;
+				MARKETING_VERSION = 3.2;
 				PRODUCT_BUNDLE_IDENTIFIER = cc.xjpz.Remodex;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -1123,7 +1125,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 3.1;
+				MARKETING_VERSION = 3.2;
 				PRODUCT_BUNDLE_IDENTIFIER = cc.xjpz.Remodex;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
