@@ -175,6 +175,13 @@ extension CodexService {
 
     // Handles stream notifications to keep UI state in sync.
     func handleNotification(method: String, params: JSONValue?) {
+        if method == "remodex/runtimeSettings/updated",
+           let threadId = params?.objectValue?["threadId"]?.stringValue,
+           let value = params?.objectValue?["runtimeSettings"],
+           let settings = decodeModel(CodexRuntimeSettings.self, from: value) {
+            applyConfirmedRuntimeSettings(settings, threadId: threadId)
+            return
+        }
         let paramsObject = params?.objectValue
         let previousReplayScope = isApplyingReplayedBridgeEvent
         if isBufferedReplayResetEvent(paramsObject) {
@@ -419,6 +426,7 @@ extension CodexService {
     // Mirrored metadata/lifecycle events describe list or prompt state, not live
     // desktop work; they must never mark a thread as running.
     private static let nonActivityDesktopMirrorMethods: Set<String> = [
+        "thread/started",
         "thread/archived",
         "thread/unarchived",
         "thread/replaced",
@@ -632,10 +640,15 @@ extension CodexService {
         }
 
         upsertThread(thread, treatAsServerState: true)
-        if activeThreadId == nil {
+        let isDesktopMetadata = isDesktopMirroredBridgeEvent(paramsObject)
+        if activeThreadId == nil, !isDesktopMetadata {
             activeThreadId = thread.id
         }
-        requestImmediateSync(threadId: thread.id)
+        // Desktop can publish thread metadata for every mounted chat. Refresh
+        // history only for the phone's open chat; metadata is not a new run.
+        if !isDesktopMetadata || thread.id == activeThreadId {
+            requestImmediateSync(threadId: thread.id)
+        }
     }
 
     // Mirrors desktop behavior: when server pushes a thread rename, update local

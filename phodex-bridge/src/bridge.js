@@ -68,6 +68,13 @@ const {
 } = require("./desktop-ipc-action-follower");
 const { createDesktopIpcLiveOwner } = require("./desktop-ipc-live-owner");
 const { createThreadRuntimeSettingsStore } = require("./thread-runtime-settings-store");
+const { normalizeServiceTier, hasOwn } = require("./codex-runtime-settings");
+const {
+  APP_SERVER_SOURCE,
+  DESKTOP_IPC_SOURCE,
+  createThreadActivityProjector,
+} = require("./thread-activity-projector");
+const { createThreadActivityStore } = require("./thread-activity-store");
 const { createThreadListProvenanceEnricher } = require("./thread-list-provenance");
 const { createWorktreeOriginEnricher } = require("./worktree-origin");
 const { forEachThreadRowInResponse } = require("./thread-row-enrichment");
@@ -576,6 +583,7 @@ function annotateTurnStateProbeWithMirrorActiveTurn(request, response, getMirror
 
 function canonicalThreadTurnsListRequest(request) {
   const params = { ...(request?.params || {}) };
+  params.itemsView ??= params.remodexTurnStateOnly === true ? "summary" : "full";
   delete params.remodexRequireCanonical;
   delete params.remodexTurnStateOnly;
   if (params.cursor === JSONL_OLDER_HANDOFF_CURSOR || threadTurnsListHandoffDescriptor(params.cursor)) {
@@ -737,9 +745,8 @@ function startBridge({
   const relaySessionUrl = `${relayBaseUrl}/${sessionId}`;
   const notificationSecret = randomBytes(24).toString("hex");
   const desktopRefresher = new CodexDesktopRefresher({
-    // IPC snapshots are accepted only after Codex mounts the route and
-    // announces itself as a follower. Auto-follow performs that one-time
-    // activation; refreshEnabled still controls the legacy reload workaround.
+    // Opening a thread manually establishes its IPC subscription. Automatic
+    // navigation and the legacy refresh workaround both require an opt-in.
     enabled: config.refreshEnabled || config.desktopAutoFollowEnabled === true,
     // With IPC live sync streaming content, deep-link refreshes are only needed
     // to navigate Desktop onto the phone-driven thread, not to reload content.
@@ -782,9 +789,23 @@ function startBridge({
   const jsonlTurnsListRolloutCacheByThread = new Map();
   const jsonlTurnsListRolloutMissCacheByThread = new Map();
   const threadTurnsListFastPageCoordinator = createThreadTurnsListFastPageCoordinator();
-  const threadRuntimeSettingsStore = createThreadRuntimeSettingsStore();
+  const threadRuntimeSettingsStore = createThreadRuntimeSettingsStore({
+    onChange(threadId, runtimeSettings) {
+      sendApplicationResponse(JSON.stringify({
+        method: "remodex/runtimeSettings/updated",
+        params: { threadId, runtimeSettings },
+      }));
+    },
+  });
   const threadListProvenanceEnricher = createThreadListProvenanceEnricher();
   const worktreeOriginEnricher = createWorktreeOriginEnricher();
+  const activityProjector = createThreadActivityProjector();
+  const activityStore = createThreadActivityStore({
+    sendApplicationResponse,
+    onEvict(threadId, source) {
+      activityProjector.forget(threadId, source);
+    },
+  });
   const trackedForwardedRequestMethods = new Set([
     "account/login/start",
     "account/login/cancel",
@@ -814,6 +835,7 @@ function startBridge({
       sendRelayRegistrationUpdate(nextDeviceState);
     },
     onSecureSessionReady(session) {
+      activityStore.resetSubscriber();
       activePhoneSummary = buildActivePhoneSummary(session, deviceState);
       const lastPublishedBridgeStatus = bridgeStatusPublisher.latest();
       if (lastPublishedBridgeStatus) {
@@ -840,9 +862,10 @@ function startBridge({
       // authoritative, but yields an active cache that stopped broadcasting;
       // a later Desktop snapshot is announced as a new source epoch so the
       // phone performs canonical repair instead of mixing both mirrors.
-      shouldSuppressThread: (threadId) => shouldSuppressRolloutMirrorForThread(
+      shouldSuppressThread: (threadId, context) => shouldSuppressRolloutMirrorForThread(
         threadId,
-        { desktopIpcActionFollower, desktopIpcLiveOwner }
+        { desktopIpcActionFollower, desktopIpcLiveOwner },
+        context
       ),
     })
     : null;
@@ -853,6 +876,7 @@ function startBridge({
         await sendCodexRequest("thread/read", buildCompleteThreadReadParams(threadId))
       ),
       forwardToLocalCodex: (rawMessage) => {
+        if (handleLocalRuntimeSettingsRequest(parseBridgeMessage(rawMessage))) return;
         observeDesktopIpcLiveOwnerInbound(rawMessage);
         forwardInboundRequestToCodex(rawMessage);
       },
@@ -866,6 +890,7 @@ function startBridge({
       onFollowerStateChanged(threadId, following) {
         desktopRefresher.handleFollowerStateChanged(threadId, following);
       },
+      onActivityObservation: handleDesktopActivityObservation,
     })
     : null;
   const desktopIpcLiveOwner = !config.codexEndpoint
@@ -970,6 +995,7 @@ function startBridge({
     clearRelayWatchdog();
     bridgeStatusPublisher.stopHeartbeat();
     stopContextUsageWatcher();
+    activityStore.dispose();
     rolloutLiveMirror?.stopAll();
     desktopIpcActionFollower?.stopAll();
     desktopIpcLiveOwner?.stopAll();
@@ -1161,6 +1187,14 @@ function startBridge({
     // Streaming deltas make this the hottest path in the bridge: parse the
     // envelope once and share the read-only object with every observer.
     const parsedMessage = parseBridgeMessage(message);
+    if (parsedMessage?.result && forwardedInitializeRequestIds.has(String(parsedMessage.id))) {
+      parsedMessage.result.remodexRuntimeSettingsVersion = 2;
+      message = JSON.stringify(parsedMessage);
+    }
+    if (parsedMessage?.method === "thread/settings/updated"
+      && parsedMessage.params?.threadSettings) {
+      threadRuntimeSettingsStore.observe(parsedMessage.params.threadId, parsedMessage.params.threadSettings);
+    }
     if (handleBridgeManagedCodexResponse(message, parsedMessage)) {
       return;
     }
@@ -1168,6 +1202,7 @@ function startBridge({
     trackCodexHandshakeState(message, parsedMessage);
     desktopRefresher.handleOutbound(message, parsedMessage);
     desktopIpcLiveOwner?.observeOutbound(message, parsedMessage);
+    observeAppServerActivity(parsedMessage);
     pushNotificationTracker.handleOutbound(message, parsedMessage);
     rememberThreadFromMessage("codex", message, parsedMessage);
     secureTransport.queueOutboundApplicationMessage(
@@ -1177,6 +1212,7 @@ function startBridge({
   });
 
   codex.onClose(() => {
+    activityStore.markSourceStale(APP_SERVER_SOURCE);
     const wasShuttingDown = isShuttingDown;
     clearRelayWatchdog();
     bridgeStatusPublisher.stopHeartbeat();
@@ -1208,7 +1244,11 @@ function startBridge({
 
   // Routes decrypted app payloads through the same bridge handlers as before.
   function handleApplicationMessage(rawMessage) {
+    rawMessage = normalizePhoneRuntimeRequest(rawMessage);
     const parsedMessage = parseBridgeMessage(rawMessage);
+    if (activityStore.handleRequest(parsedMessage)) {
+      return;
+    }
     if (handleBridgeManagedHandshakeMessage(rawMessage, sendApplicationResponse, parsedMessage)) {
       return;
     }
@@ -1244,7 +1284,7 @@ function startBridge({
     }
     if (handleGitRequest(rawMessage, sendApplicationResponse, {
       codexAppPath: config.codexAppPath,
-      onThreadNameSet: sendThreadNameUpdatedNotification,
+      sendCodexRequest,
     })) {
       return;
     }
@@ -1258,11 +1298,30 @@ function startBridge({
     if (desktopIpcActionFollower?.observeInbound(rawMessage, parsedMessage)) {
       return;
     }
+    if (handleLocalRuntimeSettingsRequest(parsedMessage)) return;
     observeDesktopIpcLiveOwnerInbound(rawMessage, parsedMessage);
     if (handleBridgeManagedThreadTurnsListRequest(rawMessage, sendApplicationResponse)) {
       return;
     }
     forwardInboundRequestToCodex(rawMessage);
+  }
+
+  function handleLocalRuntimeSettingsRequest(parsedMessage) {
+    if (parsedMessage?.method === "thread/settings/update" && parsedMessage.id != null) {
+      const { threadId, ...settings } = parsedMessage.params || {};
+      const update = desktopIpcLiveOwner?.updateThreadSettings
+        ? desktopIpcLiveOwner.updateThreadSettings(threadId, settings)
+        : sendCodexRequest("thread/settings/update", { threadId, ...settings }).then(() => ({
+          runtimeSettings: threadRuntimeSettingsStore.commit(threadId, settings, { source: "phone" }),
+        }));
+      Promise.resolve(update).then((result) => {
+        sendApplicationResponse(JSON.stringify({ id: parsedMessage.id, result }));
+      }).catch((error) => {
+        sendApplicationResponse(createJsonRpcErrorResponse(parsedMessage.id, error, "runtime_settings_update_failed"));
+      });
+      return true;
+    }
+    return false;
   }
 
   function forwardInboundRequestToCodex(rawMessage) {
@@ -1315,31 +1374,64 @@ function startBridge({
     }
   }
 
+  function observeAppServerActivity(message) {
+    if (isShuttingDown) {
+      return;
+    }
+    const projection = activityProjector.observeAppServer(message);
+    if (projection?.entry) {
+      const entry = projection.entry;
+      const previous = activityStore.get(entry.threadId);
+      if (previous?.source === DESKTOP_IPC_SOURCE
+          && !desktopIpcLiveOwner?.isThreadOwned(entry.threadId)) {
+        // Catalog changes do not transfer runtime ownership to this app-server.
+        if (message.method === "thread/name/updated" || message.method === "thread/started") {
+          activityStore.upsert({
+            ...previous,
+            ...(entry.title ? { title: entry.title } : {}),
+            ...(entry.cwd ? { cwd: entry.cwd } : {}),
+          });
+        }
+        return;
+      }
+      activityStore.upsert({
+        ...(previous?.title ? { title: previous.title } : {}),
+        ...(previous?.cwd ? { cwd: previous.cwd } : {}),
+        ...entry,
+      });
+    } else if (projection?.removedThreadId) {
+      activityStore.remove(projection.removedThreadId);
+    }
+  }
+
+  function handleDesktopActivityObservation(observation) {
+    if (isShuttingDown) {
+      return;
+    }
+    if (observation?.type === "state") {
+      const entry = activityProjector.projectDesktopState(
+        observation.threadId,
+        observation.state,
+        observation.sourceGeneration
+      );
+      activityStore.upsert(entry);
+      return;
+    }
+    if (observation?.type === "disconnected") {
+      activityStore.markSourceStale(DESKTOP_IPC_SOURCE, observation.sourceGeneration);
+      return;
+    }
+    if (observation?.type === "removed") {
+      activityStore.remove(observation.threadId, { source: DESKTOP_IPC_SOURCE });
+    }
+  }
+
   // Encrypts bridge-generated responses instead of letting the relay see plaintext.
   function sendApplicationResponse(rawMessage) {
     secureTransport.queueOutboundApplicationMessage(
       sanitizeRelayBoundCodexMessage(rawMessage),
       sendRelayWireMessage
     );
-  }
-
-  // Mirrors accepted local renames back to the phone using the existing push-event shape.
-  function sendThreadNameUpdatedNotification(result) {
-    const threadId = readString(result?.threadId || result?.thread_id);
-    const name = readString(result?.name || result?.title);
-    if (!threadId || !name) {
-      return;
-    }
-
-    sendApplicationResponse(JSON.stringify({
-      method: "thread/name/updated",
-      params: {
-        threadId,
-        thread_id: threadId,
-        name,
-        title: name,
-      },
-    }));
   }
 
   function handleBridgeManagedThreadTurnsListRequest(rawMessage, sendResponse = sendApplicationResponse) {
@@ -1662,6 +1754,10 @@ function startBridge({
     if (relaySanitizedRequestMethods.has(method)) {
       const trackedRequest = {
         method,
+        isActiveThreadCatalog: method === "thread/list"
+          && parsed.params?.archived !== true
+          && !parsed.params?.cursor,
+        threadListLimit: method === "thread/list" ? parsed.params?.limit : undefined,
         threadId: method === "thread/turns/list" || method === "thread/read" || method === "thread/resume"
           ? threadIdFromRequestParams(parsed.params)
           : "",
@@ -1720,6 +1816,9 @@ function startBridge({
         worktreeOriginEnricher.attachToThread(thread);
       });
       normalizedMessage = JSON.stringify(parsed);
+      if (trackedRequest.isActiveThreadCatalog) {
+        desktopIpcActionFollower?.observeThreadListResponse(parsed.result, { limit: trackedRequest.threadListLimit });
+      }
     }
 
     return sanitizeThreadHistoryImagesForRelay(normalizedMessage, trackedRequest.method, trackedRequest);
@@ -1919,6 +2018,7 @@ function startBridge({
         id: parsed.id,
         result: {
           bridgeManaged: true,
+          remodexRuntimeSettingsVersion: 2,
         },
       }));
       return true;
@@ -2430,6 +2530,25 @@ function disableUnsupportedReasoningSummaryForTurnStart(rawMessage) {
       summary: "none",
     },
   });
+}
+
+// Upgrade the old phone wire convention once at ingress. Internally an omitted
+// speed always inherits; modern clients distinguish that from explicit Standard.
+function normalizePhoneRuntimeRequest(rawMessage) {
+  const parsed = parseBridgeJSON(rawMessage);
+  if (!parsed || !["turn/start", "thread/start", "thread/settings/update"].includes(parsed.method)
+    || !parsed.params || typeof parsed.params !== "object") return rawMessage;
+  const params = { ...parsed.params };
+  if (parsed.method === "turn/start" && params.remodexRuntimeSettingsVersion !== 2
+    && !hasOwn(params, "serviceTier") && !hasOwn(params, "service_tier")) {
+    params.serviceTier = "default";
+  }
+  delete params.remodexRuntimeSettingsVersion;
+  if (hasOwn(params, "serviceTier") && params.serviceTier != null) {
+    params.serviceTier = normalizeServiceTier(params.serviceTier)
+      ?? (parsed.method === "thread/settings/update" ? null : "default");
+  }
+  return JSON.stringify({ ...parsed, params });
 }
 
 function normalizeTurnStartParamsForCodex(params) {
@@ -5035,12 +5154,12 @@ function persistBridgePreferences(
 function shouldSuppressRolloutMirrorForThread(
   threadId,
   { desktopIpcActionFollower = null, desktopIpcLiveOwner = null } = {},
-  { fallbackActivityAt = 0 } = {}
+  context = {}
 ) {
   // Desktop ownership is an expiring live lease, not a permanent boolean. A
   // stale IPC snapshot used to mute an actively growing rollout forever.
   const followerIsFresh = typeof desktopIpcActionFollower?.hasFreshLiveThreadState === "function"
-    ? desktopIpcActionFollower.hasFreshLiveThreadState(threadId, { fallbackActivityAt })
+    ? desktopIpcActionFollower.hasFreshLiveThreadState(threadId, context)
     : desktopIpcActionFollower?.hasLiveThreadState(threadId);
   const ownerIsFresh = typeof desktopIpcLiveOwner?.isFreshThreadOwned === "function"
     ? desktopIpcLiveOwner.isFreshThreadOwned(threadId)
@@ -5061,6 +5180,7 @@ module.exports = {
   isContextualUserItemNotification,
   maybeMergeLatestJsonlTurnIntoTurnsListResponse,
   normalizeTurnStartForCodex,
+  normalizePhoneRuntimeRequest,
   normalizeRelayBoundJsonRpcMessage,
   persistBridgePreferences,
   resolveJsonlTurnsListRolloutPathForFallback,

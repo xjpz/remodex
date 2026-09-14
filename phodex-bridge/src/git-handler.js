@@ -69,9 +69,6 @@ function handleGitRequest(rawMessage, sendResponse, options = {}) {
   handleGitMethod(method, params, methodOptions)
     .then((result) => {
       sendResponse(JSON.stringify({ id, result }));
-      if (method === "thread/name/set") {
-        options.onThreadNameSet?.(result);
-      }
     })
     .catch((err) => {
       const errorCode = err.errorCode || "git_error";
@@ -96,7 +93,7 @@ async function handleGitMethod(method, params, options = {}) {
     return threadGenerateTitle(params, options);
   }
   if (method === "thread/name/set") {
-    return threadNameSet(params);
+    return threadNameSet(params, options);
   }
 
   const cwd = await resolveGitCwd(params);
@@ -153,8 +150,9 @@ async function handleGitMethod(method, params, options = {}) {
   }
 }
 
-// Owns mobile thread renames locally so they do not fall through to unsupported Codex RPC.
-function threadNameSet(params) {
+// Normalize mobile aliases, then persist through the same catalog RPC as Desktop.
+// The app-server emits thread/name/updated to the phone and live IPC owner.
+async function threadNameSet(params, { sendCodexRequest } = {}) {
   const threadId = normalizeNonEmptyLine(params.threadId || params.thread_id || params.conversationId || params.conversation_id);
   const name = normalizeNonEmptyLine(params.name || params.threadName || params.thread_name || params.title);
   if (!threadId) {
@@ -163,6 +161,11 @@ function threadNameSet(params) {
   if (!name) {
     throw gitError("missing_thread_name", "A thread name is required.");
   }
+
+  if (typeof sendCodexRequest !== "function") {
+    throw gitError("thread_rename_unavailable", "The local Codex connection is unavailable.");
+  }
+  await sendCodexRequest("thread/name/set", { threadId, name });
 
   return { threadId, thread_id: threadId, name, title: name };
 }
@@ -184,9 +187,8 @@ async function gitStatus(cwd) {
   const localOnlyCommitCount = await countLocalOnlyCommits(cwd, { detached: snapshot.detached }).catch(() => 0);
   const state = computeState(dirty, ahead, behind, snapshot.detached, noUpstream);
   const canPush = hasPushRemote && hasHeadCommit && (ahead > 0 || noUpstream) && !snapshot.detached;
-  const diff = await repoDiffTotals(cwd, {
+  const diff = await repoDiffTotals(snapshot.repoRoot || cwd, {
     tracking: snapshot.tracking,
-    fileLines: snapshot.fileLines,
   }).catch(() => ({ additions: 0, deletions: 0, binaryFiles: 0 }));
 
   return {
@@ -267,17 +269,14 @@ async function gitInit(cwd) {
 // ─── Git Diff ─────────────────────────────────────────────────
 
 async function gitDiff(cwd) {
+  cwd = await resolveRepoRoot(cwd);
   const porcelain = await git(cwd, "status", "--porcelain=v1", "-b");
   const lines = porcelain.trim().split("\n").filter(Boolean);
   const branchLine = lines[0] || "";
-  const fileLines = lines.slice(1);
   const tracking = parseTrackingFromStatus(branchLine);
   const baseRef = await resolveRepoDiffBase(cwd, tracking);
   const trackedPatch = await gitDiffAgainstBase(cwd, baseRef);
-  const untrackedPaths = fileLines
-    .filter((line) => line.startsWith("?? "))
-    .map((line) => line.substring(3).trim())
-    .filter(Boolean);
+  const untrackedPaths = await repoUntrackedPaths(cwd);
   const untrackedPatch = await diffPatchForUntrackedFiles(cwd, untrackedPaths);
   const patch = [trackedPatch.trim(), untrackedPatch.trim()].filter(Boolean).join("\n\n").trim();
   return { patch };
@@ -2349,10 +2348,7 @@ function scopedLocalCheckoutPath(checkoutRootPath, projectRelativePath) {
 async function repoDiffTotals(cwd, context) {
   const baseRef = await resolveRepoDiffBase(cwd, context.tracking);
   const trackedTotals = await diffTotalsAgainstBase(cwd, baseRef);
-  const untrackedPaths = context.fileLines
-    .filter((line) => line.startsWith("?? "))
-    .map((line) => line.substring(3).trim())
-    .filter(Boolean);
+  const untrackedPaths = await repoUntrackedPaths(cwd);
   const untrackedTotals = await diffTotalsForUntrackedFiles(cwd, untrackedPaths);
 
   return {
@@ -2360,6 +2356,13 @@ async function repoDiffTotals(cwd, context) {
     deletions: trackedTotals.deletions + untrackedTotals.deletions,
     binaryFiles: trackedTotals.binaryFiles + untrackedTotals.binaryFiles,
   };
+}
+
+// Porcelain collapses new directories and quotes filenames. Ask Git for the
+// individual paths so the summary and Changes patch include every new file.
+async function repoUntrackedPaths(repoRoot) {
+  const output = await git(repoRoot, "ls-files", "--others", "--exclude-standard", "-z");
+  return output.split("\0").filter(Boolean);
 }
 
 // Uses upstream when available; otherwise falls back to commits not yet present on any remote.
