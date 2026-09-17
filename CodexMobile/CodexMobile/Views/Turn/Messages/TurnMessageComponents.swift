@@ -288,7 +288,7 @@ func timelineDisplayWindow(
     for message: CodexMessage,
     expansionLevel: Int = 0
 ) -> TimelineTextClippingPolicy.DisplayWindow {
-    let rawText = message.text
+    let rawText = timelineActionText(for: message)
     if message.isStreaming, isTimelineStreamingPlaceholder(rawText) {
         return TimelineTextClippingPolicy.DisplayWindow(text: "", isPartial: false, hiddenByteCount: 0)
     }
@@ -322,12 +322,13 @@ private func timelineTrimmedDisplaySource(_ text: String) -> String {
     return text
 }
 
-// Keeps user actions faithful to the underlying message even when display text is clipped.
+// Shares full presentation text with copy/selection before the timeline clips or splits it.
 func timelineActionText(for message: CodexMessage) -> String {
     if message.isStreaming, isTimelineStreamingPlaceholder(message.text) {
         return ""
     }
-    return message.text
+    guard message.role == .assistant else { return message.text }
+    return AssistantMemoryCitationParser.visibleText(in: message.text, isStreaming: message.isStreaming)
 }
 
 // Context-menu actions may receive the full unclipped row. Avoid trimming huge strings while
@@ -769,36 +770,34 @@ struct MessageRow: View, Equatable {
                 constrainsToAvailableWidth: true,
                 animatesReveal: showsStreamingAnimations
             )
-            .uiKitContextMenu {
+            // Keep streaming layout in the timeline's SwiftUI tree. A nested
+            // hosting controller can measure before the reveal adopts a delta,
+            // leaving the next tool row positioned at the old text height.
+            .contextMenu {
                 streamingAssistantTextMenu(text: actionText)
             }
         }
     }
 
-    private func streamingAssistantTextMenu(text: String) -> UIMenu {
-        guard let selectableText = timelineSelectableActionText(text) else {
-            return UIMenu()
-        }
-
-        return UIMenu(children: [
-            UIAction(
-                title: "Select Text",
-                image: RemodexIcon.menuUIImage(systemName: "text.cursor")
-            ) { _ in
+    @ViewBuilder
+    private func streamingAssistantTextMenu(text: String) -> some View {
+        if let selectableText = timelineSelectableActionText(text) {
+            Button {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 selectableTextSheet = SelectableMessageTextSheetState(
                     contentKind: .streamingAssistantMarkdown,
                     text: selectableText
                 )
-            },
-            UIAction(
-                title: "Copy",
-                image: RemodexIcon.menuUIImage(systemName: "doc.on.doc")
-            ) { _ in
+            } label: {
+                Label("Select Text", systemImage: "text.cursor")
+            }
+            Button {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 UIPasteboard.general.string = selectableText
-            },
-        ])
+            } label: {
+                Label("Copy", systemImage: "doc.on.doc")
+            }
+        }
     }
 
     private func expandVisibleText() {
