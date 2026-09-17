@@ -253,12 +253,7 @@ struct ContentView: View {
                 syncDisplayIsland()
             }
             .onReceive(NotificationCenter.default.publisher(for: RemodexQuickActionCenter.didReceiveQuickAction)) { notification in
-                _ = RemodexQuickActionCenter.consumePendingAction()
-                guard let action = notification.userInfo?["action"] as? RemodexQuickAction else {
-                    return
-                }
-                pendingQuickAction = action
-                routePendingQuickActionIfNeeded()
+                handleQuickActionNotification(notification)
             }
     }
 
@@ -1261,6 +1256,15 @@ struct ContentView: View {
 
         pendingQuickAction = nil
         handleQuickAction(action)
+    }
+
+    private func handleQuickActionNotification(_ notification: Notification) {
+        _ = RemodexQuickActionCenter.consumePendingAction()
+        guard let action = notification.userInfo?["action"] as? RemodexQuickAction else {
+            return
+        }
+        pendingQuickAction = action
+        routePendingQuickActionIfNeeded()
     }
 
     private func handleQuickAction(_ action: RemodexQuickAction) {
